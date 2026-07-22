@@ -324,7 +324,10 @@ baseline 维持 HYPE 静态配置。判定报告见
 （baseline vs 双开组合）+ 遥测事件级归因；组合被拒时拆单机制以纯配置 A/B 重跑（不重锁）。
 **uptime 判据修订为绝对值 ≥80%**（替代原 ≤3pp 相对判据，release owner 2026-07-22）。
 设计、红线（SIP-5A 带内 cap、无迟滞、guard fail-open）与预注册判据全文见
-[22-maker-stage3v1-guard-design.md](22-maker-stage3v1-guard-design.md)。
+[22-maker-stage3v1-guard-design.md](22-maker-stage3v1-guard-design.md)；
+canary 与 A/B 执行手册见
+[23-maker-stage3v1-live-ab-runbook.md](23-maker-stage3v1-live-ab-runbook.md)
+（2026-07-22 冻结 commit 45311e7、配置对与授权文本）。
 
 **Round 1 → Round 2（2026-07-23 release owner 决定）**：Round 1（enter=6/exit=3）
 8 臂中期读数——非线性 skew 达标（p95 |pos| 降 50–67%、零 uptime 代价，判定为
