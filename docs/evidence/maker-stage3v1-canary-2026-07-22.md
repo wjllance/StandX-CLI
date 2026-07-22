@@ -109,3 +109,18 @@ A/B 启动准备：env 两条配置路径已改指 stage3v1 配置对、
 实测通过（HTTPS 200，容器 host 网络同源）。
 判定按 [22-maker-stage3v1-guard-design.md](../22-maker-stage3v1-guard-design.md)
 预注册判据执行。
+
+## A/B 启动（2026-07-22T17:52Z）
+
+- `sudo docker compose --profile ab-hype up -d`（容器 `standx-maker-stage2-ab-hype`，
+  镜像按 5a063d7 构建，策略源码与冻结 commit 45311e7 逐字节一致；
+  entrypoint 安装 deadman alert 后启动编排器）。启动前独立复核：无其他
+  A/B 容器、无手工 live maker、`orders=[] positions=[]`。
+- 首臂 baseline：`stage2-baseline-20260722T175240Z-49c0b58d29b4`
+  （config hash `49c0b58d29b4…` = stage3v1 baseline），
+  `FIRST_ARM=baseline` 修正生效，无 v0 式误启动。
+- 首臂健康：live 双边报价正常（cycle 推进、place/cancel/hold 链路正常）、
+  `guard_enabled=false`（baseline 双开关全关，guard 外部字段为 null）、
+  线性 skew 正常（pos 0.2 → skew_shift_bps=1.6）、OpenObserve 实时上传
+  正常（checkpoint 持续增长）。臂长 4h（`STANDX_STAGE2_ARM_SECONDS=14400`），
+  SIGUSR1 wind-down 换臂。
