@@ -79,9 +79,33 @@ Manifest：除 `baseline_eligible` 外全部 checks 通过；
 
 ## Candidate paper run
 
-- （35 分钟 paper run 进行中，完成后回填：run_id、cycle 完整性、manifest
-  validity。）
+- 首轮 `stage3v1-paper-20260722T163530Z`（35 分钟，749 cycle_summary、25 笔
+  paper fill、零 panic/不变量违规、guard 激活 207/749 cycles ≈27.6%、
+  基线与超额背离工作正常）：行为正确但 manifest `lifecycle_stopped`
+  缺失——根因是采集命令用了 `timeout -s TERM`（默认对整个进程组发信号，
+  tee 链先死导致停止序列事件未落盘），属本地采集方式问题而非运行缺陷，
+  仅作过程参考。
+- 重跑 `stage3v1-paper-20260722T171526Z`（`timeout --foreground` 修正信号
+  链，35 分钟 / exit 0）：762 cycle_summary、15 笔 paper fill、lifecycle
+  started+stopped 齐全、guard 激活 258/762 cycles ≈33.9%（122 条转换
+  事件）：**manifest `valid: true`，baseline_eligible=true**。
+
+**冒烟观察（A/B 预期管理）**：两轮 paper 时段均为趋势行情
+（57.8→58.3+），guard 激活占比 28–34%，显著高于 lag 数据"仅跳变"口径的
+~0.7%/天预算——单边行情整段激活是设计内行为（docs/22 冒烟校准已预期），
+但若 A/B candidate 臂遇到同等 guard-hot 时段，tw-uptime ≥80% 门槛与
+激活预算判据将承压；按预注册规则超预算臂照跑、记录为设计缺陷输入。
 
 ## 判定
 
-（待 paper run 与 webhook 确认后回填。）
+Gate 重验通过项：离线工程证据、webhook 可达（操作人已确认）、
+ws-command 关联链、受控断流 fail-safe 序列（含 guard 基差无闩锁专项
+确认）、candidate paper 长跑 manifest 有效（baseline_eligible=true）、
+账面独立复核（各轮后 `orders=[] positions=[]`）。
+A/B 启动准备：env 两条配置路径已改指 stage3v1 配置对、
+`STANDX_STAGE2_FIRST_ARM` 已由 v0 残留的 candidate 修正为 baseline、
+镜像按当前 HEAD 重建（策略源码与 45311e7 逐字节一致）、容器内
+`STANDX_STAGE2_VALIDATE_ONLY=1` 通过（配置对哈希匹配）、宿主 HL 连通性
+实测通过（HTTPS 200，容器 host 网络同源）。
+判定按 [22-maker-stage3v1-guard-design.md](../22-maker-stage3v1-guard-design.md)
+预注册判据执行。
