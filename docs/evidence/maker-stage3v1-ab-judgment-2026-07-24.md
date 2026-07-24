@@ -148,3 +148,25 @@ guard 状态机（模拟器先经实测校验：enter6/exit3 下模拟激活率�
   需改核心代码并重锁 gate。
 - **已知代价**：激活率 ~1% 后 guard 的经济收益在统计上不可测量，此后
   定位为"成本有界的尾部保险"，判定只看成本侧（uptime/撤单不受威胁）。
+
+## 拆单 A/B 启动记录（skew 单开，2026-07-24）
+
+- 授权文本（release record，release owner 2026-07-24 会话中给出）：
+
+  > 授权执行 HYPE-USD size=0.1 max_position=1.0 的阶段3v1拆单 nonlinear_skew 单开 4小时A/B
+
+- 冻结配置对（编排器 preflight 新增 case (e) 单 nonlinear_skew 翻转，
+  case (d) 回归通过、guard 单开半翻转正确拒绝）：
+  - baseline `examples/maker-stage3v1-hype-baseline.toml` sha256
+    `49c0b58d29b4f9f220683d919748e848a0984c15db283b3a27c2efd16a6bb754`（沿用）
+  - candidate `examples/maker-stage3v1-hype-skewonly.toml` sha256
+    `8569c74eef271c493afe6f3d57dc0670c7e3c12296edfae5a49c3f63d5a1e90a`
+    （与 baseline 恰一行 `[nonlinear_skew].enabled` 差异）
+- 规模：**快速验证——3 对臂（~24h）判定目标，4 对臂（~32h）硬上限**
+  （release owner 2026-07-24）；判据沿用 22 号文档，撤单 +20% 与 guard
+  预算条对无 guard 臂自然失效，遇纯趋势窗判 PnL。
+- 启动前置：残余 +0.1 多头已由操作人手动平仓（启动前复核 FLAT）、
+  orders=[]、无手工 maker；镜像按 f3adb9b 重建（策略源码与 45311e7
+  一致），容器内 validate-only 通过。
+- 首臂：`stage2-baseline-20260724T090811Z-49c0b58d29b4`（baseline 先行），
+  2026-07-24T09:08Z 起跑，live 健康。
