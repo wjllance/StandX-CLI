@@ -105,7 +105,11 @@ fi
 #       so (b) also rejects either config when those pairs disagree — that
 #       mismatch must fail here, not at arm start; or
 #   (c) the enabled assignment inside [size_skew], with baseline false,
-#       candidate true, and adaptive_spread disabled in both arms.
+#       candidate true, and adaptive_spread disabled in both arms; or
+#   (d) the enabled assignments inside [nonlinear_skew] AND [external_guard]
+#       flipping false -> true together (stage-3 v1 combined pair); or
+#   (e) the enabled assignment inside [nonlinear_skew] only (stage-3 v1
+#       split pair), with external_guard disabled in both arms.
 python3 - "$baseline_config" "$candidate_config" <<'PY' || exit 64
 from pathlib import Path
 import re
@@ -241,11 +245,23 @@ elif "enabled = false" in baseline and "enabled = false" in candidate:
             and baseline_enabled["external_guard"] is False
             and candidate_enabled["external_guard"] is True
         )
-        if not (size_skew_toggle_only or combined_toggle_only):
+        # (e) stage-3 v1 split pair: only [nonlinear_skew].enabled flips.
+        nonlinear_toggle_only = (
+            baseline_size_norm == candidate_size_norm
+            and adaptive_off_both
+            and baseline_enabled["size_skew"] is False
+            and candidate_enabled["size_skew"] is False
+            and baseline_enabled["nonlinear_skew"] is False
+            and candidate_enabled["nonlinear_skew"] is True
+            and baseline_enabled["external_guard"] == candidate_enabled["external_guard"]
+            and candidate_enabled["external_guard"] is not True
+        )
+        if not (size_skew_toggle_only or combined_toggle_only
+                or nonlinear_toggle_only):
             raise SystemExit(
                 "stage2 arm configs differ outside adaptive_spread.enabled / "
                 "spread_bps / size_skew.enabled / "
-                "nonlinear_skew.enabled+external_guard.enabled"
+                "nonlinear_skew.enabled(+external_guard.enabled)"
             )
 else:
     raise SystemExit(
