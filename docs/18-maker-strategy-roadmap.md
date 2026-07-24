@@ -311,9 +311,17 @@ peak-to-trough `vol_bps`）和当前 touch spread。markout/toxicity 与滚动 l
 
 ## 阶段 3：非线性库存控制
 
-当前状态：`v1_combined_implementing`（2026-07-22 立项）。v0 判定 `rejected_uptime_cost`
-（2026-07-22）：6 臂实盘 A/B 完成，尾部治理达标（p95 |position| 降 40–62%、≥70% 仓时间
-清零、退出成本未恶化），但二值加仓侧压制使双边 uptime 降 43–80pp，按预注册判据不晋级；
+当前状态：`v1_split_skew_ab`（2026-07-24 立项）。v1 组合候选判定
+`rejected_split_branch`（2026-07-24，release owner 裁决）：8 臂 32h 实盘
+A/B（baseline/candidate 各 4 臂）完成，8 判据 6 达标、撤单率 pair#3
++54% 未达（guard 迟滞切换 churn）、PnL 不可判（无纯趋势窗）；组合不晋级，
+按预注册分支拆单——nonlinear_skew 单开快速 A/B（3 对臂目标 / 4 对硬
+上限，不重锁）；guard 阈值按反事实回放证据冻结 enter=10/exit=5 备后续
+重启，本轮不跑。判定报告与反事实数据见
+[maker-stage3v1-ab-judgment-2026-07-24.md](evidence/maker-stage3v1-ab-judgment-2026-07-24.md)。
+v0 判定 `rejected_uptime_cost`（2026-07-22）：6 臂实盘 A/B 完成，尾部治理
+达标（p95 |position| 降 40–62%、≥70% 仓时间清零、退出成本未恶化），但
+二值加仓侧压制使双边 uptime 降 43–80pp，按预注册判据不晋级；
 baseline 维持 HYPE 静态配置。判定报告见
 [maker-stage3-ab-judgment-2026-07-22.md](evidence/maker-stage3-ab-judgment-2026-07-22.md)。
 
