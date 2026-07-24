@@ -170,3 +170,32 @@ guard 状态机（模拟器先经实测校验：enter6/exit3 下模拟激活率�
   一致），容器内 validate-only 通过。
 - 首臂：`stage2-baseline-20260724T090811Z-49c0b58d29b4`（baseline 先行），
   2026-07-24T09:08Z 起跑，live 健康。
+
+### 事件：auth token 过期致首臂作废与 A/B 中断（2026-07-24 09:24Z，已恢复）
+
+- **经过**：maker 于 09:09Z 发出 `token_expiry_critical` 预警（token
+  09:24:03Z 到期，预警提前量 ~15 分钟）；操作人未在窗口内完成重新登录。
+  09:24Z token 失效 → 连续 3 次 `Authentication required` cycle 错误 →
+  fail-safe 停机；**停机时 maker cleanup 同样因认证失败未能撤单**
+  （`residual_orders` critical），编排器判臂提前退出 critical stop
+  （exit 75），A/B 中断约 4.8 小时。
+- **暴露**：停机期间场馆留有 1 条残余 sell 挂单（58.863，0.1）+
+  +0.1 HYPE 多头（臂内 2 笔成交净额），名义合计 ~$12，风险有界。
+- **处置（2026-07-24 14:0xZ，操作人重新登录后）**：独立查询确认残余
+  状态 → `order cancel-all HYPE-USD` 撤空 → 经操作人授权执行
+  reduce-only 市价 sell 0.1 平仓 → 复核 orders=[] positions=[]。
+  中途一次 401 插曲：首次重登疑似未含私钥（账户接口 401、公共接口
+  正常），重新完整登录后恢复。
+- **作废臂**：`stage2-baseline-20260724T090811Z`（348 cycles，2 fills）
+  manifest 已显式 `invalidate`（reason 记录于 manifest），不进入任何
+  比较窗口。
+- **恢复**：A/B 于 14:14Z 重启，新 baseline 首臂
+  `stage2-baseline-20260724T141428Z-49c0b58d29b4`，启动前置复核
+  FLAT + orders=[]，live 健康。
+- **教训与流程修订**：① 启动 A/B 前置必须包含 token 剩余有效期检查
+  （`standx auth status`，剩余 < 实验窗口长度时先重新登录）——已补入
+  [23-maker-stage3v1-live-ab-runbook.md](../23-maker-stage3v1-live-ab-runbook.md)；
+  ② token 预警提前量 ~15 分钟对无人值守窗口太短，7 天期 token 应在
+  启动前主动刷新而非依赖预警；③ cleanup 依赖有效认证——auth 失效路径
+  下 fail-closed 只能保证"不再开新仓"，残余单撤除依赖操作人，runbook
+  应急章节已覆盖本次处置路径。
