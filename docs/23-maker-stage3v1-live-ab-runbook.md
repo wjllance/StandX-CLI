@@ -57,6 +57,12 @@ release record contains this exact authorization:
 - 场馆 metadata 沿用 21 号手册 2026-07-21 核对值
   （`price_tick_decimals=3`、`qty_tick_decimals=2`、`min_order_qty=0.1`），
   A/B 启动前用 `standx -o json market symbols` 复核一次。
+- **auth token 有效期前置（2026-07-24 事件教训）**：A/B 启动前必须
+  `standx auth status` 确认 token 剩余有效期覆盖计划的采集窗口（多对
+  4h 臂 + 余量），不足则先 `standx auth login`（含私钥）刷新再启动；
+  不要依赖 maker 的 `token_expiry_critical` 预警（提前量仅 ~15 分钟，
+  无人值守窗口内不足以响应）。token 失效的连带后果是 cleanup 也无法
+  撤单（认证依赖），残余单/仓位只能待重新登录后手动处置。
 - 离线证据（2026-07-22，commit 45311e7）：workspace tests 全绿
   （cli 198 / maker 179 / sdk 75 / integration 13+31+2，2 个 credential
   e2e 照旧 ignored）；strict Clippy 干净；`cargo fmt --check` 通过；
