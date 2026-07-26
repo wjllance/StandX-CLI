@@ -76,3 +76,16 @@ enter=10/exit=5 把激活率压回预算线内、撤单 churn 结构性消除，
 （激活集中在大跳档而非噪声）。晋级后 guard 并入生产基线（与 skew
 共存），半衰期评估与 v1.1 备选按其证据另行立项；被拒则 guard 归档，
 阶段 3-guard 关闭。
+
+## 启动记录（2026-07-26）
+
+- 授权文本（release record，release owner 2026-07-25 会话中给出）：
+
+  > 授权执行 HYPE-USD size=0.1 max_position=1.0 的阶段3-guard enter10/exit5 单开 4小时A/B
+
+- 启动前置（含 2026-07-24 token 事件后的新前置）：`standx auth status`
+  token 剩余 132h（覆盖采集窗口）；orders=[] positions=[]；无其他
+  live maker；镜像按 01e914a 重建（策略源码与 45311e7 一致）；容器内
+  `STANDX_STAGE2_VALIDATE_ONLY=1` 通过（配置对哈希匹配）。
+- 首臂：`stage2-baseline-20260726T015414Z-a396eb8209c6`（baseline 先行，
+  skew 在基线中生效、guard 关闭），2026-07-26T01:54Z 起跑，live 健康。
