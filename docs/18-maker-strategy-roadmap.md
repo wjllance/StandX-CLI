@@ -325,6 +325,11 @@ v1 组合 `rejected_split_branch`（07-24）→ v1 拆单 skew 单开
 （无纯趋势窗）。判定报告见
 [maker-stage3v1-skew-ab-judgment-2026-07-25.md](evidence/maker-stage3v1-skew-ab-judgment-2026-07-25.md)。
 下一阶段：5-b（安全轨二级，扩大规模前置）。
+**阶段 3-guard 独立立项（2026-07-25）**：external_guard 以冻结参数
+enter=10/exit=5 重验（反事实：激活 0.2–1.5%、转换 2–4/h，回到预算线内），
+基线继承 skew 基线，纯配置 A/B 不重锁（编排器 case (f)），判据以成本侧 +
+信号质量为主（尾部保险定位，PnL 不作晋级条件）。设计与预注册判据见
+[24-maker-guard-spinoff-design.md](24-maker-guard-spinoff-design.md)。
 v0 判定 `rejected_uptime_cost`（2026-07-22）：6 臂实盘 A/B 完成，尾部治理
 达标（p95 |position| 降 40–62%、≥70% 仓时间清零、退出成本未恶化），但
 二值加仓侧压制使双边 uptime 降 43–80pp，按预注册判据不晋级。判定报告见
