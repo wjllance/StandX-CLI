@@ -109,7 +109,10 @@ fi
 #   (d) the enabled assignments inside [nonlinear_skew] AND [external_guard]
 #       flipping false -> true together (stage-3 v1 combined pair); or
 #   (e) the enabled assignment inside [nonlinear_skew] only (stage-3 v1
-#       split pair), with external_guard disabled in both arms.
+#       split pair), with external_guard disabled in both arms; or
+#   (f) the enabled assignment inside [external_guard] only (guard spinoff
+#       pair), with nonlinear_skew equal in both arms (it may be enabled in
+#       both as the inherited stage-3 baseline) and guard params identical.
 python3 - "$baseline_config" "$candidate_config" <<'PY' || exit 64
 from pathlib import Path
 import re
@@ -256,8 +259,20 @@ elif "enabled = false" in baseline and "enabled = false" in candidate:
             and baseline_enabled["external_guard"] == candidate_enabled["external_guard"]
             and candidate_enabled["external_guard"] is not True
         )
+        # (f) guard spinoff pair: only [external_guard].enabled flips;
+        #     [nonlinear_skew] may be true in BOTH arms (inherited stage-3
+        #     accepted baseline). Guard params must be byte-identical.
+        guard_toggle_only = (
+            baseline_size_norm == candidate_size_norm
+            and adaptive_off_both
+            and baseline_enabled["size_skew"] is False
+            and candidate_enabled["size_skew"] is False
+            and baseline_enabled["nonlinear_skew"] == candidate_enabled["nonlinear_skew"]
+            and baseline_enabled["external_guard"] is False
+            and candidate_enabled["external_guard"] is True
+        )
         if not (size_skew_toggle_only or combined_toggle_only
-                or nonlinear_toggle_only):
+                or nonlinear_toggle_only or guard_toggle_only):
             raise SystemExit(
                 "stage2 arm configs differ outside adaptive_spread.enabled / "
                 "spread_bps / size_skew.enabled / "
