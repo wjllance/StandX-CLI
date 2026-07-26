@@ -79,7 +79,7 @@ chunk。在此边界内，实盘数据采集不再需要逐阶段的 paper 长�
 | 5-a | 安全轨一级 | 实盘运维件 | emergency cancel 操作人、残余仓位手动处置流程 | 与阶段 2 renewed canary 一并完成 |
 | 2 | alpha | 波动驱动 spread / refresh（v0 阶梯） | spread 控制器、时间窗波动 | 时间片 A/B 风险改善，收益/uptime 不越过退化线 |
 | 4 | 已终止（07-20） | 漂移感知报价 | 加宽 A/B 判负记录 | 恒宽 live 显著为负，条件化 credit 坍塌，回设计储备 |
-| 3 | alpha（当前，已立项 07-20） | 库存控制器（v0 size skew，size=venue min 时退化为加仓侧压制） | 加仓侧数量缩减/压制 | 尾部库存显著下降，退出成本和敞口不恶化 |
+| 3 | accepted（07-25，v1 拆单 nonlinear_skew） | 库存控制器（非线性 price skew） | 加仓侧中心非线性前移（更陡但不停） | p95 尾部 -29%、mo30 4/4 对改善 ~25%、uptime/撤单无污染；PnL 未判项保留 |
 | 5-b | 安全轨二级 | 分级异常与退出政策（剩余范围） | trim/emergency typed 分离、flatten（默认关）、配置拆名 | 扩大规模的前置 |
 
 ## 统一验收口径
@@ -311,18 +311,23 @@ peak-to-trough `vol_bps`）和当前 touch spread。markout/toxicity 与滚动 l
 
 ## 阶段 3：非线性库存控制
 
-当前状态：`v1_split_skew_ab`（2026-07-24 立项）。v1 组合候选判定
-`rejected_split_branch`（2026-07-24，release owner 裁决）：8 臂 32h 实盘
-A/B（baseline/candidate 各 4 臂）完成，8 判据 6 达标、撤单率 pair#3
-+54% 未达（guard 迟滞切换 churn）、PnL 不可判（无纯趋势窗）；组合不晋级，
-按预注册分支拆单——nonlinear_skew 单开快速 A/B（3 对臂目标 / 4 对硬
-上限，不重锁）；guard 阈值按反事实回放证据冻结 enter=10/exit=5 备后续
-重启，本轮不跑。判定报告与反事实数据见
-[maker-stage3v1-ab-judgment-2026-07-24.md](evidence/maker-stage3v1-ab-judgment-2026-07-24.md)。
+当前状态：`accepted`（2026-07-25，release owner 裁决，保留 PnL 未判项）。
+nonlinear_skew（boost=3.0 cap=12.0）并入 HYPE 生产基线——新冻结基线配置
+为 `examples/maker-stage3v1-hype-skewonly.toml`（sha256
+`8569c74eef271c493afe6f3d57dc0670c7e3c12296edfae5a49c3f63d5a1e90a`），
+后续 alpha 阶段按基线继承规则在其上构建；全部自适应能力关闭 ≡ 原始静态
+策略的等价测试约束不变。guard（external_guard）以冻结参数 enter=10 /
+exit=5 归档备后续独立立项（反事实证据见 v1 判定报告），半衰期与"事件
+加宽" v1.1 备选随之归档。判定链：v0 `rejected_uptime_cost`（07-22）→
+v1 组合 `rejected_split_branch`（07-24）→ v1 拆单 skew 单开
+`accepted`（07-25）：4 对 32h A/B，p95 中位数 -29%、uptime 与 baseline
+无差、撤单 4/4 对更低、mo30 4/4 对改善 ~25%；PnL 严格口径不可判
+（无纯趋势窗）。判定报告见
+[maker-stage3v1-skew-ab-judgment-2026-07-25.md](evidence/maker-stage3v1-skew-ab-judgment-2026-07-25.md)。
+下一阶段：5-b（安全轨二级，扩大规模前置）。
 v0 判定 `rejected_uptime_cost`（2026-07-22）：6 臂实盘 A/B 完成，尾部治理
 达标（p95 |position| 降 40–62%、≥70% 仓时间清零、退出成本未恶化），但
-二值加仓侧压制使双边 uptime 降 43–80pp，按预注册判据不晋级；
-baseline 维持 HYPE 静态配置。判定报告见
+二值加仓侧压制使双边 uptime 降 43–80pp，按预注册判据不晋级。判定报告见
 [maker-stage3-ab-judgment-2026-07-22.md](evidence/maker-stage3-ab-judgment-2026-07-22.md)。
 
 **v1 组合候选（release owner 2026-07-22 裁决）**：非线性 price skew（"更陡但不停"）与
