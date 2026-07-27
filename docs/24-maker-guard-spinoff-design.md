@@ -1,5 +1,9 @@
 # Guard 独立立项（阶段 3-guard）：enter=10/exit=5 防御门纯配置 A/B 设计与判据预注册
 
+**状态：accepted（2026-07-27，release owner 裁决）——guard 并入 HYPE
+生产基线（与 skew 共存），阶段 3-guard 关闭。判定报告见
+[maker-guard-spinoff-ab-judgment-2026-07-27.md](evidence/maker-guard-spinoff-ab-judgment-2026-07-27.md)。**
+
 2026-07-25 立项（release owner 裁决链：v1 组合 rejected_split_branch →
 拆单 skew accepted → guard 以冻结参数独立立项重验）。
 上游文档：[22-maker-stage3v1-guard-design.md](22-maker-stage3v1-guard-design.md)
