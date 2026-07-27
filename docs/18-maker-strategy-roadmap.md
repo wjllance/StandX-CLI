@@ -312,9 +312,11 @@ peak-to-trough `vol_bps`）和当前 touch spread。markout/toxicity 与滚动 l
 ## 阶段 3：非线性库存控制
 
 当前状态：`accepted`（2026-07-25，release owner 裁决，保留 PnL 未判项）。
-nonlinear_skew（boost=3.0 cap=12.0）并入 HYPE 生产基线——新冻结基线配置
-为 `examples/maker-stage3v1-hype-skewonly.toml`（sha256
-`8569c74eef271c493afe6f3d57dc0670c7e3c12296edfae5a49c3f63d5a1e90a`），
+nonlinear_skew（boost=3.0 cap=12.0）并入 HYPE 生产基线；其后
+external_guard（enter=10/exit=5）经阶段 3-guard 独立立项 accepted
+（2026-07-27）并入——**当前冻结生产基线为
+`examples/maker-guard-hype-candidate.toml`**（skew + guard 双开，sha256
+`6314a37462e3bfda2cb21f14e503fae4d2997dca449f329de80e7ab22be4b9fc`），
 后续 alpha 阶段按基线继承规则在其上构建；全部自适应能力关闭 ≡ 原始静态
 策略的等价测试约束不变。guard（external_guard）以冻结参数 enter=10 /
 exit=5 归档备后续独立立项（反事实证据见 v1 判定报告），半衰期与"事件
@@ -325,11 +327,16 @@ v1 组合 `rejected_split_branch`（07-24）→ v1 拆单 skew 单开
 （无纯趋势窗）。判定报告见
 [maker-stage3v1-skew-ab-judgment-2026-07-25.md](evidence/maker-stage3v1-skew-ab-judgment-2026-07-25.md)。
 下一阶段：5-b（安全轨二级，扩大规模前置）。
-**阶段 3-guard 独立立项（2026-07-25）**：external_guard 以冻结参数
-enter=10/exit=5 重验（反事实：激活 0.2–1.5%、转换 2–4/h，回到预算线内），
-基线继承 skew 基线，纯配置 A/B 不重锁（编排器 case (f)），判据以成本侧 +
-信号质量为主（尾部保险定位，PnL 不作晋级条件）。设计与预注册判据见
-[24-maker-guard-spinoff-design.md](24-maker-guard-spinoff-design.md)。
+**阶段 3-guard 独立立项（2026-07-25）：accepted（2026-07-27，release owner
+裁决）**。external_guard 以冻结参数 enter=10/exit=5 并入 HYPE 生产基线
+（与 skew 共存）——新冻结基线为
+`examples/maker-guard-hype-candidate.toml`（sha256
+`6314a37462e3bfda2cb21f14e503fae4d2997dca449f329de80e7ab22be4b9fc`）。
+3 对 A/B：激活 0.52–1.92%（预算内）、转换 6–22 次（churn 消除）、uptime
+97.0–98.9%、信号质量 94% 跟随 / 1 误报；撤单率机械读超线经分解证实为
+窗口行情驱动非 guard churn。判定报告见
+[maker-guard-spinoff-ab-judgment-2026-07-27.md](evidence/maker-guard-spinoff-ab-judgment-2026-07-27.md)。
+基差半衰期评估与"事件加宽" v1.1 备选按各自证据另行立项。
 v0 判定 `rejected_uptime_cost`（2026-07-22）：6 臂实盘 A/B 完成，尾部治理
 达标（p95 |position| 降 40–62%、≥70% 仓时间清零、退出成本未恶化），但
 二值加仓侧压制使双边 uptime 降 43–80pp，按预注册判据不晋级。判定报告见
