@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     unauthenticated API limit. Only `--pre` needs the API, and it names the rate
     limit explicitly (and honours `GITHUB_TOKEN`) instead of surfacing a bare 403
 
+### Fixed
+- `block list`: removed the `-s` short flag from `--status` (it collided with `--symbol`, and clap panics on the collision in debug builds — `standx block list --help` aborted for anyone not on a release build). `-s` keeps its meaning of `--symbol`, matching `block watch` and every other command; use the long `--status` for the status filter
+- The clap structural check now covers the whole command tree (`Cli::command().debug_assert()`) instead of only the `update` subtree, so a duplicate short flag anywhere fails in CI rather than at a user's `--help`
+
 ## [1.1.0] - 2026-07-28
 
 Maker safety-track tier 2 (stage 5-b), complete net-PnL attribution, and the

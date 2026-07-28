@@ -480,7 +480,9 @@ pub enum BlockCommands {
         #[arg(short, long, default_value = "30")]
         limit: u32,
         /// Filter by status: completed, pending, all
-        #[arg(short, long, default_value = "all")]
+        // Deliberately long-only: `-s` belongs to `--symbol` here and in every
+        // other command, and clap panics in debug builds on the collision.
+        #[arg(long, default_value = "all")]
         status: String,
     },
     /// Watch block trades (polling mode)
@@ -727,6 +729,34 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
 
+    /// Clap's structural checks (duplicate short/long options, bad defaults,
+    /// conflicting ids) only run under `debug_assertions`, so a release binary
+    /// happily ships a collision that panics for anyone on a debug build — that
+    /// is how both the duplicate `--yes` on `update` and the `-s` collision on
+    /// `block list` reached users through manual testing.
+    ///
+    /// Deliberately whole-tree rather than scoped to one subcommand: a scoped
+    /// assert only guards the subtree someone remembered to name, and the
+    /// collision it misses still panics at a user's `--help`.
+    #[test]
+    fn command_tree_passes_clap_debug_assertions() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn block_list_short_s_is_symbol_only() {
+        let cli = Cli::try_parse_from(["standx", "block", "list", "-s", "BTC-USD"])
+            .expect("-s should remain the symbol filter");
+        let Commands::Block { command } = cli.command else {
+            panic!("expected block command");
+        };
+        let BlockCommands::List { symbol, status, .. } = command else {
+            panic!("expected block list command");
+        };
+        assert_eq!(symbol.as_deref(), Some("BTC-USD"));
+        assert_eq!(status, "all");
+    }
+
     #[test]
     fn maker_live_and_canary_read_supervisor_webhook_environment() {
         let command = Cli::command();
@@ -845,26 +875,6 @@ mod tests {
         let cli = Cli::try_parse_from(["standx", "self-update", "--check"])
             .expect("self-update alias should parse");
         assert!(matches!(cli.command, Commands::Update { check: true, .. }));
-    }
-
-    /// Clap's duplicate-option assertion only fires in debug builds, so a
-    /// release-only smoke test cannot catch it — that is exactly how the
-    /// duplicate `--yes` shipped through manual testing. This asserts the update
-    /// subtree specifically.
-    ///
-    /// Scoped rather than whole-tree on purpose: `Cli::command().debug_assert()`
-    /// currently fails on a **pre-existing** collision in `block list`, where
-    /// `-s` is claimed by both `--symbol` and `--status` (so `standx block list
-    /// --help` panics in debug builds today). Fixing that changes a published
-    /// short flag and belongs to its own change.
-    #[test]
-    fn update_subcommand_passes_clap_debug_assertions() {
-        use clap::CommandFactory;
-        Cli::command()
-            .find_subcommand("update")
-            .expect("update subcommand exists")
-            .clone()
-            .debug_assert();
     }
 
     #[test]
