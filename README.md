@@ -81,7 +81,7 @@ cargo install standx-cli
 ```bash
 standx update --check     # compare installed vs latest release, change nothing
 standx update             # download, verify sha256, replace this binary
-standx update --yes       # same, no prompt (for scripts)
+standx --yes update       # same, no prompt (for scripts; also STANDX_AUTO_CONFIRM=true)
 ```
 
 `update` refuses to touch a Homebrew-managed binary — use `brew upgrade
@@ -454,6 +454,7 @@ For local structured log collection and SQL analysis, see
 ```bash
 standx update --check              # report installed vs latest; exit
 standx update                      # verify + replace (prompts unless --yes)
+standx --yes update                # no prompt; required when stdin is not a TTY
 standx update --pre                # allow pre-release candidates
 standx update --force              # reinstall the current version
 standx -o json update --check      # machine-readable check

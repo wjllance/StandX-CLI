@@ -11,8 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`standx update`** (alias `self-update`) — replace the running binary with the
   latest GitHub release. `--check` reports installed vs latest and changes
   nothing; `--pre` considers pre-releases; `--force` reinstalls the current
-  version; `--yes` skips the prompt (required when stdin is not a TTY).
-  `-o json` emits `update_check` / `update_applied`
+  version. Confirmation uses the existing global `--yes` /
+  `STANDX_AUTO_CONFIRM=true` (required when stdin is not a TTY) rather than a
+  second copy of that flag. `-o json` emits `update_check` / `update_applied`
   - The release asset for the running platform is downloaded over TLS, its
     SHA-256 verified against the published `checksums.txt`, and the unpacked
     binary asked for its own `--version` to confirm it matches the release before
@@ -20,7 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     binary untouched
   - Checksum verification covers corruption and truncation, **not** provenance:
     the checksum ships from the same place as the archive. A detached signature
-    would be the next step and is not implemented
+    would be the next step and is not implemented. Because of that, the one place
+    the downloaded binary is executed (the `--version` probe) runs with
+    `env_clear()` and a minimal allow-list, so a hostile release cannot read this
+    process's `STANDX_JWT` / `STANDX_PRIVATE_KEY` / `GITHUB_TOKEN` on the way in
   - A Homebrew-managed install is refused with a pointer to `brew upgrade
     standx-cli`, so the formula and the installed binary cannot silently diverge.
     An unwritable install directory is an error with instructions — the command

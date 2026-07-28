@@ -123,7 +123,7 @@ async fn async_main(args: Vec<String>) {
     };
 
     // Execute command and handle errors
-    match execute_command(cli.command, output, cli.verbose).await {
+    match execute_command(cli.command, output, cli.verbose, cli.yes).await {
         Ok(_) => {
             telemetry.track_command_complete(command_name, true, None);
         }
@@ -233,6 +233,8 @@ async fn execute_command(
     command: Commands,
     output: OutputFormat,
     verbose: bool,
+    // Global --yes / STANDX_AUTO_CONFIRM: the single confirmation source.
+    assume_yes: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Commands::Config { command } => {
@@ -302,12 +304,8 @@ async fn execute_command(
             commands::handle_lag_recorder(symbol, hl_coin, out, flush_secs, status_secs, verbose)
                 .await?;
         }
-        Commands::Update {
-            check,
-            assume_yes,
-            pre,
-            force,
-        } => {
+        Commands::Update { check, pre, force } => {
+            // Confirmation comes from the single global --yes / STANDX_AUTO_CONFIRM.
             commands::handle_update(check, assume_yes, pre, force, output).await?;
         }
     }

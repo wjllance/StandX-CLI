@@ -11,6 +11,12 @@
 //! implemented, and this comment exists so nobody mistakes checksum verification
 //! for provenance verification.
 //!
+//! Because provenance is unverified, the one place this code runs the downloaded
+//! binary (a `--version` probe) does so with `env_clear()` and a minimal
+//! allow-list, so a hostile release cannot read this process's `STANDX_JWT`,
+//! `STANDX_PRIVATE_KEY` or `GITHUB_TOKEN` on its way in. That bounds the damage;
+//! it does not remove the need for signing.
+//!
 //! ## What this deliberately refuses to do
 //!
 //! - It never escalates privileges. An unwritable install path is an error with
@@ -570,13 +576,36 @@ fn install_from_archive(
         std::fs::set_permissions(&unpacked, std::fs::Permissions::from_mode(0o755))
             .context("could not mark the new binary executable")?;
     }
-    // Confirm the thing we are about to install is the version we asked for.
-    // The archive already matched its published checksum; this catches a
-    // mislabeled release before it replaces a working binary.
-    let reported = std::process::Command::new(&unpacked)
-        .arg("--version")
+    // Confirm the thing we are about to install is the version we asked for,
+    // and that it runs on this machine at all (right arch, loadable). The
+    // archive already matched its published checksum; this catches a mislabeled
+    // or unrunnable release before it replaces a working binary.
+    //
+    // The probe runs with a **cleared environment**. This process may hold
+    // `STANDX_JWT`, `STANDX_PRIVATE_KEY`, `GITHUB_TOKEN` and similar; a
+    // compromised release could publish a matching checksum, print the expected
+    // version, and read whatever it inherited. Only the few variables a process
+    // needs to start are passed back in, and none of them are secrets.
+    //
+    // This narrows the blast radius; it does not make the archive trustworthy.
+    // The checksum ships from the same place as the archive, so provenance still
+    // rests on a signature that is not implemented yet (see the module header).
+    let mut probe = std::process::Command::new(&unpacked);
+    probe.arg("--version").env_clear();
+    for key in ["PATH", "HOME", "LANG", "TMPDIR"] {
+        if let Some(value) = std::env::var_os(key) {
+            probe.env(key, value);
+        }
+    }
+    let reported = probe
         .output()
         .context("could not run the downloaded binary to confirm its version")?;
+    if !reported.status.success() {
+        anyhow::bail!(
+            "downloaded binary exited with {} when asked for its version; nothing was installed",
+            reported.status
+        );
+    }
     let reported = String::from_utf8_lossy(&reported.stdout);
     let reported = reported
         .split_whitespace()
