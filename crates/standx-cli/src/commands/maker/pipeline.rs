@@ -208,9 +208,15 @@ pub(super) struct AccountAudit {
     pub(super) positions: Vec<Position>,
     pub(super) filled_orders: Vec<Order>,
     pub(super) trades: Vec<Trade>,
-    /// Funding cashflows since the session start / last cursor. Hourly on this
-    /// venue, so the 30s audit cadence over-samples it comfortably.
-    pub(super) funding: Vec<FundingHistoryEntry>,
+    /// Funding cashflows since session start. Hourly on this venue, so the 30s
+    /// audit cadence over-samples it comfortably.
+    ///
+    /// Deliberately a `Result` the audit does **not** propagate: funding is
+    /// attribution-only, while this same audit backs position reconciliation
+    /// and recovery. A transient failure or a schema change on
+    /// `/api/query_funding_history` must not be able to fail a safety
+    /// reconciliation — it may only mark the attribution incomplete.
+    pub(super) funding: std::result::Result<Vec<FundingHistoryEntry>, String>,
 }
 
 /// Cached, REST-derived account presentation plus the low-frequency full
@@ -336,7 +342,9 @@ pub(super) async fn fetch_account_audit(
         positions: positions?,
         filled_orders: filled_orders?,
         trades: trades?,
-        funding: funding?,
+        // Severity inversion guard: `?` here would let a telemetry endpoint
+        // abort order/position reconciliation.
+        funding: funding.map_err(|error| error.to_string()),
     })
 }
 
@@ -592,6 +600,86 @@ mod tests {
         assert!(state.account_audit_due(recheck + ACCOUNT_AUDIT_INTERVAL));
     }
 
+    /// Adversarial-review fix: funding is attribution-only, but this audit also
+    /// backs position reconciliation and recovery. A funding endpoint failure
+    /// must therefore never fail the audit.
+    #[tokio::test]
+    async fn funding_failure_does_not_fail_the_account_audit() {
+        let _jwt = JwtGuard::set();
+        let mut server = Server::new_async().await;
+        let wrapped = r#"{"code":0,"message":"ok","result":[]}"#;
+        for path in [
+            "/api/query_open_orders",
+            "/api/query_orders",
+            "/api/query_trades",
+        ] {
+            server
+                .mock("GET", path)
+                .match_query(Matcher::Any)
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(wrapped)
+                .create_async()
+                .await;
+        }
+        server
+            .mock("GET", "/api/query_positions")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .create_async()
+            .await;
+        // The one endpoint that is allowed to fail without consequence.
+        server
+            .mock("GET", "/api/query_funding_history")
+            .match_query(Matcher::Any)
+            .with_status(500)
+            .with_body("upstream exploded")
+            .create_async()
+            .await;
+        let client = StandXClient::with_base_url(server.url()).unwrap();
+
+        let audit = fetch_account_audit(&client, "HYPE-USD", 1_784_304_000, 1_784_304_060)
+            .await
+            .expect("a funding failure must not fail the audit");
+        assert!(audit.open_orders.is_empty());
+        assert!(audit.positions.is_empty());
+        assert!(audit.trades.is_empty());
+        let error = audit.funding.expect_err("funding must surface as an error");
+        assert!(error.contains("500"), "{error}");
+    }
+
+    /// Adversarial-review fix: the hard-floor freshness budget is measured from
+    /// the instant the balance was recorded, so the caller must date a refresh
+    /// by when its response arrived — not by when the request was issued.
+    #[test]
+    fn floor_freshness_budget_is_measured_from_the_recorded_instant() {
+        let now = Instant::now();
+        let mut state = LiveAccountPollState::new(balance(), now);
+        assert_eq!(state.balance_age(now), Duration::ZERO);
+        assert_eq!(
+            state.balance_age(now + Duration::from_secs(10)),
+            Duration::from_secs(10)
+        );
+
+        // Recording later (i.e. when the response actually landed) resets the
+        // budget from that later instant, never from the earlier one.
+        let landed = now + Duration::from_secs(12);
+        state.record_balance_refresh(balance(), landed);
+        assert_eq!(state.balance_age(landed), Duration::ZERO);
+        assert_eq!(
+            state.balance_age(landed + BALANCE_FLOOR_MAX_AGE),
+            BALANCE_FLOOR_MAX_AGE
+        );
+        // One second past the budget is stale — this is the comparison the
+        // armed floor makes, so an under-reported age is what would bypass it.
+        assert!(
+            state.balance_age(landed + BALANCE_FLOOR_MAX_AGE + Duration::from_secs(1))
+                > BALANCE_FLOOR_MAX_AGE
+        );
+    }
+
     #[test]
     fn balance_failure_retries_quickly_and_expires_after_stale_limit() {
         let now = Instant::now();
@@ -709,7 +797,7 @@ mod tests {
         assert!(audit.open_orders.is_empty());
         assert!(audit.positions.is_empty());
         assert!(audit.trades.is_empty());
-        assert!(audit.funding.is_empty());
+        assert!(audit.funding.expect("funding fetch succeeded").is_empty());
         poll.record_account_audit(due);
         poll.record_balance_refresh(refreshed_balance.unwrap(), due);
 

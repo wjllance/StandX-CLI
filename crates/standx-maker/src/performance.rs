@@ -316,6 +316,11 @@ pub struct PerformanceSummary {
     /// dropped — an unattributed cashflow makes the attribution incomplete, and
     /// `net_pnl_complete` must say so.
     pub funding_unattributed: u64,
+    /// The session could not establish full funding coverage: a failed history
+    /// fetch, or a page that came back at the caller's limit and may have cut
+    /// older rows. Distinct from `funding_unattributed`, which counts rows we
+    /// *saw* but could not fold in.
+    pub funding_coverage_gap: bool,
     pub net_pnl_complete: bool,
     pub exit_cost_quote: f64,
     pub inventory_mtm_change_quote: f64,
@@ -347,6 +352,7 @@ pub struct PerformanceLedger {
     funding_quote: f64,
     funding_observed: bool,
     funding_unattributed: u64,
+    funding_coverage_gap: bool,
     exit_cost_quote: f64,
     seen_trade_ids: HashSet<u64>,
     costs_by_trade_id: HashMap<u64, ExecutionCosts>,
@@ -386,6 +392,7 @@ impl PerformanceLedger {
             funding_quote: 0.0,
             funding_observed: false,
             funding_unattributed: 0,
+            funding_coverage_gap: false,
             exit_cost_quote: 0.0,
             seen_trade_ids: HashSet::new(),
             costs_by_trade_id: HashMap::new(),
@@ -582,6 +589,14 @@ impl PerformanceLedger {
         self.funding_unattributed = self.funding_unattributed.saturating_add(1);
     }
 
+    /// The caller could not establish full funding coverage for the session
+    /// (fetch failed, or the returned page hit its limit and may be truncated).
+    /// Latching rather than counting: once coverage has a hole, the session's
+    /// funding total is a lower bound for the rest of the run.
+    pub fn record_funding_coverage_gap(&mut self) {
+        self.funding_coverage_gap = true;
+    }
+
     pub fn observe_quote_quality(
         &mut self,
         interval: QuoteQualityInterval,
@@ -665,9 +680,11 @@ impl PerformanceLedger {
             funding_quote: self.funding_quote,
             funding_available: self.funding_observed,
             funding_unattributed: self.funding_unattributed,
+            funding_coverage_gap: self.funding_coverage_gap,
             net_pnl_complete: execution_costs_unavailable == 0
                 && self.funding_observed
-                && self.funding_unattributed == 0,
+                && self.funding_unattributed == 0
+                && !self.funding_coverage_gap,
             exit_cost_quote: self.exit_cost_quote,
             inventory_mtm_change_quote,
             net_pnl_quote,

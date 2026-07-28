@@ -360,3 +360,137 @@ fn finish_verified_cleanup_preserves_or_drops_pending_requests() {
         "Replaced continuity must clear pending request lifecycles"
     );
 }
+
+/// Adversarial-review fix: one post-cleanup snapshot must not be enough to
+/// report the account flat. A fill that lands while cleanup is cancelling can
+/// still be absent from the REST position view, and a false `flat` is the one
+/// outcome nobody gets told about.
+mod post_cleanup_position {
+    use super::super::lifecycle::confirm_venue_position;
+    use super::JwtGuard;
+    use mockito::{Matcher, Server};
+    use standx_sdk::client::StandXClient;
+
+    const TOL: f64 = 0.0005;
+    /// Tests drive the two-snapshot logic without waiting the real 1.5s.
+    const NO_DELAY: std::time::Duration = std::time::Duration::ZERO;
+
+    fn position_body(qty: &str, side: &str) -> String {
+        serde_json::json!([{
+            "id": 1,
+            "symbol": "HYPE-USD",
+            "side": side,
+            "qty": qty,
+            "entry_price": "55.0",
+            "entry_value": "5.5",
+            "holding_margin": "1",
+            "initial_margin": "1",
+            "leverage": "1",
+            "mark_price": "55.0",
+            "margin_asset": "DUSD",
+            "margin_mode": "cross",
+            "position_value": "5.5",
+            "realized_pnl": "0",
+            "required_margin": "1",
+            "status": "open",
+            "upnl": "0",
+            "time": "2026-07-28T00:00:00Z",
+            "created_at": "2026-07-28T00:00:00Z",
+            "updated_at": "2026-07-28T00:00:00Z",
+            "user": "test"
+        }])
+        .to_string()
+    }
+
+    /// A non-flat first read needs no confirmation: it is already actionable.
+    #[tokio::test]
+    async fn non_flat_snapshot_is_returned_immediately() {
+        let _jwt = JwtGuard::set();
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/query_positions")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(position_body("0.1", "sell"))
+            .expect(1)
+            .create_async()
+            .await;
+        let client = StandXClient::with_base_url(server.url()).unwrap();
+
+        let observed = confirm_venue_position(&client, "HYPE-USD", TOL, NO_DELAY).await;
+        assert_eq!(observed, Some(-0.1));
+        mock.assert_async().await;
+    }
+
+    /// The case the single-snapshot version got wrong: the first read is flat
+    /// only because the cancel-race fill has not propagated yet.
+    #[tokio::test]
+    async fn late_fill_after_a_flat_first_read_is_still_handed_off() {
+        let _jwt = JwtGuard::set();
+        let mut server = Server::new_async().await;
+        let flat = server
+            .mock("GET", "/api/query_positions")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .expect(2)
+            .create_async()
+            .await;
+        let client = StandXClient::with_base_url(server.url()).unwrap();
+        let observed_flat = confirm_venue_position(&client, "HYPE-USD", TOL, NO_DELAY).await;
+        assert_eq!(observed_flat, Some(0.0), "two agreeing reads confirm flat");
+        flat.assert_async().await;
+
+        // Same shutdown, but the venue reveals the fill on the second read.
+        let mut server = Server::new_async().await;
+        server
+            .mock("GET", "/api/query_positions")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .expect(1)
+            .create_async()
+            .await;
+        let late = server
+            .mock("GET", "/api/query_positions")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(position_body("0.1", "buy"))
+            .expect(1)
+            .create_async()
+            .await;
+        let client = StandXClient::with_base_url(server.url()).unwrap();
+        let observed = confirm_venue_position(&client, "HYPE-USD", TOL, NO_DELAY).await;
+        assert_eq!(
+            observed,
+            Some(0.1),
+            "a fill revealed by the settlement snapshot must not read as flat"
+        );
+        late.assert_async().await;
+    }
+
+    /// An unreadable venue is `None`, which the caller renders as `unknown` —
+    /// never as flat.
+    #[tokio::test]
+    async fn failed_snapshot_is_unknown_not_flat() {
+        let _jwt = JwtGuard::set();
+        let mut server = Server::new_async().await;
+        server
+            .mock("GET", "/api/query_positions")
+            .match_query(Matcher::Any)
+            .with_status(500)
+            .with_body("nope")
+            .create_async()
+            .await;
+        let client = StandXClient::with_base_url(server.url()).unwrap();
+
+        assert_eq!(
+            confirm_venue_position(&client, "HYPE-USD", TOL, NO_DELAY).await,
+            None
+        );
+    }
+}

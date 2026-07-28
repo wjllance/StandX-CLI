@@ -396,6 +396,14 @@ pub(super) async fn maker_cycle(
             }
         };
         let (audit, refreshed_balance) = tokio::join!(audit_future, balance_future);
+        // Every timestamp below is taken AFTER the joined I/O, not from the
+        // pre-flight `poll_now`. A stalled audit call can hold this join open
+        // for seconds; dating the balance by when the request was *issued*
+        // would report an age smaller than the real one, which is exactly the
+        // direction that lets an armed hard floor read a too-old snapshot as
+        // "no breach". `poll_now` stays what it is used for — deciding whether
+        // the reads were due in the first place.
+        let settled = std::time::Instant::now();
         // Resolve every due read before mutating the current-run ledger. A
         // failed audit must leave this cycle's accounting exactly untouched.
         let audit = match audit {
@@ -404,10 +412,10 @@ pub(super) async fn maker_cycle(
         };
         if let Some(refreshed_balance) = refreshed_balance {
             match refreshed_balance {
-                Ok(balance) => poll.record_balance_refresh(balance, poll_now),
+                Ok(balance) => poll.record_balance_refresh(balance, settled),
                 Err(error) => {
-                    poll.record_balance_refresh_failure(poll_now);
-                    if !poll.balance_is_within_stale_limit(poll_now) {
+                    poll.record_balance_refresh_failure(settled);
+                    if !poll.balance_is_within_stale_limit(settled) {
                         return Err(error.into());
                     }
                     eprintln!(
@@ -423,7 +431,7 @@ pub(super) async fn maker_cycle(
         // on the way out is the fully synchronized one.
         account_floor_stop_reason = account_floor_stop(
             poll.balance(),
-            poll.balance_age(poll_now),
+            poll.balance_age(std::time::Instant::now()),
             stop_equity_below,
             stop_margin_below,
         );
@@ -431,22 +439,38 @@ pub(super) async fn maker_cycle(
         if let Some(audit) = audit {
             // Funding first: it only touches the performance ledger's cashflow
             // accumulator, never positions or orders, so it cannot disturb the
-            // reconciliation below.
-            if audit.funding.len() as u32 >= FUNDING_HISTORY_LIMIT {
-                // No silent caps: a full page means older funding since session
-                // start may have been cut off, so the attribution is suspect.
-                eprintln!(
-                    "⚠️  funding history page is full ({} rows); funding attribution may be truncated",
-                    audit.funding.len()
-                );
+            // reconciliation below. A funding problem never propagates as a
+            // cycle error either — it marks the attribution incomplete instead,
+            // because failing a safety reconciliation over telemetry would be a
+            // severity inversion.
+            match &audit.funding {
+                Ok(rows) => {
+                    if rows.len() as u32 >= FUNDING_HISTORY_LIMIT {
+                        // No silent caps: a full page means older funding since
+                        // session start may have been cut off.
+                        eprintln!(
+                            "⚠️  funding history page is full ({} rows); funding coverage may be truncated",
+                            rows.len()
+                        );
+                        if let Some(performance) = ledger.performance_mut() {
+                            performance.record_funding_coverage_gap();
+                        }
+                    }
+                    apply_funding_history(
+                        ledger,
+                        rows,
+                        symbol,
+                        session_started_at,
+                        poll.applied_funding_ids(),
+                    )?;
+                }
+                Err(error) => {
+                    eprintln!("⚠️  funding history unavailable this audit: {error}");
+                    if let Some(performance) = ledger.performance_mut() {
+                        performance.record_funding_coverage_gap();
+                    }
+                }
             }
-            apply_funding_history(
-                ledger,
-                &audit.funding,
-                symbol,
-                session_started_at,
-                poll.applied_funding_ids(),
-            )?;
             for order in audit.open_orders.iter().chain(audit.filled_orders.iter()) {
                 adopt_order(ledger, order, run_order_prefix)?;
             }

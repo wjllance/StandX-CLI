@@ -120,6 +120,7 @@ scripts/run_maker_observed.sh target/release/standx --output json maker run HYPE
 | **不可换算成本笔数** | `performance_summary.execution_costs_unavailable`（>0 说明有成交的 fee 资产不是 quote/D-quote，或 audit 漏掉） |
 | **funding 现金流合计** | `performance_summary.funding_quote`（负 = 净付出）+ `funding_available` |
 | **未归属 funding 笔数** | `performance_summary.funding_unattributed`（>0 → 有现金流没进净额，见下） |
+| **funding 覆盖缺口** | `performance_summary.funding_coverage_gap`（true → 有一段 funding 根本没读到：拉取失败或分页被截断） |
 | **净 PnL 完整标志** | `performance_summary.net_pnl_complete`（手续费与 funding 都齐才为 true） |
 | 1s / 5s / 30s markout | `performance_summary` |
 | 时间加权双边 uptime | `performance_summary` |
@@ -153,7 +154,10 @@ scripts/run_maker_observed.sh target/release/standx --output json maker run HYPE
   来源（不是推导），在 30 秒 audit 周期里增量拉取并折进 `funding_quote`。
   `qty` 的符号即场馆口径：**负 = 付出，正 = 收取**，与 core 的约定一致，无需翻转。
   无法折算的行（结算资产既不是 quote 也不是其 D 前缀形式，或乱序到达）计入
-  `funding_unattributed` 并清掉 `net_pnl_complete`——不会被静默丢弃。
+  `funding_unattributed` 并清掉 `net_pnl_complete`——不会被静默丢弃。拉取失败或分页
+  达到上限（可能截断更早的行）另计入 `funding_coverage_gap`，同样清掉完整标志。
+  **funding 故障不会中断报价或仓位对账**：同一个 audit 也承担安全对账，让遥测端点
+  拖垮它是严重性倒置。
 - **实测量级（决定了为什么必须接）**：HYPE 是**每小时**结算（不是 8 小时）。
   2026-07-21→27 的 137 小时窗口共 91 期，合计 **-0.006252 DUSD**（70 期付 / 21 期收，
   单期均值 |0.000119|），即 **-0.0011/24h**。对照 guard 轮 baseline 三臂 ~36h 的

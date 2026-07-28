@@ -673,6 +673,7 @@ fn performance_json(summary: &maker::PerformanceSummary) -> serde_json::Value {
         "rebate_quote": summary.rebate_quote,
         "execution_costs_unavailable": summary.execution_costs_unavailable,
         "funding_unattributed": summary.funding_unattributed,
+        "funding_coverage_gap": summary.funding_coverage_gap,
         "funding_quote": summary.funding_quote,
         "funding_available": summary.funding_available,
         "net_pnl_complete": summary.net_pnl_complete,

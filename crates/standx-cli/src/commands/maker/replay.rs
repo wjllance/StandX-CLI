@@ -548,6 +548,7 @@ fn summary_json(trace: &ParsedTrace, result: &ReplayResult) -> serde_json::Value
         "rebate_quote": performance.rebate_quote,
         "execution_costs_unavailable": performance.execution_costs_unavailable,
         "funding_unattributed": performance.funding_unattributed,
+        "funding_coverage_gap": performance.funding_coverage_gap,
         "funding_quote": performance.funding_quote,
         "funding_available": performance.funding_available,
         "net_pnl_complete": performance.net_pnl_complete,
