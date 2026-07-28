@@ -19,6 +19,8 @@ pub(super) struct ShutdownReport<'a> {
     pub(super) total_halted: u64,
     pub(super) sim_position: f64,
     pub(super) last_mark: Option<f64>,
+    /// Positions at or below this magnitude count as flat (stage 5-b handoff).
+    pub(super) qty_tolerance: f64,
     pub(super) feed_handle: Option<tokio::task::JoinHandle<()>>,
     pub(super) account_stream_handle: Option<tokio::task::JoinHandle<()>>,
     pub(super) order_response_handle: Option<tokio::task::JoinHandle<()>>,
@@ -47,6 +49,7 @@ pub(super) async fn shutdown_report(report: ShutdownReport<'_>) -> Result<()> {
         total_halted,
         sim_position,
         last_mark,
+        qty_tolerance,
         feed_handle,
         account_stream_handle,
         order_response_handle,
@@ -91,6 +94,9 @@ pub(super) async fn shutdown_report(report: ShutdownReport<'_>) -> Result<()> {
                 maker::format_decimals(sim_position, cfg.qty_decimals)
             );
         }
+        // The live ending position is deliberately NOT printed here: it is only
+        // authoritative after cleanup, so it belongs to the residual handoff
+        // below (stage 5-b).
     }
     if let Some(handle) = order_response_handle {
         handle.abort();
@@ -114,6 +120,61 @@ pub(super) async fn shutdown_report(report: ShutdownReport<'_>) -> Result<()> {
     let cleanup_note = cleanup_error.as_ref().map_or_else(String::new, |error| {
         format!(" | ⚠️ cleanup failed: {error}")
     });
+
+    // Residual position handoff (stage 5-b), decided only now: an order that
+    // filled while cleanup was cancelling it changes the position, and the
+    // account stream is already gone, so the session ledger cannot be the final
+    // word. Ask the venue; if it will not answer, say so instead of reporting a
+    // ledger snapshot as confirmed.
+    let venue_position = if live {
+        match client.get_positions(Some(symbol)).await {
+            Ok(positions) => match position_for_symbol(&positions, symbol) {
+                Ok(position) => Some(position),
+                Err(error) => {
+                    eprintln!("⚠️  post-cleanup position snapshot unreadable: {error}");
+                    None
+                }
+            },
+            Err(error) => {
+                eprintln!("⚠️  post-cleanup position snapshot failed: {error}");
+                None
+            }
+        }
+    } else {
+        // Paper mode has no venue; the simulation is the authority.
+        Some(sim_position)
+    };
+    let ledger_position = if live { final_position } else { sim_position };
+    let handoff = residual_handoff(venue_position, ledger_position, qty_tolerance);
+    output::emit_residual_position_handoff(
+        output_format,
+        symbol,
+        cycle,
+        output::ResidualHandoffReport {
+            handoff: &handoff,
+            mark: last_mark,
+            qty_decimals: cfg.qty_decimals,
+            exit_reason: &reason,
+        },
+    );
+    // The residual travels with every outbound stop message: an operator away
+    // from the terminal learns about it from the webhook or not at all, and
+    // nothing closes it automatically.
+    let residual_note = match &handoff {
+        ResidualHandoff::Flat => String::new(),
+        ResidualHandoff::Confirmed { position } => format!(
+            " | ⚠️ residual position {} (manual close required)",
+            maker::format_decimals(*position, cfg.qty_decimals)
+        ),
+        ResidualHandoff::Unknown { ledger, venue, .. } => format!(
+            " | 🛑 residual position UNKNOWN (venue={}, ledger={}; check the venue)",
+            venue.map_or_else(
+                || "unavailable".to_string(),
+                |position| maker::format_decimals(position, cfg.qty_decimals)
+            ),
+            maker::format_decimals(*ledger, cfg.qty_decimals)
+        ),
+    };
     if let Some(error) = cleanup_error.as_ref() {
         let message = format!("maker cleanup failed or left residual orders: {error}");
         notifier
@@ -134,14 +195,47 @@ pub(super) async fn shutdown_report(report: ShutdownReport<'_>) -> Result<()> {
             )
             .await;
     }
+    if handoff.needs_operator() {
+        let message = match &handoff {
+            ResidualHandoff::Confirmed { position } => format!(
+                "maker stopped holding {} {} — the maker never auto-flattens; close or hedge it manually ({})",
+                maker::format_decimals(*position, cfg.qty_decimals),
+                symbol,
+                reason
+            ),
+            // Flat is filtered out by needs_operator(); keep the arm explicit.
+            ResidualHandoff::Flat => String::new(),
+            ResidualHandoff::Unknown { reason: cause, .. } => format!(
+                "maker stopped on {symbol} but its final position could NOT be confirmed ({cause}){residual_note} — verify at the venue before starting anything else ({reason})"
+            ),
+        };
+        notifier
+            .risk(
+                RiskNotice {
+                    kind: "residual_position",
+                    severity: "critical",
+                    event: handoff.event(),
+                    message: &message,
+                    symbol,
+                    cycle,
+                    position_before: None,
+                    position_after: venue_position,
+                    expected: Some(ledger.expected_position),
+                    observed: venue_position,
+                },
+                true,
+            )
+            .await;
+    }
     if !matches!(&exit, MakerExit::CtrlC) {
+        let fail_safe_message = format!("{reason}{residual_note}");
         notifier
             .risk(
                 RiskNotice {
                     kind: "fail_safe",
                     severity: "critical",
                     event: "stopped",
-                    message: &reason,
+                    message: &fail_safe_message,
                     symbol,
                     cycle,
                     position_before: None,
@@ -157,7 +251,7 @@ pub(super) async fn shutdown_report(report: ShutdownReport<'_>) -> Result<()> {
         .lifecycle(
             "stopped",
             &format!(
-                "🔴 maker stopped ({}) — {} | {} cycles, {} fills, uptime {:.0}%, PnL {}{}",
+                "🔴 maker stopped ({}) — {} | {} cycles, {} fills, uptime {:.0}%, PnL {}{}{}",
                 reason,
                 symbol,
                 cycle,
@@ -165,6 +259,7 @@ pub(super) async fn shutdown_report(report: ShutdownReport<'_>) -> Result<()> {
                 stats.uptime_pct(),
                 pnl_str,
                 cleanup_note,
+                residual_note,
             ),
             symbol,
             true,
@@ -271,6 +366,19 @@ impl MakerRuntime {
                     args.stop_loss
                 );
             }
+            if args.stop_equity_below > 0.0 || args.stop_margin_below > 0.0 {
+                let mut floors = Vec::new();
+                if args.stop_equity_below > 0.0 {
+                    floors.push(format!("equity <{}", args.stop_equity_below));
+                }
+                if args.stop_margin_below > 0.0 {
+                    floors.push(format!("margin <{}", args.stop_margin_below));
+                }
+                println!(
+                    "│ account floors (hard): {} → fail-safe shutdown, residual handed off",
+                    floors.join(", ")
+                );
+            }
             if args.alert_loss > 0.0
                 || args.alert_inventory_pct > 0.0
                 || args.alert_position_change_pct > 0.0
@@ -347,6 +455,7 @@ impl MakerRuntime {
             cfg,
             symbol,
             notifier,
+            qty_tolerance,
             ..
         } = deps;
         let RuntimeLoopState {
@@ -420,6 +529,7 @@ impl MakerRuntime {
             total_halted,
             sim_position,
             last_mark,
+            qty_tolerance,
             feed_handle,
             account_stream_handle,
             order_response_handle,

@@ -208,6 +208,22 @@ fn ws_snapshot_json(diagnostics: &WsSnapshotDiagnostics) -> serde_json::Value {
     })
 }
 
+/// Which exit policy asked for a reduce-only order this cycle and what
+/// happened to it (stage 5-b). Telemetry only — the plan already decided.
+///
+/// Reported on `cycle_summary` rather than as its own event line so a long
+/// halt cannot flood the stream: the halt is already a per-cycle field, and
+/// counting suppressed exits stays a one-field filter over existing lines.
+#[derive(Clone, Copy, Default)]
+pub(super) struct ExitStatus {
+    /// The exit policy that produced a plan this cycle, if any.
+    pub(super) kind: Option<maker::ExitKind>,
+    /// Whether a reduce-only order was actually submitted this cycle.
+    pub(super) submitted: bool,
+    /// Set when the planned exit was suppressed instead of submitted.
+    pub(super) suppressed: Option<maker::SuppressedExit>,
+}
+
 /// Per-cycle output: one human line + indented actions, or JSON lines.
 pub(super) struct CycleOutput<'a> {
     pub(super) output_format: OutputFormat,
@@ -235,6 +251,8 @@ pub(super) struct CycleOutput<'a> {
     /// Realized quote-center shift in bps (mark vs plan ref_center); covers
     /// linear and nonlinear skew alike. Telemetry only.
     pub(super) skew_shift_bps: f64,
+    /// Stage 5-b: typed exit policy outcome for this cycle.
+    pub(super) exit_status: ExitStatus,
     pub(super) cfg: &'a MakerConfig,
     pub(super) performance: Option<&'a maker::PerformanceSummary>,
 }
@@ -263,6 +281,7 @@ pub(super) fn emit_maker_cycle(output: CycleOutput<'_>) {
         guard_decision,
         external_basis_bps,
         skew_shift_bps,
+        exit_status,
         cfg,
         performance,
     } = output;
@@ -348,37 +367,40 @@ pub(super) fn emit_maker_cycle(output: CycleOutput<'_>) {
             }
             println!(
                 "{}",
-                with_guard_fields(
-                    with_size_skew_fields(
-                        with_spread_fields(
-                            serde_json::json!({
-                                "ts": ts, "cycle": cycle, "mode": mode, "symbol": symbol,
-                                "action": "cycle_summary",
-                                "mark": format_decimals(mark, cfg.price_decimals),
-                                "best_bid": best_bid, "best_ask": best_ask,
-                                "market_source": market_source,
-                                "market_fallback_reason": market_fallback_reason,
-                                "ws_snapshot": ws_snapshot.map(ws_snapshot_json),
-                                "position": position,
-                                "starting_position": starting_position,
-                                "account": account.map(account_json),
-                                "holds": holds, "places": places, "cancels": cancels,
-                                "fills": fills.len(),
-                                "pnl": (pnl * 1e6).round() / 1e6,
-                                "fills_total": stats.fills(),
-                                "uptime_pct": (stats.uptime_pct() * 10.0).round() / 10.0,
-                                "avg_capture_bps": (stats.avg_spread_capture_bps() * 100.0).round() / 100.0,
-                                "performance": performance.map(performance_json),
-                                "halted": halt_vol_bps.is_some(),
-                                "vol_bps": halt_vol_bps.map(|v| (v * 100.0).round() / 100.0),
-                            }),
-                            spread_decision,
+                with_exit_fields(
+                    with_guard_fields(
+                        with_size_skew_fields(
+                            with_spread_fields(
+                                serde_json::json!({
+                                    "ts": ts, "cycle": cycle, "mode": mode, "symbol": symbol,
+                                    "action": "cycle_summary",
+                                    "mark": format_decimals(mark, cfg.price_decimals),
+                                    "best_bid": best_bid, "best_ask": best_ask,
+                                    "market_source": market_source,
+                                    "market_fallback_reason": market_fallback_reason,
+                                    "ws_snapshot": ws_snapshot.map(ws_snapshot_json),
+                                    "position": position,
+                                    "starting_position": starting_position,
+                                    "account": account.map(account_json),
+                                    "holds": holds, "places": places, "cancels": cancels,
+                                    "fills": fills.len(),
+                                    "pnl": (pnl * 1e6).round() / 1e6,
+                                    "fills_total": stats.fills(),
+                                    "uptime_pct": (stats.uptime_pct() * 10.0).round() / 10.0,
+                                    "avg_capture_bps": (stats.avg_spread_capture_bps() * 100.0).round() / 100.0,
+                                    "performance": performance.map(performance_json),
+                                    "halted": halt_vol_bps.is_some(),
+                                    "vol_bps": halt_vol_bps.map(|v| (v * 100.0).round() / 100.0),
+                                }),
+                                spread_decision,
+                            ),
+                            size_skew_decision,
                         ),
-                        size_skew_decision,
+                        guard_decision,
+                        external_basis_bps,
+                        skew_shift_bps,
                     ),
-                    guard_decision,
-                    external_basis_bps,
-                    skew_shift_bps,
+                    exit_status,
                 )
             );
         }
@@ -426,6 +448,13 @@ pub(super) fn emit_maker_cycle(output: CycleOutput<'_>) {
             };
             if let Some(v) = halt_vol_bps {
                 fill_note.push_str(&format!(" ⚡HALT vol={:.1}bps", v));
+            }
+            if let Some(suppressed) = exit_status.suppressed {
+                fill_note.push_str(&format!(
+                    " ⛔exit_suppressed={}/{}",
+                    suppressed.kind.as_str(),
+                    suppressed.reason.as_str()
+                ));
             }
             println!(
                 "[{}] #{} mark={} bid={} ask={} pos={} pnl={:.2} | hold={} place={} cancel={}{}",
@@ -502,6 +531,34 @@ pub(super) fn emit_maker_cycle(output: CycleOutput<'_>) {
             }
         }
     }
+}
+
+/// Stage 5-b exit fields, additive and top-level like the other wrappers.
+/// All three are always present (null when nothing happened) so a consumer can
+/// tell "no exit this cycle" from "field missing on an older run".
+fn with_exit_fields(mut summary: serde_json::Value, status: ExitStatus) -> serde_json::Value {
+    let object = summary
+        .as_object_mut()
+        .expect("cycle summary JSON must be an object");
+    object.insert(
+        "exit_kind".to_string(),
+        match status.kind {
+            Some(kind) => serde_json::Value::from(kind.as_str()),
+            None => serde_json::Value::Null,
+        },
+    );
+    object.insert(
+        "exit_submitted".to_string(),
+        serde_json::Value::from(status.submitted),
+    );
+    object.insert(
+        "exit_suppressed".to_string(),
+        match status.suppressed {
+            Some(suppressed) => serde_json::Value::from(suppressed.reason.as_str()),
+            None => serde_json::Value::Null,
+        },
+    );
+    summary
 }
 
 fn with_spread_fields(
@@ -741,6 +798,10 @@ pub(super) struct MakerLogEvent<'a> {
     pub(super) price: f64,
     pub(super) price_decimals: u32,
     pub(super) detail: &'a str,
+    /// Stage 5-b: which exit policy this event belongs to, for exit events.
+    /// `None` on everything else, and then omitted from the JSON entirely so
+    /// the existing per-event contract is unchanged.
+    pub(super) exit_kind: Option<&'a str>,
 }
 
 pub(super) fn log_maker_event(event: MakerLogEvent<'_>) {
@@ -754,25 +815,32 @@ pub(super) fn log_maker_event(event: MakerLogEvent<'_>) {
         price,
         price_decimals,
         detail,
+        exit_kind,
     } = event;
     use maker::format_decimals;
     match output_format {
         OutputFormat::Json => {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                    "cycle": cycle, "mode": "live", "symbol": symbol,
-                    "action": action, "side": side, "level": level,
-                    "price": format_decimals(price, price_decimals),
-                    "detail": detail,
-                })
-            );
+            let mut payload = serde_json::json!({
+                "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "cycle": cycle, "mode": "live", "symbol": symbol,
+                "action": action, "side": side, "level": level,
+                "price": format_decimals(price, price_decimals),
+                "detail": detail,
+            });
+            if let Some(kind) = exit_kind {
+                payload
+                    .as_object_mut()
+                    .expect("maker log event JSON must be an object")
+                    .insert("exit_kind".to_string(), serde_json::Value::from(kind));
+            }
+            println!("{}", payload);
         }
         _ => {
+            let kind_note = exit_kind.map_or_else(String::new, |kind| format!(" [{kind}]"));
             eprintln!(
-                "    {} {} L{} @ {} — {}",
+                "    {}{} {} L{} @ {} — {}",
                 action,
+                kind_note,
                 side_str(side),
                 level,
                 format_decimals(price, price_decimals),
@@ -877,6 +945,162 @@ pub(super) fn emit_stop_loss_triggered(
         eprintln!(
             "🛑 stop-loss triggered: session PnL {pnl:+.2} breached -{stop_loss:.2}; shutting down"
         );
+    }
+}
+
+/// An armed account hard floor stopping the session (stage 5-b).
+///
+/// `event` is `triggered` for a real breach and `unevaluable` when the floor
+/// refused to read a stale/unparseable balance as "no breach" — the operator
+/// remedy differs, so the two never share a label.
+pub(super) struct AccountFloorStop<'a> {
+    pub(super) event: &'a str,
+    pub(super) metric: &'a str,
+    pub(super) observed: Option<f64>,
+    pub(super) floor: Option<f64>,
+    pub(super) detail: &'a str,
+}
+
+/// Account-level hard floor stop (stage 5-b). Deliberately a different
+/// `action` from `stop_loss`: the session PnL brake and the account solvency
+/// brake are different policies with different remedies.
+pub(super) fn emit_account_floor_triggered(
+    output_format: OutputFormat,
+    symbol: &str,
+    cycle: u64,
+    stop: AccountFloorStop<'_>,
+) {
+    if output_format == OutputFormat::Json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "symbol": symbol,
+                "cycle": cycle,
+                "action": "account_floor",
+                "event": stop.event,
+                "metric": stop.metric,
+                "observed": stop.observed,
+                "floor": stop.floor,
+                "detail": stop.detail,
+            })
+        );
+    } else {
+        eprintln!(
+            "🛑 account floor {}: {}; shutting down",
+            stop.event, stop.detail
+        );
+    }
+}
+
+/// Residual-position handoff on shutdown (stage 5-b).
+pub(super) struct ResidualHandoffReport<'a> {
+    pub(super) handoff: &'a super::model::ResidualHandoff,
+    pub(super) mark: Option<f64>,
+    pub(super) qty_decimals: u32,
+    pub(super) exit_reason: &'a str,
+}
+
+/// Report what a shutdown left behind, on every exit path.
+///
+/// The maker never auto-flattens (docs/26 D1/D2), so the exit owes the operator
+/// one authoritative number: a venue-confirmed position, a venue-confirmed
+/// flat, or an explicit "cannot confirm" — the last of which must read as
+/// possible exposure, not as nothing to do.
+pub(super) fn emit_residual_position_handoff(
+    output_format: OutputFormat,
+    symbol: &str,
+    cycle: u64,
+    report: ResidualHandoffReport<'_>,
+) {
+    use super::model::ResidualHandoff;
+    use maker::format_decimals;
+
+    let ResidualHandoffReport {
+        handoff,
+        mark,
+        qty_decimals,
+        exit_reason,
+    } = report;
+    let reported_position = match handoff {
+        ResidualHandoff::Flat => Some(0.0),
+        ResidualHandoff::Confirmed { position } => Some(*position),
+        ResidualHandoff::Unknown { venue, .. } => *venue,
+    };
+    let notional = reported_position
+        .zip(mark)
+        .map(|(position, mark)| (position * mark).abs());
+    let side = reported_position.map(|position| {
+        if position > 0.0 {
+            "long"
+        } else if position < 0.0 {
+            "short"
+        } else {
+            "flat"
+        }
+    });
+    if output_format == OutputFormat::Json {
+        let (ledger, venue, reason) = match handoff {
+            ResidualHandoff::Flat | ResidualHandoff::Confirmed { .. } => {
+                (reported_position, reported_position, None)
+            }
+            ResidualHandoff::Unknown {
+                ledger,
+                venue,
+                reason,
+            } => (Some(*ledger), *venue, Some(*reason)),
+        };
+        println!(
+            "{}",
+            serde_json::json!({
+                "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "symbol": symbol,
+                "cycle": cycle,
+                "action": "residual_position",
+                "event": handoff.event(),
+                "position": reported_position,
+                "venue_position": venue,
+                "ledger_position": ledger,
+                "unknown_reason": reason,
+                "side": side,
+                "mark": mark,
+                "notional": notional,
+                "exit_reason": exit_reason,
+                "needs_operator": handoff.needs_operator(),
+                "auto_flatten": false,
+                "detail": "maker never auto-flattens; close or hedge any residual manually",
+            })
+        );
+        return;
+    }
+    let notional_note = notional.map_or_else(String::new, |n| format!(" (~{n:.2} notional)"));
+    match handoff {
+        ResidualHandoff::Flat => {
+            eprintln!("   ending position flat (venue-confirmed) after {exit_reason}");
+        }
+        ResidualHandoff::Confirmed { position } => {
+            eprintln!(
+                "⚠️  residual position handoff: {} {}{} after {} — the maker does NOT auto-flatten; close or hedge it manually",
+                side.unwrap_or("?"),
+                format_decimals(position.abs(), qty_decimals),
+                notional_note,
+                exit_reason
+            );
+        }
+        ResidualHandoff::Unknown {
+            ledger,
+            venue,
+            reason,
+        } => {
+            let venue_note = venue.map_or_else(
+                || "unavailable".to_string(),
+                |position| format_decimals(position, qty_decimals),
+            );
+            eprintln!(
+                "🛑 residual position UNKNOWN after {exit_reason} ({reason}): venue={venue_note}, session ledger={} — check the venue manually before starting anything else",
+                format_decimals(*ledger, qty_decimals)
+            );
+        }
     }
 }
 
@@ -1255,5 +1479,48 @@ mod tests {
         assert!(idle["external_divergence_bps"].is_null());
         assert!(idle["external_basis_bps"].is_null());
         assert_eq!(idle["skew_shift_bps"], 0.0);
+    }
+
+    /// Stage 5-b: the three exit keys are always present (null when idle) so a
+    /// consumer can distinguish "no exit this cycle" from "field missing on an
+    /// older run", and they never disturb the existing summary keys.
+    #[test]
+    fn cycle_summary_exit_fields_are_additive_and_always_present() {
+        let idle = with_exit_fields(
+            serde_json::json!({"action": "cycle_summary", "vol_bps": null}),
+            ExitStatus::default(),
+        );
+        assert_eq!(idle["action"], "cycle_summary");
+        assert!(idle["vol_bps"].is_null());
+        assert!(idle["exit_kind"].is_null());
+        assert_eq!(idle["exit_submitted"], false);
+        assert!(idle["exit_suppressed"].is_null());
+
+        let submitted = with_exit_fields(
+            serde_json::json!({"action": "cycle_summary"}),
+            ExitStatus {
+                kind: Some(maker::ExitKind::WindDown),
+                submitted: true,
+                suppressed: None,
+            },
+        );
+        assert_eq!(submitted["exit_kind"], "wind_down");
+        assert_eq!(submitted["exit_submitted"], true);
+        assert!(submitted["exit_suppressed"].is_null());
+
+        let suppressed = with_exit_fields(
+            serde_json::json!({"action": "cycle_summary"}),
+            ExitStatus {
+                kind: Some(maker::ExitKind::InventoryTrim),
+                submitted: false,
+                suppressed: Some(maker::SuppressedExit {
+                    kind: maker::ExitKind::InventoryTrim,
+                    reason: maker::ExitSuppression::VolatilityHalt,
+                }),
+            },
+        );
+        assert_eq!(suppressed["exit_kind"], "inventory_trim");
+        assert_eq!(suppressed["exit_submitted"], false);
+        assert_eq!(suppressed["exit_suppressed"], "volatility_halt");
     }
 }

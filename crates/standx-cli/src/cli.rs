@@ -579,6 +579,16 @@ pub enum MakerCommands {
         /// (quote units). Live-only. 0 disables
         #[arg(long)]
         alert_margin_below: Option<f64>,
+        /// Hard floor (NOT an alert): stop the session when account equity
+        /// drops below this (quote units). Residual position is handed off,
+        /// never auto-flattened. Live-only. 0 disables (default)
+        #[arg(long)]
+        stop_equity_below: Option<f64>,
+        /// Hard floor (NOT an alert): stop the session when available cross
+        /// margin drops below this (quote units). Live-only. 0 disables
+        /// (default)
+        #[arg(long)]
+        stop_margin_below: Option<f64>,
         /// Also POST risk alerts to this URL. stderr/JSON always get them
         /// regardless. Payload shape is set by --alert-webhook-format
         #[arg(long, env = "STANDX_SUPERVISOR_WEBHOOK")]

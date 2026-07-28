@@ -4,10 +4,11 @@ use super::ledger::{apply_account_trade, apply_order_update, maker_trade_fill};
 use super::model::{position_for_symbol, rest_order_observation};
 use super::output::{
     emit_cycle_skip, emit_guard_transition, emit_maker_cycle, log_maker_event, CycleOutput,
-    MakerLogEvent,
+    ExitStatus, MakerLogEvent,
 };
 use super::pipeline::{
     fetch_account_audit, CycleRequest, CycleResult, CycleState, OrderRequestKind,
+    BALANCE_FLOOR_MAX_AGE,
 };
 use super::recovery::PositionReconciliationError;
 use anyhow::Result;
@@ -183,6 +184,55 @@ fn order_creation_allowed(live: bool, rest_position_recheck_pending: bool) -> bo
     !live || !rest_position_recheck_pending
 }
 
+/// Evaluate armed account hard floors against the authoritative balance
+/// (stage 5-b). `None` means "keep quoting"; anything else stops the cycle
+/// before it can place an order.
+///
+/// Disarmed floors (the default `0`) short-circuit, so neither staleness nor an
+/// unparseable field can stop a run that never asked for a solvency brake. When
+/// a floor *is* armed, only the fields that floor actually reads have to be
+/// readable — an armed equity floor is not held hostage by a broken margin
+/// field.
+fn account_floor_stop(
+    balance: &Balance,
+    balance_age: std::time::Duration,
+    equity_floor: f64,
+    margin_floor: f64,
+) -> Option<super::model::AccountFloorError> {
+    use super::model::AccountFloorError;
+
+    let equity_armed = equity_floor.is_finite() && equity_floor > 0.0;
+    let margin_armed = margin_floor.is_finite() && margin_floor > 0.0;
+    if !equity_armed && !margin_armed {
+        return None;
+    }
+    // A balance this old is no longer evidence of solvency. Failing closed here
+    // is the whole point of arming a floor: the alternative is reading a stale
+    // snapshot as "no breach".
+    if balance_age > BALANCE_FLOOR_MAX_AGE {
+        return Some(AccountFloorError::balance_stale(
+            balance_age.as_secs(),
+            BALANCE_FLOOR_MAX_AGE.as_secs(),
+        ));
+    }
+    let parse = |raw: &str| raw.parse::<f64>().ok().filter(|value| value.is_finite());
+    let equity = parse(&balance.equity);
+    let available = parse(&balance.cross_available);
+    if (equity_armed && equity.is_none()) || (margin_armed && available.is_none()) {
+        return Some(AccountFloorError::balance_unreadable(
+            &balance.equity,
+            &balance.cross_available,
+        ));
+    }
+    maker::account_floor_breach(
+        equity.unwrap_or(f64::NAN),
+        available.unwrap_or(f64::NAN),
+        equity_floor,
+        margin_floor,
+    )
+    .map(|(metric, observed, floor)| AccountFloorError::breach(metric.as_str(), observed, floor))
+}
+
 fn live_order_commands(commands: Option<&OrderCommandSender>) -> Result<&OrderCommandSender> {
     commands.ok_or_else(|| anyhow::anyhow!("order-command stream is unavailable"))
 }
@@ -211,6 +261,8 @@ pub(super) async fn maker_cycle(
         max_divergence_bps,
         inventory_exit_pct,
         inventory_exit_qty,
+        stop_equity_below,
+        stop_margin_below,
         wind_down,
         qty_tolerance,
         session_started_at,
@@ -307,6 +359,7 @@ pub(super) async fn maker_cycle(
     let position: f64;
     let mut projected_resting = Vec::new();
     let mut account_balance: Option<Balance> = None;
+    let mut account_floor_stop_reason = None;
     let mut fills: Vec<MakerFill> = Vec::new();
     let mut exit_fill_observed = false;
     let mut rest_position_recheck_pending = false;
@@ -364,6 +417,16 @@ pub(super) async fn maker_cycle(
             }
         }
         account_balance = Some(poll.balance().clone());
+        // Stage 5-b: decide the solvency verdict here, where the authoritative
+        // balance is freshest, and act on it before step 3 plans anything. The
+        // accounting below still runs to completion so the position handed off
+        // on the way out is the fully synchronized one.
+        account_floor_stop_reason = account_floor_stop(
+            poll.balance(),
+            poll.balance_age(poll_now),
+            stop_equity_below,
+            stop_margin_below,
+        );
 
         if let Some(audit) = audit {
             for order in audit.open_orders.iter().chain(audit.filled_orders.iter()) {
@@ -514,6 +577,14 @@ pub(super) async fn maker_cycle(
         position = *sim_position;
     }
 
+    // 2b. Armed account hard floor (stage 5-b): fail closed before planning.
+    // Everything above is reads and accounting; returning here guarantees the
+    // breached cycle writes no orders at all, leaving shutdown cleanup as the
+    // only remaining order traffic.
+    if let Some(reason) = account_floor_stop_reason {
+        return Err(anyhow::Error::new(reason));
+    }
+
     // 3. Build the pure quote/exit plan from the synchronized state.
     let size_skew_decision = size_skew_controller.observe(position, cfg);
     let previous_guard_side = guard_controller.endangered();
@@ -611,6 +682,7 @@ pub(super) async fn maker_cycle(
                     price: q.price,
                     price_decimals: cfg.price_decimals,
                     detail: "awaiting asynchronous order confirmation",
+                    exit_kind: None,
                 });
                 false
             }
@@ -782,6 +854,18 @@ pub(super) async fn maker_cycle(
         }
     }
 
+    // Stage 5-b telemetry: which exit policy wanted an order this cycle, and
+    // whether it was submitted or suppressed. `kind` covers the suppressed
+    // case too (an inactive market never reaches `requested_inventory_exit`).
+    let mut exit_status = ExitStatus {
+        kind: raw_inventory_exit
+            .as_ref()
+            .map(|exit| exit.kind)
+            .or_else(|| plan.exit_suppression.map(|suppressed| suppressed.kind)),
+        submitted: false,
+        suppressed: plan.exit_suppression,
+    };
+
     if let Some(exit) = inventory_exit {
         // Do not race a reduce-only market order against quote cancellations.
         // The next cycle must observe an empty maker book before the single
@@ -864,6 +948,7 @@ pub(super) async fn maker_cycle(
             );
             sent?;
             *inventory_exit_pending = true;
+            exit_status.submitted = true;
             log_maker_event(MakerLogEvent {
                 output_format,
                 symbol,
@@ -874,6 +959,7 @@ pub(super) async fn maker_cycle(
                 price: mark,
                 price_decimals: cfg.price_decimals,
                 detail: "reduce-only market order submitted after maker book cleared",
+                exit_kind: Some(exit.kind.as_str()),
             });
         }
     }
@@ -947,6 +1033,7 @@ pub(super) async fn maker_cycle(
         } else {
             0.0
         },
+        exit_status,
         cfg,
         performance: performance_summary.as_ref(),
     });
@@ -993,6 +1080,85 @@ mod tests {
             symbol: Some("BTC-USD".to_string()),
             value: None,
         }
+    }
+
+    fn balance(equity: &str, cross_available: &str) -> Balance {
+        Balance {
+            balance: "100".to_string(),
+            cross_available: cross_available.to_string(),
+            cross_balance: "100".to_string(),
+            cross_margin: "0".to_string(),
+            cross_upnl: "0".to_string(),
+            equity: equity.to_string(),
+            isolated_balance: "0".to_string(),
+            isolated_upnl: "0".to_string(),
+            locked: "0".to_string(),
+            pnl_24h: "0".to_string(),
+            pnl_freeze: "0".to_string(),
+            upnl: "0".to_string(),
+        }
+    }
+
+    /// Stage 5-b: the default (disarmed) floors must never stop a run, no
+    /// matter how broken or stale the balance is. Every other maker session
+    /// depends on this staying true.
+    #[test]
+    fn disarmed_account_floors_never_stop_the_cycle() {
+        let fresh = std::time::Duration::from_secs(0);
+        let ancient = BALANCE_FLOOR_MAX_AGE + std::time::Duration::from_secs(600);
+        for age in [fresh, ancient] {
+            assert!(account_floor_stop(&balance("100", "90"), age, 0.0, 0.0).is_none());
+            assert!(account_floor_stop(&balance("-5", "-5"), age, 0.0, 0.0).is_none());
+            assert!(account_floor_stop(&balance("oops", "oops"), age, 0.0, 0.0).is_none());
+        }
+    }
+
+    /// An armed floor is enforced against a *fresh* balance, and refuses to
+    /// read a stale or unparseable one as "no breach" — the whole point of a
+    /// solvency brake is that it fails closed.
+    #[test]
+    fn armed_account_floor_breaches_and_fails_closed() {
+        use super::super::model::AccountFloorCause;
+        let fresh = std::time::Duration::from_secs(1);
+
+        assert!(account_floor_stop(&balance("100", "90"), fresh, 90.0, 0.0).is_none());
+
+        let breach = account_floor_stop(&balance("89.5", "90"), fresh, 90.0, 0.0)
+            .expect("equity below the armed floor stops the cycle");
+        assert_eq!(breach.cause, AccountFloorCause::Breach);
+        assert_eq!(breach.metric, "equity");
+        assert_eq!(breach.observed, Some(89.5));
+        assert_eq!(breach.floor, Some(90.0));
+        assert_eq!(breach.cause.event(), "triggered");
+
+        let margin = account_floor_stop(&balance("100", "19"), fresh, 0.0, 20.0)
+            .expect("margin below the armed floor stops the cycle");
+        assert_eq!(margin.metric, "margin");
+
+        // Stale: an old snapshot is not evidence of solvency.
+        let stale = account_floor_stop(
+            &balance("100", "90"),
+            BALANCE_FLOOR_MAX_AGE + std::time::Duration::from_secs(1),
+            90.0,
+            0.0,
+        )
+        .expect("a stale balance cannot clear an armed floor");
+        assert_eq!(stale.cause, AccountFloorCause::BalanceStale);
+        assert_eq!(stale.cause.event(), "unevaluable");
+        // Exactly at the limit is still usable.
+        assert!(
+            account_floor_stop(&balance("100", "90"), BALANCE_FLOOR_MAX_AGE, 90.0, 0.0).is_none()
+        );
+
+        // Unparseable / non-finite fields the armed floor actually reads.
+        for raw in ["", "n/a", "NaN"] {
+            let unreadable = account_floor_stop(&balance(raw, "90"), fresh, 90.0, 0.0)
+                .expect("an unreadable equity cannot clear an armed equity floor");
+            assert_eq!(unreadable.cause, AccountFloorCause::BalanceUnreadable);
+        }
+        // …but a broken field the armed floor does NOT read is not its problem.
+        assert!(account_floor_stop(&balance("100", "oops"), fresh, 90.0, 0.0).is_none());
+        assert!(account_floor_stop(&balance("oops", "90"), fresh, 0.0, 20.0).is_none());
     }
 
     #[test]

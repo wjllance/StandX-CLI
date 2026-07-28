@@ -130,6 +130,69 @@ pub struct DesiredQuote {
     pub qty: f64,
 }
 
+/// Which policy asked for an inventory-reducing order.
+///
+/// Stage 5-b separates the two normal exit policies so evidence never has to
+/// infer an exit's origin from context. Emergency risk exit is deliberately
+/// *not* a variant: no such policy exists (a stop-loss or account floor stops
+/// and hands the residual position off, it never trades), and inventing one
+/// without evidence is exactly what
+/// [docs/26](../../../docs/26-maker-stage5b-design.md) declines to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitKind {
+    /// Threshold-driven inventory trim: normal operation, opt-in through
+    /// `inventory_exit_pct` / `inventory_exit_qty`, capped to one chunk.
+    InventoryTrim,
+    /// Supervisor-requested wind-down (e.g. an A/B arm past its window): take
+    /// the whole residual at once and never quote again.
+    WindDown,
+}
+
+impl ExitKind {
+    /// Snake-case label for machine-readable output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InventoryTrim => "inventory_trim",
+            Self::WindDown => "wind_down",
+        }
+    }
+}
+
+/// Why a requested exit is not being submitted this cycle.
+///
+/// Both reasons are policy, not failure: the exit stays requested (so the
+/// caller keeps tracking it) but no order is planned. Making the reason typed
+/// is what turns "a halt silently ate an exit" into something countable in the
+/// evidence pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitSuppression {
+    /// A volatility halt is in effect. Emergency execution during a halt needs
+    /// a separate, explicitly authorized policy that deliberately does not
+    /// exist (docs/26 decision D1).
+    VolatilityHalt,
+    /// Market data is not Active, so no price is trustworthy enough to trade.
+    MarketDataInactive,
+}
+
+impl ExitSuppression {
+    /// Snake-case label for machine-readable output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::VolatilityHalt => "volatility_halt",
+            Self::MarketDataInactive => "market_data_inactive",
+        }
+    }
+}
+
+/// An exit the configured policy asked for but this cycle did not submit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SuppressedExit {
+    /// Which policy asked for it.
+    pub kind: ExitKind,
+    /// Why it was not submitted.
+    pub reason: ExitSuppression,
+}
+
 /// A deliberate inventory-reducing order. Execution is kept outside this pure
 /// strategy module so callers can first cancel conflicting maker quotes and
 /// enforce venue-specific reduce-only semantics.
@@ -139,6 +202,8 @@ pub struct InventoryExit {
     pub side: OrderSide,
     /// Never exceeds the current absolute position or the configured chunk.
     pub qty: f64,
+    /// Which policy asked for this exit.
+    pub kind: ExitKind,
 }
 
 /// Decide whether inventory has reached an explicit active-exit threshold.
@@ -181,6 +246,7 @@ pub(crate) fn inventory_exit_plan(
             OrderSide::Buy
         },
         qty: abs_position.min(chunk_qty),
+        kind: ExitKind::InventoryTrim,
     })
 }
 
@@ -204,6 +270,7 @@ pub(crate) fn wind_down_exit_plan(position: f64, qty_tolerance: f64) -> Option<I
             OrderSide::Buy
         },
         qty: abs_position,
+        kind: ExitKind::WindDown,
     })
 }
 
@@ -652,6 +719,10 @@ pub struct CyclePlan {
     pub requested_inventory_exit: Option<InventoryExit>,
     /// The active exit to submit this cycle. A volatility halt always suppresses it.
     pub inventory_exit: Option<InventoryExit>,
+    /// Set when the exit policy produced a plan that this cycle does not
+    /// submit: which policy asked, and why it was suppressed. `None` when no
+    /// exit was wanted or the wanted exit is being submitted.
+    pub exit_suppression: Option<SuppressedExit>,
     /// Cancels, places, and holds in executor-safe order.
     pub actions: Vec<Action>,
     /// Anchor used for any newly submitted quote.
@@ -672,8 +743,10 @@ pub struct CyclePlan {
 /// plan regardless of the configured exit thresholds.
 pub fn plan_cycle(cfg: &MakerConfig, input: CycleInput<'_>, halted: bool) -> CyclePlan {
     let market_active = input.market_data_mode == MarketDataMode::Active;
-    let requested_inventory_exit = (market_active
-        && (input.active_exit_enabled || input.wind_down))
+    // What the configured exit policy asks for, before any market-state or
+    // volatility gate. Kept separate purely so suppression is observable: the
+    // gates below decide what is actually requested and submitted.
+    let policy_exit = (input.active_exit_enabled || input.wind_down)
         .then(|| {
             if input.wind_down {
                 wind_down_exit_plan(input.position, input.qty_tolerance)
@@ -687,12 +760,28 @@ pub fn plan_cycle(cfg: &MakerConfig, input: CycleInput<'_>, halted: bool) -> Cyc
             }
         })
         .flatten();
+    let requested_inventory_exit = market_active.then(|| policy_exit.clone()).flatten();
 
     // During a volatility halt, pull resting liquidity but never send an
-    // opt-in taker exit: emergency execution needs a separate explicit policy.
-    let inventory_exit = (!halted && market_active)
+    // opt-in taker exit — for either exit kind. Emergency execution during a
+    // halt needs a separate explicitly authorized policy that deliberately
+    // does not exist (docs/26 decision D1).
+    let inventory_exit = (!halted)
         .then_some(requested_inventory_exit.clone())
         .flatten();
+    // Inactive market data outranks the halt as a reason: without a trusted
+    // price the halt verdict itself is computed from stale marks.
+    let exit_suppression = policy_exit.as_ref().and_then(|exit| {
+        let reason = match (market_active, halted) {
+            (false, _) => Some(ExitSuppression::MarketDataInactive),
+            (true, true) => Some(ExitSuppression::VolatilityHalt),
+            (true, false) => None,
+        }?;
+        Some(SuppressedExit {
+            kind: exit.kind,
+            reason,
+        })
+    });
     // Wind-down never places new quotes, even once flat: the session must
     // converge to flat instead of re-accumulating inventory.
     let desired = if halted || !market_active || inventory_exit.is_some() || input.wind_down {
@@ -714,6 +803,7 @@ pub fn plan_cycle(cfg: &MakerConfig, input: CycleInput<'_>, halted: bool) -> Cyc
     CyclePlan {
         requested_inventory_exit,
         inventory_exit,
+        exit_suppression,
         actions: reconcile(
             cfg,
             input.market.mark,
@@ -755,10 +845,10 @@ pub struct AlertMonitor {
     /// Alert when two-sided uptime% < uptime_floor (after warmup). 0 = off.
     uptime_floor: f64,
     /// Alert when account equity drops below this (quote units). 0 = off.
-    equity_floor: f64,
+    equity_alert_below: f64,
     /// Alert when available cross margin drops below this (quote units).
     /// 0 = off.
-    margin_floor: f64,
+    margin_alert_below: f64,
     loss_on: bool,
     inv_on: bool,
     uptime_on: bool,
@@ -780,11 +870,16 @@ impl AlertMonitor {
         }
     }
 
-    /// Configure the account equity / available-margin floors (quote units).
-    /// 0 disables either floor.
-    pub fn with_account_floors(mut self, equity_floor: f64, margin_floor: f64) -> Self {
-        self.equity_floor = equity_floor;
-        self.margin_floor = margin_floor;
+    /// Configure the account equity / available-margin **alert** thresholds
+    /// (quote units); 0 disables either one.
+    ///
+    /// These only notify. The word "floor" is reserved for the stage 5-b hard
+    /// floors (`stop_equity_below` / `stop_margin_below`), which stop the
+    /// session through a separate typed outcome — an alert threshold and a
+    /// solvency brake must never be mistaken for each other in config or code.
+    pub fn with_account_alerts(mut self, equity_alert_below: f64, margin_alert_below: f64) -> Self {
+        self.equity_alert_below = equity_alert_below;
+        self.margin_alert_below = margin_alert_below;
         self
     }
 
@@ -793,9 +888,9 @@ impl AlertMonitor {
         self.loss_limit > 0.0 || self.inventory_pct > 0.0 || self.uptime_floor > 0.0
     }
 
-    /// Whether an account equity or available-margin floor is configured.
+    /// Whether an account equity or available-margin alert is configured.
     pub fn account_enabled(&self) -> bool {
-        self.equity_floor > 0.0 || self.margin_floor > 0.0
+        self.equity_alert_below > 0.0 || self.margin_alert_below > 0.0
     }
 
     /// Evaluate the current metrics and return only the alerts whose state
@@ -883,26 +978,29 @@ impl AlertMonitor {
         out
     }
 
-    /// Evaluate the account equity / available-margin floors against the latest
-    /// account snapshot and return only the alerts whose state changed this
-    /// cycle. Like [`AlertMonitor::evaluate`], each floor is edge-triggered: it
-    /// fires once when it drops below the floor and clears once it recovers to
-    /// 10% above the floor (hysteresis avoids flapping around the threshold).
+    /// Evaluate the account equity / available-margin **alert** thresholds
+    /// against the latest account snapshot and return only the alerts whose
+    /// state changed this cycle. Like [`AlertMonitor::evaluate`], each one is
+    /// edge-triggered: it fires once on breach and clears once it recovers to
+    /// 10% above the threshold (hysteresis avoids flapping).
+    ///
+    /// This never stops the session — see [`account_floor_breach`] for the
+    /// hard floor.
     pub fn evaluate_account(&mut self, equity: f64, available: f64) -> Vec<Alert> {
         let mut out = Vec::new();
 
-        if self.equity_floor > 0.0 {
-            if !self.equity_on && equity < self.equity_floor {
+        if self.equity_alert_below > 0.0 {
+            if !self.equity_on && equity < self.equity_alert_below {
                 self.equity_on = true;
                 out.push(Alert {
                     kind: "equity",
                     firing: true,
                     message: format!(
-                        "account equity {:.2} below floor {:.2}",
-                        equity, self.equity_floor
+                        "account equity {:.2} below alert threshold {:.2}",
+                        equity, self.equity_alert_below
                     ),
                 });
-            } else if self.equity_on && equity >= self.equity_floor * 1.1 {
+            } else if self.equity_on && equity >= self.equity_alert_below * 1.1 {
                 self.equity_on = false;
                 out.push(Alert {
                     kind: "equity",
@@ -912,18 +1010,18 @@ impl AlertMonitor {
             }
         }
 
-        if self.margin_floor > 0.0 {
-            if !self.margin_on && available < self.margin_floor {
+        if self.margin_alert_below > 0.0 {
+            if !self.margin_on && available < self.margin_alert_below {
                 self.margin_on = true;
                 out.push(Alert {
                     kind: "margin",
                     firing: true,
                     message: format!(
-                        "available margin {:.2} below floor {:.2}",
-                        available, self.margin_floor
+                        "available margin {:.2} below alert threshold {:.2}",
+                        available, self.margin_alert_below
                     ),
                 });
-            } else if self.margin_on && available >= self.margin_floor * 1.1 {
+            } else if self.margin_on && available >= self.margin_alert_below * 1.1 {
                 self.margin_on = false;
                 out.push(Alert {
                     kind: "margin",
@@ -935,6 +1033,58 @@ impl AlertMonitor {
 
         out
     }
+}
+
+/// Which account-level hard floor was breached (stage 5-b).
+///
+/// Deliberately distinct from the session PnL brake (`stop_loss`): that one
+/// says "this strategy is losing", these say "this account can no longer be
+/// traded safely". Different config names, different typed stop reason,
+/// different operator remedy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountFloorBreach {
+    /// Account equity fell below `stop_equity_below`.
+    Equity,
+    /// Available cross margin fell below `stop_margin_below`.
+    Margin,
+}
+
+impl AccountFloorBreach {
+    /// Snake-case metric label for machine-readable output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Equity => "equity",
+            Self::Margin => "margin",
+        }
+    }
+}
+
+/// Decide whether an account-level hard floor is breached.
+///
+/// Each floor is independently opt-in: `0` (or any non-positive / non-finite
+/// value) disables it, which is the default — stage 5-b ships this brake armed
+/// only when an operator explicitly configures it. Equity is checked before
+/// margin because equity going through the floor is the more fundamental
+/// condition. Non-finite observations never trip a stop: a bad snapshot is a
+/// data problem, and the caller already warns about unparseable balances.
+pub fn account_floor_breach(
+    equity: f64,
+    available: f64,
+    equity_floor: f64,
+    margin_floor: f64,
+) -> Option<(AccountFloorBreach, f64, f64)> {
+    if equity_floor.is_finite() && equity_floor > 0.0 && equity.is_finite() && equity < equity_floor
+    {
+        return Some((AccountFloorBreach::Equity, equity, equity_floor));
+    }
+    if margin_floor.is_finite()
+        && margin_floor > 0.0
+        && available.is_finite()
+        && available < margin_floor
+    {
+        return Some((AccountFloorBreach::Margin, available, margin_floor));
+    }
+    None
 }
 
 /// Compute the desired quote set for the current market snapshot.
@@ -1296,6 +1446,7 @@ mod tests {
             Some(InventoryExit {
                 side: OrderSide::Sell,
                 qty: 0.015,
+                kind: ExitKind::InventoryTrim,
             })
         );
         assert_eq!(
@@ -1303,6 +1454,7 @@ mod tests {
             Some(InventoryExit {
                 side: OrderSide::Buy,
                 qty: 0.05,
+                kind: ExitKind::InventoryTrim,
             })
         );
         assert_eq!(inventory_exit_plan(0.039, 0.05, 80.0, 0.01), None);
@@ -2116,6 +2268,7 @@ mod tests {
             Some(InventoryExit {
                 side: OrderSide::Sell,
                 qty: 0.01,
+                kind: ExitKind::InventoryTrim,
             })
         );
         assert_eq!(exit_plan.inventory_exit, exit_plan.requested_inventory_exit);
@@ -2128,12 +2281,174 @@ mod tests {
             .iter()
             .any(|action| matches!(action, Action::Place(_))));
 
+        assert_eq!(exit_plan.exit_suppression, None);
+
         let halted_plan = plan_cycle(&c, input, true);
         assert_eq!(
             halted_plan.requested_inventory_exit,
             exit_plan.requested_inventory_exit
         );
         assert_eq!(halted_plan.inventory_exit, None);
+        assert_eq!(
+            halted_plan.exit_suppression,
+            Some(SuppressedExit {
+                kind: ExitKind::InventoryTrim,
+                reason: ExitSuppression::VolatilityHalt,
+            })
+        );
+    }
+
+    /// Stage 5-b D1: a volatility halt suppresses BOTH exit policies, and says
+    /// so in a typed field. Wind-down is the one that used to be easy to assume
+    /// still ran: an arm ending mid-halt keeps its inventory until the halt
+    /// clears, and that trade-off is now pinned by a test, not by a comment.
+    #[test]
+    fn vol_halt_suppresses_wind_down_exit_with_typed_reason() {
+        let c = cfg();
+        let input = CycleInput {
+            cycle: 7,
+            market: MarketSnapshot {
+                mark: 100.0,
+                best_bid: Some(99.8),
+                best_ask: Some(100.2),
+            },
+            position: 0.02,
+            resting: &[],
+            pending_slots: &[],
+            market_data_mode: MarketDataMode::Active,
+            // Wind-down ignores the configured trigger entirely.
+            active_exit_enabled: false,
+            inventory_exit_pct: 0.0,
+            inventory_exit_qty: 0.0,
+            size_skew: Default::default(),
+            nonlinear_skew: Default::default(),
+            guard: Default::default(),
+            wind_down: true,
+            qty_tolerance: 0.0005,
+        };
+
+        let running = plan_cycle(&c, input, false);
+        assert_eq!(
+            running.inventory_exit,
+            Some(InventoryExit {
+                side: OrderSide::Sell,
+                qty: 0.02,
+                kind: ExitKind::WindDown,
+            })
+        );
+        assert_eq!(running.exit_suppression, None);
+
+        let halted = plan_cycle(&c, input, true);
+        assert_eq!(halted.inventory_exit, None);
+        assert_eq!(
+            halted.exit_suppression,
+            Some(SuppressedExit {
+                kind: ExitKind::WindDown,
+                reason: ExitSuppression::VolatilityHalt,
+            })
+        );
+        // No emergency execution appears in place of the suppressed exit.
+        assert!(!halted
+            .actions
+            .iter()
+            .any(|action| matches!(action, Action::Place(_))));
+    }
+
+    /// Inactive market data suppresses the exit too, and outranks the halt as
+    /// the reported reason: without a trusted price the halt verdict itself is
+    /// computed from stale marks.
+    #[test]
+    fn inactive_market_data_suppresses_exit_and_outranks_halt() {
+        let c = cfg();
+        let mk = |mode, wind_down| CycleInput {
+            cycle: 9,
+            market: MarketSnapshot {
+                mark: 100.0,
+                best_bid: Some(99.8),
+                best_ask: Some(100.2),
+            },
+            position: c.max_position,
+            resting: &[],
+            pending_slots: &[],
+            market_data_mode: mode,
+            active_exit_enabled: true,
+            inventory_exit_pct: 80.0,
+            inventory_exit_qty: 0.01,
+            size_skew: Default::default(),
+            nonlinear_skew: Default::default(),
+            guard: Default::default(),
+            wind_down,
+            qty_tolerance: 0.0005,
+        };
+
+        for wind_down in [false, true] {
+            let expected_kind = if wind_down {
+                ExitKind::WindDown
+            } else {
+                ExitKind::InventoryTrim
+            };
+            for halted in [false, true] {
+                let plan = plan_cycle(&c, mk(MarketDataMode::Paused, wind_down), halted);
+                // Nothing is even requested while the feed is untrusted, so
+                // the caller's exit tracking stays untouched.
+                assert_eq!(plan.requested_inventory_exit, None);
+                assert_eq!(plan.inventory_exit, None);
+                assert_eq!(
+                    plan.exit_suppression,
+                    Some(SuppressedExit {
+                        kind: expected_kind,
+                        reason: ExitSuppression::MarketDataInactive,
+                    }),
+                    "wind_down={wind_down} halted={halted}"
+                );
+            }
+        }
+    }
+
+    /// Stage 5-b D2: the account hard floors are off by default, equity is
+    /// checked before margin, and a bad snapshot never trips a stop.
+    #[test]
+    fn account_floor_breach_is_opt_in_and_ordered() {
+        // Default (0/0) can never fire, whatever the balances look like.
+        assert_eq!(account_floor_breach(0.0, 0.0, 0.0, 0.0), None);
+        assert_eq!(account_floor_breach(-50.0, -50.0, 0.0, 0.0), None);
+
+        assert_eq!(
+            account_floor_breach(99.0, 500.0, 100.0, 0.0),
+            Some((AccountFloorBreach::Equity, 99.0, 100.0))
+        );
+        // Exactly at the floor is not a breach.
+        assert_eq!(account_floor_breach(100.0, 500.0, 100.0, 0.0), None);
+        assert_eq!(
+            account_floor_breach(500.0, 40.0, 0.0, 50.0),
+            Some((AccountFloorBreach::Margin, 40.0, 50.0))
+        );
+        // Both breached: equity is the more fundamental condition and wins.
+        assert_eq!(
+            account_floor_breach(99.0, 40.0, 100.0, 50.0),
+            Some((AccountFloorBreach::Equity, 99.0, 100.0))
+        );
+        // Unparseable/absent balances arrive as NaN and must not stop a run.
+        assert_eq!(account_floor_breach(f64::NAN, f64::NAN, 100.0, 50.0), None);
+        assert_eq!(
+            account_floor_breach(f64::NAN, 40.0, 100.0, 50.0),
+            Some((AccountFloorBreach::Margin, 40.0, 50.0))
+        );
+    }
+
+    /// The labels are part of the evidence contract: run manifests and
+    /// dashboards key off these strings.
+    #[test]
+    fn exit_and_floor_labels_are_stable() {
+        assert_eq!(ExitKind::InventoryTrim.as_str(), "inventory_trim");
+        assert_eq!(ExitKind::WindDown.as_str(), "wind_down");
+        assert_eq!(ExitSuppression::VolatilityHalt.as_str(), "volatility_halt");
+        assert_eq!(
+            ExitSuppression::MarketDataInactive.as_str(),
+            "market_data_inactive"
+        );
+        assert_eq!(AccountFloorBreach::Equity.as_str(), "equity");
+        assert_eq!(AccountFloorBreach::Margin.as_str(), "margin");
     }
 
     #[test]
@@ -2628,8 +2943,8 @@ mod tests {
 
     // 33. Equity floor: edge-triggered fire then clear with hysteresis.
     #[test]
-    fn alerts_equity_floor_edge() {
-        let mut m = AlertMonitor::new(0.0, 0.0, 0.0).with_account_floors(100.0, 0.0);
+    fn alerts_equity_alert_edge() {
+        let mut m = AlertMonitor::new(0.0, 0.0, 0.0).with_account_alerts(100.0, 0.0);
         assert!(m.account_enabled());
         // Above floor -> no alert.
         assert!(m.evaluate_account(120.0, 999.0).is_empty());
@@ -2651,8 +2966,8 @@ mod tests {
 
     // 34. Available-margin floor fires independently of equity.
     #[test]
-    fn alerts_margin_floor_fires() {
-        let mut m = AlertMonitor::new(0.0, 0.0, 0.0).with_account_floors(0.0, 50.0);
+    fn alerts_margin_alert_fires() {
+        let mut m = AlertMonitor::new(0.0, 0.0, 0.0).with_account_alerts(0.0, 50.0);
         assert!(m.evaluate_account(9999.0, 60.0).is_empty());
         let a = m.evaluate_account(9999.0, 40.0);
         assert_eq!(a.len(), 1);
@@ -2697,6 +3012,7 @@ mod tests {
             Some(InventoryExit {
                 side: OrderSide::Buy,
                 qty: 0.02,
+                kind: ExitKind::WindDown,
             })
         );
         assert_eq!(plan.inventory_exit, plan.requested_inventory_exit);
@@ -2785,6 +3101,7 @@ mod tests {
             Some(InventoryExit {
                 side: OrderSide::Sell,
                 qty: 0.02,
+                kind: ExitKind::WindDown,
             })
         );
         assert_eq!(plan_cycle(&c, mk(0.0005), false).inventory_exit, None);
@@ -2794,6 +3111,7 @@ mod tests {
             Some(InventoryExit {
                 side: OrderSide::Buy,
                 qty: 0.0006,
+                kind: ExitKind::WindDown,
             })
         );
     }

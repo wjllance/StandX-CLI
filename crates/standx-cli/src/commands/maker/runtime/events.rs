@@ -244,6 +244,7 @@ pub(super) fn apply_order_response(
                     price: place.price,
                     price_decimals,
                     detail: &response.message,
+                    exit_kind: None,
                 });
             }
         }
@@ -299,11 +300,14 @@ impl AccountEventOutcome {
 
 pub(super) fn schedule_account_balance_refresh(
     requested: &mut bool,
-    account_alerts_enabled: bool,
+    // Account-risk watch flag: an alert threshold **or** an armed stage 5-b
+    // hard floor (see `account_risk_watch_enabled`). A floor-only session must
+    // still get balance refreshes.
+    account_risk_watched: bool,
     poll: &mut LiveAccountPollState,
     now: std::time::Instant,
 ) -> bool {
-    if !std::mem::take(requested) || !account_alerts_enabled {
+    if !std::mem::take(requested) || !account_risk_watched {
         return false;
     }
     poll.request_balance_refresh(now);

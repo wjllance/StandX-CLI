@@ -243,6 +243,8 @@ impl MakerRuntime {
                         max_divergence_bps: args.max_divergence_bps,
                         inventory_exit_pct: args.inventory_exit_pct,
                         inventory_exit_qty: args.inventory_exit_qty,
+                        stop_equity_below: args.stop_equity_below,
+                        stop_margin_below: args.stop_margin_below,
                         wind_down: self.loop_state.wind_down,
                         qty_tolerance,
                         session_started_at,
@@ -790,6 +792,52 @@ impl MakerRuntime {
                     }
                 }
                 Err(e) => {
+                    // Solvency brake (stage 5-b): raised from inside the cycle
+                    // *before* any order work, so reaching here means the
+                    // breached (or unverifiable) balance added no exposure.
+                    // A different policy from the strategy's --stop-loss —
+                    // separate config names, separate typed stop reason. Both
+                    // stop and hand off; neither ever auto-flattens.
+                    if let Some(floor) = e.downcast_ref::<AccountFloorError>() {
+                        emit_account_floor_triggered(
+                            output_format,
+                            symbol,
+                            cycle,
+                            AccountFloorStop {
+                                event: floor.cause.event(),
+                                metric: floor.metric,
+                                observed: floor.observed,
+                                floor: floor.floor,
+                                detail: &floor.detail,
+                            },
+                        );
+                        notifier
+                            .risk(
+                                RiskNotice {
+                                    kind: "account_floor",
+                                    severity: "critical",
+                                    event: floor.cause.event(),
+                                    message: &format!("{}; shutting down", floor.detail),
+                                    symbol,
+                                    cycle,
+                                    position_before: None,
+                                    position_after: Some(self.loop_state.ledger.expected_position),
+                                    expected: Some(self.loop_state.ledger.expected_position),
+                                    observed: None,
+                                },
+                                true,
+                            )
+                            .await;
+                        self.recovery
+                            .runtime_state
+                            .handle(MakerEvent::StopRequested(RuntimeStopReason::AccountFloor(
+                                floor.detail.clone(),
+                            )));
+                        break 'phase take_stop_effect(
+                            &mut self.recovery.runtime_state,
+                            MakerExit::AccountFloor,
+                        );
+                    }
                     if let Some(degraded) = e.downcast_ref::<MarketDataDegradedError>() {
                         let detail = degraded.detail.clone();
                         self.recovery
@@ -1143,7 +1191,7 @@ impl MakerRuntime {
                 return LoopDirective::Restart;
             }
             if self.loop_state.account_balance_refresh_requested
-                && self.loop_state.alerts.account_enabled()
+                && account_risk_watch_enabled(args, &self.loop_state.alerts)
             {
                 // A balance event arrived while the just-finished cycle was doing
                 // I/O. Skip the normal interval so the next cycle can fetch the
