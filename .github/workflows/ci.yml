@@ -208,11 +208,24 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'release' && !contains(github.event.release.tag_name, '-')
     steps:
+      # Fail loudly on a missing secret. The previous
+      # `HOMEBREW_TAP_TOKEN || GITHUB_TOKEN` fallback silently degraded to a
+      # token that cannot reach another repository, so "secret not configured"
+      # surfaced as `Bad credentials` — which reads like a permissions problem
+      # and cost real debugging time on both the v1.1.0 and v1.2.0 releases.
+      # `secrets` is not available in a job-level `if`, so this is a step.
+      - name: Require the tap token
+        run: |
+          if [ -z "${{ secrets.HOMEBREW_TAP_TOKEN }}" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN is not configured, so the Homebrew tap cannot be updated. Add a token with contents:write on wjllance/homebrew-standx-cli (Settings > Secrets and variables > Actions), then re-run this job. The release itself is already published; only the formula is stale."
+            exit 1
+          fi
+
       - name: Checkout homebrew tap
         uses: actions/checkout@v4
         with:
           repository: wjllance/homebrew-standx-cli
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
 
       - name: Download source tarball
@@ -227,6 +240,17 @@ jobs:
           cd homebrew-tap
           sed -i "s|url \"https://github.com/wjllance/standx-cli/archive/refs/tags/v.*.tar.gz\"|url \"https://github.com/wjllance/standx-cli/archive/refs/tags/${{ env.VERSION }}.tar.gz\"|" Formula/standx-cli.rb
           sed -i "s|sha256 \"[^\"]*\"|sha256 \"${{ env.SHA256 }}\"|" Formula/standx-cli.rb
+          # A sed whose pattern stops matching (formula reformatted, url moved)
+          # would leave the formula untouched and still exit 0. Assert the two
+          # values we came here to write are actually present.
+          grep -q "archive/refs/tags/${{ env.VERSION }}.tar.gz" Formula/standx-cli.rb || {
+            echo "::error::formula url was not rewritten to ${{ env.VERSION }}; check the sed patterns against the current Formula/standx-cli.rb"
+            exit 1
+          }
+          grep -q "sha256 \"${{ env.SHA256 }}\"" Formula/standx-cli.rb || {
+            echo "::error::formula sha256 was not rewritten; check the sed patterns against the current Formula/standx-cli.rb"
+            exit 1
+          }
 
       - name: Commit and push to tap
         run: |
