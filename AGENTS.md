@@ -64,6 +64,7 @@ Keep exchange-specific payload parsing and transport error classification in `st
 - Keep transport adapters small and explicit. Parse and validate SDK values once, then pass typed numeric/domain values to the maker crate.
 - Avoid large parameter lists. Group stable inputs into context/request/state types with clear ownership.
 - A refactor must retain observable trading order, failure behavior, telemetry schema, and configured policy unless the change explicitly states otherwise.
+- Before working a standing quality issue, re-verify its checklist item by item against current code. These checklists go stale: items are routinely already done by later commits, and building straight from the list produces duplicate work. Evaluating an item and deliberately dropping it is a valid outcome — record the cost/benefit and the regression risk in the issue and in the commit body.
 
 ## Testing Requirements
 
@@ -86,3 +87,15 @@ python3 -m py_compile scripts/openobserve_dashboard.py
 ```
 
 Credential-dependent or production validation is separate from offline verification. Never place live orders, disconnect production streams, execute inventory exits, or flatten positions without explicit authorization for that specific exercise.
+
+Changes whose correctness can only be settled by live market data — strategy parameters, mechanism toggles, quoting or exit behaviour, risk thresholds — additionally follow `docs/28-experiment-protocol.md` (pre-registered criteria, single-config-line arms, unjudged-metric register). The dividing line is whether the change can affect fill outcomes.
+
+## Pre-Merge Verification
+
+A green offline run (fmt, clippy, tests) is necessary, not sufficient. Before handing off or merging a branch that touches maker, safety, or live paths:
+
+- Run one adversarial review pass with a reviewer that did not write the code — a different model or agent, prompted to find high-severity defects rather than to confirm the design. Every high-severity defect found in this area so far came from this pass, not from self-testing.
+- Accept only reproducible findings. State the concrete path step by step, reproduce it in a test, then fix. Record in the commit body: the path, why it is dangerous, the fix trade-off, and — when the defect also exists on `main` rather than being introduced by the branch — that fact plus whether it is in scope.
+- Verify every new safety test by mutation: deliberately break the implementation and confirm the test goes red. A test that still passes against a broken implementation has pinned nothing, and saying it was added is misleading.
+- Ship new mechanisms default-off, and keep behaviour byte-equivalent to the previous release when the toggle is off, with a test pinning the equivalence.
+- When a test corrects a design assumption, write the corrected reasoning into a code comment at the decision site, not only into the commit message.
