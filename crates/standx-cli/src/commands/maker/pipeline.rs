@@ -9,13 +9,17 @@ use standx_maker::{
 };
 use standx_sdk::account_stream::AccountStreamHealth;
 use standx_sdk::client::StandXClient;
-use standx_sdk::models::{Balance, Order, Position, Trade};
+use standx_sdk::models::{Balance, FundingHistoryEntry, Order, Position, Trade};
 use standx_sdk::order_response::{OrderCommandSender, OrderResponseHealth};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 const ACCOUNT_AUDIT_INTERVAL: Duration = Duration::from_secs(30);
 const REST_POSITION_RECHECK_DELAY: Duration = Duration::from_secs(3);
+/// Funding is hourly on this venue, so 200 rows is >8 days of cover for a
+/// window that starts at session start. A batch that comes back at exactly this
+/// size may be truncated and is reported rather than silently accepted.
+pub(super) const FUNDING_HISTORY_LIMIT: u32 = 200;
 const BALANCE_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const BALANCE_MAX_STALE: Duration = Duration::from_secs(60);
 const BALANCE_REFRESH_RETRY: Duration = Duration::from_secs(5);
@@ -204,6 +208,9 @@ pub(super) struct AccountAudit {
     pub(super) positions: Vec<Position>,
     pub(super) filled_orders: Vec<Order>,
     pub(super) trades: Vec<Trade>,
+    /// Funding cashflows since the session start / last cursor. Hourly on this
+    /// venue, so the 30s audit cadence over-samples it comfortably.
+    pub(super) funding: Vec<FundingHistoryEntry>,
 }
 
 /// Cached, REST-derived account presentation plus the low-frequency full
@@ -211,6 +218,10 @@ pub(super) struct AccountAudit {
 /// stream projection and perform no account REST reads.
 pub(super) struct LiveAccountPollState {
     balance: Balance,
+    /// Funding row ids already accounted for. `last_id` on the venue endpoint
+    /// pages *backward* (older rows), so there is no "since" cursor to lean on —
+    /// dedup is by id, the same way trade dedup works.
+    applied_funding_ids: std::collections::HashSet<i64>,
     balance_updated_at: Instant,
     next_balance_refresh_at: Instant,
     next_account_audit_at: Instant,
@@ -222,6 +233,7 @@ impl LiveAccountPollState {
         Self {
             balance,
             balance_updated_at: now,
+            applied_funding_ids: std::collections::HashSet::new(),
             next_balance_refresh_at: now + BALANCE_REFRESH_INTERVAL,
             next_account_audit_at: now + ACCOUNT_AUDIT_INTERVAL,
             rest_position_recheck_at: None,
@@ -230,6 +242,10 @@ impl LiveAccountPollState {
 
     pub(super) fn balance(&self) -> &Balance {
         &self.balance
+    }
+
+    pub(super) fn applied_funding_ids(&mut self) -> &mut std::collections::HashSet<i64> {
+        &mut self.applied_funding_ids
     }
 
     pub(super) fn balance_refresh_due(&self, now: Instant) -> bool {
@@ -301,17 +317,26 @@ pub(super) async fn fetch_account_audit(
     session_started_at: i64,
     now: i64,
 ) -> Result<AccountAudit> {
-    let (open_orders, positions, filled_orders, trades) = tokio::join!(
+    let (open_orders, positions, filled_orders, trades, funding) = tokio::join!(
         client.get_open_orders(Some(symbol)),
         client.get_positions(Some(symbol)),
         client.get_order_history(Some(symbol), Some(ORDER_HISTORY_LIMIT)),
         client.get_user_trades(symbol, session_started_at, now, Some(TRADE_LOOKBACK_LIMIT)),
+        // No cursor: `last_id` pages backward on this venue, so incrementality
+        // comes from id dedup on the apply side, not from the request.
+        client.get_funding_history(
+            Some(symbol),
+            Some(session_started_at),
+            None,
+            Some(FUNDING_HISTORY_LIMIT)
+        ),
     );
     Ok(AccountAudit {
         open_orders: open_orders?,
         positions: positions?,
         filled_orders: filled_orders?,
         trades: trades?,
+        funding: funding?,
     })
 }
 
@@ -646,6 +671,16 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
+        // Funding history is a bare array, not the {code,message,result} envelope.
+        let funding = server
+            .mock("GET", "/api/query_funding_history")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .expect(1)
+            .create_async()
+            .await;
         let balance_mock = server
             .mock("GET", "/api/query_balance")
             .with_status(200)
@@ -674,9 +709,11 @@ mod tests {
         assert!(audit.open_orders.is_empty());
         assert!(audit.positions.is_empty());
         assert!(audit.trades.is_empty());
+        assert!(audit.funding.is_empty());
         poll.record_account_audit(due);
         poll.record_balance_refresh(refreshed_balance.unwrap(), due);
 
+        funding.assert_async().await;
         open_orders.assert_async().await;
         positions.assert_async().await;
         filled_orders.assert_async().await;

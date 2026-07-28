@@ -513,6 +513,28 @@ impl MakerRuntime {
                     .health
                     .degraded_class()
                     .expect("degraded market data must have a fault class");
+                // Structured twin of the heartbeat below: same facts, but as
+                // fields, so standby duration can be counted instead of parsed
+                // out of a sentence.
+                emit_market_data_standby(
+                    output_format,
+                    symbol,
+                    cycle,
+                    MarketDataStandby {
+                        fault_class: class.label(),
+                        paused_secs: standby_secs,
+                        quoteable_streak: self.market.health.quoteable_streak(),
+                        snapshots_required: maker::MARKET_DATA_COHERENT_SNAPSHOTS_TO_RECOVER,
+                        divergence_bps: match class {
+                            maker::MarketDataFaultClass::MarketState => {
+                                self.market.last_divergence_bps
+                            }
+                            maker::MarketDataFaultClass::Transport => None,
+                        },
+                        threshold_bps: max_divergence_bps,
+                        maker_book_empty: self.market.maker_book_verified_empty,
+                    },
+                );
                 let (event, message) = match class {
                     maker::MarketDataFaultClass::MarketState => {
                         let divergence = self.market.last_divergence_bps.map_or_else(

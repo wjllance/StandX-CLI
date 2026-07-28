@@ -1,12 +1,30 @@
 #!/usr/bin/env python3
-"""Create or update the StandX maker deadman alert in OpenObserve.
+"""Create or update the StandX maker OpenObserve alerts.
 
-A scheduled alert fires when the ``standx_maker`` stream has seen no
-``action='cycle_summary'`` event for the deadman window (~3 minutes). This is
-the push-based safety net for issue #220: a silent death (SIGKILL / OOM /
-panic / host down) stops emitting cycle summaries, so the deadman trips and
-posts to the configured webhook even though the process itself can no longer
-notify anyone.
+Two push-based safety nets, provisioned together:
+
+1. **Deadman** — fires when the ``standx_maker`` stream has seen no
+   ``action='cycle_summary'`` event for the deadman window (~3 minutes). This
+   is the net for issue #220: a silent death (SIGKILL / OOM / panic / host
+   down) stops emitting cycle summaries, so the deadman trips even though the
+   process itself can no longer notify anyone.
+2. **Critical risk** — fires when any row with ``severity='critical'`` lands in
+   the stream: stop-loss, account floor, accounting invariant, cleanup with
+   residual orders, residual-position handoff/unknown. The deadman only covers
+   "the process died"; this covers "the process is alive and something went
+   wrong". Until this alert existed, the only immediate channel for those
+   events was the maker's own webhook POST, which is not retried — a slow or
+   broken endpoint meant nobody heard about it.
+
+   The condition is deliberately ``severity='critical'`` alone rather than a
+   per-action list: it is a single condition (the same shape the deadman
+   already proves works on this deployment) and it picks up any future critical
+   event without another migration.
+
+   Known limitation: the alert text says *that* a critical row arrived within
+   the window, not which one — only ``{stream_name}`` / ``{alert_name}`` /
+   ``{org_name}`` are verified-substituting variables on this build. Use the
+   dashboard's "Rejections & Error Signals" panel for the row itself.
 
 Environment (shares the dashboard script's OpenObserve variables):
 
@@ -18,6 +36,10 @@ Environment (shares the dashboard script's OpenObserve variables):
   alert POSTs to. The template body is Feishu msg_type=text, so a Slack or
   generic ``{"text": ...}`` endpoint will reject it.
 - ``OPENOBSERVE_ALERT_MINUTES`` default ``3``; deadman window in minutes
+- ``OPENOBSERVE_CRITICAL_SILENCE_MINUTES`` default ``5``; how long the critical
+  alert stays silent after firing. Critical events arrive in bursts on a
+  fail-safe shutdown (floor breach -> residual handoff -> stopped), so a short
+  silence keeps one incident to one notification.
 """
 
 from __future__ import annotations
@@ -31,9 +53,12 @@ from typing import Any
 from urllib import error, parse, request
 
 
-ALERT_NAME = "standx_maker_deadman"
-TEMPLATE_NAME = "standx_maker_deadman_template"
-DESTINATION_NAME = "standx_maker_deadman_webhook"
+DEADMAN_ALERT_NAME = "standx_maker_deadman"
+DEADMAN_TEMPLATE_NAME = "standx_maker_deadman_template"
+DEADMAN_DESTINATION_NAME = "standx_maker_deadman_webhook"
+CRITICAL_ALERT_NAME = "standx_maker_critical_risk"
+CRITICAL_TEMPLATE_NAME = "standx_maker_critical_risk_template"
+CRITICAL_DESTINATION_NAME = "standx_maker_critical_risk_webhook"
 NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 # Feishu (Lark) custom-bot text payload. OpenObserve substitutes the {var}
@@ -46,16 +71,28 @@ _DEADMAN_TEXT = (
     "died silently (SIGKILL/OOM/panic/host down) and could be leaving "
     "resting orders on the venue. Alert: {alert_name} org: {org_name}"
 )
-TEMPLATE_BODY = json.dumps(
+DEADMAN_TEMPLATE_BODY = json.dumps(
     {"msg_type": "text", "content": {"text": _DEADMAN_TEXT}}
 )
 
+_CRITICAL_TEXT = (
+    "\U0001f6a8 StandX maker CRITICAL: a severity=critical event landed in "
+    "the {stream_name} stream (stop-loss, account floor, accounting "
+    "invariant, cleanup residual orders, or residual-position handoff). The "
+    "process may be shutting down and may be leaving a position or orders on "
+    "the venue. Check the dashboard 'Rejections & Error Signals' panel for the "
+    "row. Alert: {alert_name} org: {org_name}"
+)
+CRITICAL_TEMPLATE_BODY = json.dumps(
+    {"msg_type": "text", "content": {"text": _CRITICAL_TEXT}}
+)
 
-def build_alert(stream: str, minutes: int) -> dict[str, Any]:
+
+def build_deadman_alert(stream: str, minutes: int) -> dict[str, Any]:
     """Scheduled alert that trips when fewer than one cycle_summary row is
     seen within the deadman window."""
     return {
-        "name": ALERT_NAME,
+        "name": DEADMAN_ALERT_NAME,
         "stream_type": "logs",
         "stream_name": stream,
         "is_real_time": False,
@@ -87,12 +124,63 @@ def build_alert(stream: str, minutes: int) -> dict[str, Any]:
             "silence": minutes,
             "timezone": "UTC",
         },
-        "destinations": [DESTINATION_NAME],
+        "destinations": [DEADMAN_DESTINATION_NAME],
         "context_attributes": {},
         "row_template": "",
         "description": (
             "Deadman: fires when the maker stops emitting cycle_summary "
             "events, i.e. it likely died without running cleanup (issue #220)."
+        ),
+        "enabled": True,
+    }
+
+
+def build_critical_alert(stream: str, silence_minutes: int) -> dict[str, Any]:
+    """Scheduled alert that trips as soon as a severity=critical row arrives.
+
+    Evaluated every minute over the last minute: any match fires. The silence
+    window collapses a burst (a fail-safe shutdown emits several critical rows
+    in a row) into one notification.
+    """
+    return {
+        "name": CRITICAL_ALERT_NAME,
+        "stream_type": "logs",
+        "stream_name": stream,
+        "is_real_time": False,
+        "query_condition": {
+            "type": "custom",
+            "conditions": [
+                {
+                    "column": "severity",
+                    "operator": "=",
+                    "value": "critical",
+                }
+            ],
+            "sql": "",
+            "promql": "",
+            "promql_condition": None,
+            "aggregation": None,
+            "vrl_function": None,
+            "search_event_type": None,
+        },
+        "trigger_condition": {
+            "period": 1,
+            "operator": ">=",
+            "threshold": 1,
+            "frequency": 1,
+            "frequency_type": "minutes",
+            "silence": silence_minutes,
+            "timezone": "UTC",
+        },
+        "destinations": [CRITICAL_DESTINATION_NAME],
+        "context_attributes": {},
+        # Best-effort row detail: harmless if this build does not substitute it.
+        "row_template": "{kind}/{event}: {message}",
+        "description": (
+            "Critical risk: fires on any severity=critical row (stop-loss, "
+            "account floor, accounting invariant, cleanup residual orders, "
+            "residual-position handoff). Covers 'alive but broken', which the "
+            "deadman does not."
         ),
         "enabled": True,
     }
@@ -108,6 +196,14 @@ class OpenObserve:
             self.minutes = int(os.getenv("OPENOBSERVE_ALERT_MINUTES", "3"))
         except ValueError as exc:
             raise RuntimeError("OPENOBSERVE_ALERT_MINUTES must be an integer") from exc
+        try:
+            self.critical_silence = int(
+                os.getenv("OPENOBSERVE_CRITICAL_SILENCE_MINUTES", "5")
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                "OPENOBSERVE_CRITICAL_SILENCE_MINUTES must be an integer"
+            ) from exc
         username = os.getenv("OPENOBSERVE_USER", "")
         password = os.getenv("OPENOBSERVE_PASSWORD", "")
         if not username or not password:
@@ -116,6 +212,8 @@ class OpenObserve:
             raise RuntimeError("OPENOBSERVE_ALERT_WEBHOOK is required")
         if self.minutes < 1:
             raise RuntimeError("OPENOBSERVE_ALERT_MINUTES must be >= 1")
+        if self.critical_silence < 1:
+            raise RuntimeError("OPENOBSERVE_CRITICAL_SILENCE_MINUTES must be >= 1")
         if not NAME_RE.fullmatch(self.org) or not NAME_RE.fullmatch(self.stream):
             raise RuntimeError(
                 "OpenObserve org and stream may contain only letters, digits, and underscore"
@@ -155,27 +253,27 @@ class OpenObserve:
             return False
         return any(isinstance(item, dict) and item.get("name") == name for item in items)
 
-    def upsert_template(self) -> str:
+    def upsert_template(self, name: str, body: str) -> str:
         base = f"/api/{self._org()}/alerts/templates"
-        payload = {"name": TEMPLATE_NAME, "body": TEMPLATE_BODY, "isDefault": False}
-        if self._exists(base, TEMPLATE_NAME):
-            self.json_request("PUT", f"{base}/{parse.quote(TEMPLATE_NAME, safe='')}", payload)
+        payload = {"name": name, "body": body, "isDefault": False}
+        if self._exists(base, name):
+            self.json_request("PUT", f"{base}/{parse.quote(name, safe='')}", payload)
             return "updated"
         self.json_request("POST", base, payload)
         return "created"
 
-    def upsert_destination(self) -> str:
+    def upsert_destination(self, name: str, template_name: str) -> str:
         base = f"/api/{self._org()}/alerts/destinations"
         payload = {
-            "name": DESTINATION_NAME,
+            "name": name,
             "url": self.webhook,
             "method": "post",
             "skip_tls_verify": False,
-            "template": TEMPLATE_NAME,
+            "template": template_name,
             "headers": {},
         }
-        if self._exists(base, DESTINATION_NAME):
-            self.json_request("PUT", f"{base}/{parse.quote(DESTINATION_NAME, safe='')}", payload)
+        if self._exists(base, name):
+            self.json_request("PUT", f"{base}/{parse.quote(name, safe='')}", payload)
             return "updated"
         self.json_request("POST", base, payload)
         return "created"
@@ -194,13 +292,13 @@ class OpenObserve:
             None,
         )
 
-    def upsert_alert(self, alert: dict[str, Any]) -> str:
+    def upsert_alert(self, name: str, alert: dict[str, Any]) -> str:
         # Alerts moved to the v2 API (OpenObserve >= ~0.14): org-scoped, keyed
         # by alert_id rather than name, with stream_name as a body field
         # instead of a path segment. The old stream-scoped v1 path
         # (/api/{org}/{stream}/alerts) 404s on current OpenObserve builds.
         base = f"/api/v2/{self._org()}/alerts"
-        alert_id = self._find_alert_id(base, ALERT_NAME)
+        alert_id = self._find_alert_id(base, name)
         if alert_id:
             self.json_request("PUT", f"{base}/{parse.quote(alert_id, safe='')}", alert)
             return "updated"
@@ -210,21 +308,43 @@ class OpenObserve:
 
 def main() -> int:
     client = OpenObserve()
-    template_action = client.upsert_template()
-    destination_action = client.upsert_destination()
-    alert = build_alert(client.stream, client.minutes)
-    alert_action = client.upsert_alert(alert)
+    # Each alert owns its own template + destination: OpenObserve binds a
+    # template to a destination, and the two alerts need different texts.
+    specs = [
+        (
+            DEADMAN_ALERT_NAME,
+            DEADMAN_TEMPLATE_NAME,
+            DEADMAN_TEMPLATE_BODY,
+            DEADMAN_DESTINATION_NAME,
+            build_deadman_alert(client.stream, client.minutes),
+        ),
+        (
+            CRITICAL_ALERT_NAME,
+            CRITICAL_TEMPLATE_NAME,
+            CRITICAL_TEMPLATE_BODY,
+            CRITICAL_DESTINATION_NAME,
+            build_critical_alert(client.stream, client.critical_silence),
+        ),
+    ]
+    provisioned = []
+    for alert_name, template_name, template_body, destination_name, alert in specs:
+        template_action = client.upsert_template(template_name, template_body)
+        destination_action = client.upsert_destination(destination_name, template_name)
+        alert_action = client.upsert_alert(alert_name, alert)
+        provisioned.append(
+            {
+                "template": {"name": template_name, "action": template_action},
+                "destination": {"name": destination_name, "action": destination_action},
+                "alert": {"name": alert_name, "action": alert_action},
+            }
+        )
     print(
         json.dumps(
             {
-                "template": {"name": TEMPLATE_NAME, "action": template_action},
-                "destination": {"name": DESTINATION_NAME, "action": destination_action},
-                "alert": {
-                    "name": ALERT_NAME,
-                    "action": alert_action,
-                    "stream": client.stream,
-                    "deadman_minutes": client.minutes,
-                },
+                "stream": client.stream,
+                "deadman_minutes": client.minutes,
+                "critical_silence_minutes": client.critical_silence,
+                "provisioned": provisioned,
             },
             indent=2,
         )

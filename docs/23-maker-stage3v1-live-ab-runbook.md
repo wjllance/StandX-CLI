@@ -88,6 +88,51 @@ release record contains this exact authorization:
 - canary 期间 XAG/HYPE 两条 A/B 容器与任何手工 live maker 全部停止；锁路径
   为容器本地（docker 部署的既有取舍，见 deploy/docker/README.md）。
 
+## 账户硬熔断（`stop_*`，阶段 5-b）——扩规模时才开
+
+阶段 5-b 合并后新增两个**默认关闭**的账户级硬熔断，与 `alert_equity_below` /
+`alert_margin_below` 是两件事（后者只通知）。设计与判定见
+[26-maker-stage5b-design.md](26-maker-stage5b-design.md) D2。
+
+- 当前所有实验（含冻结基线 PnL 采集）**保持关闭**：不扩规模时 `stop_loss` 已是会话级
+  刹车，风险预算沿用 canary 口径。
+- **扩大规模（加 size / max_position / 多 symbol）的授权必须显式开启并写入授权文本**，
+  连同取值与 emergency cancel 操作人一起记录。
+
+配置方式（CLI 或 TOML 同名键，quote 单位，0 = 关）：
+
+```toml
+stop_equity_below = 80     # 账户 equity 低于此值 → fail-safe 停机 + 残余仓位交接
+stop_margin_below = 20     # cross available margin 低于此值 → 同上
+```
+
+取值指引：
+
+- **equity floor**：取"还能承受一次已知最坏路径"的水位——`max_position × 预期不利变动 +
+  退出成本` 之下再留一档余量，别贴着当前 equity 设（贴太近会被正常浮亏触发）。参考现有
+  告警线的关系：`alert_equity_below` 是提前预警，硬熔断应**低于**它，两者之间留出人工
+  响应窗口。基线目前 `alert_equity_below = 94.0`（equity ≈ $184），扩规模时按新规模
+  重算，不要直接套这个数。
+- **margin floor**：取"还能开出一档报价 + 一次 reduce-only 退出"所需的可用保证金，
+  低于此值继续报价只会以拒单形式失败。
+- 两个可以只开一个（另一个留 0）。
+
+开启后必须知道的行为（都在 26 号文档有测试钉住）：
+
+- 判定在**下单之前**：破线那一轮一张单都不会发，只剩收尾撤单。
+- **fail-closed**：武装状态下余额超 35s 未刷新，或该熔断真正读的字段解析失败，
+  会以 `event:"unevaluable"` 停机——不是"未破线"。只武装 equity floor 时 margin 字段
+  坏掉不牵连停机。
+- 停机后**不自动平仓**：走残余仓位交接（`action:"residual_position"`，
+  `flat` / `handoff` / `unknown` 三态），`unknown` 必须人工去场馆核对。
+- typed 结果与 `stop_loss` 区分：`action:"account_floor"` /
+  `RuntimeStopReason::AccountFloor` / 退出码仍是 75。
+
+前置检查（开启硬熔断的那次授权额外加两条）：
+
+- [ ] 记录 floor 取值与推导依据（不是拍数字）；
+- [ ] 确认 webhook 能收到 `kind:"account_floor"` 的 critical 通知。
+
 ## Bounded canary（HYPE-USD）
 
 确认 `orders=[]` / `positions=[]` 后执行场馆最小 `ws-command-canary`，保留

@@ -1,4 +1,4 @@
-use super::ledger::{adopt_order, apply_rest_trade};
+use super::ledger::{adopt_order, apply_funding_history, apply_rest_trade};
 #[cfg(test)]
 use super::ledger::{apply_account_trade, apply_order_update, maker_trade_fill};
 use super::model::{position_for_symbol, rest_order_observation};
@@ -8,7 +8,7 @@ use super::output::{
 };
 use super::pipeline::{
     fetch_account_audit, CycleRequest, CycleResult, CycleState, OrderRequestKind,
-    BALANCE_FLOOR_MAX_AGE,
+    BALANCE_FLOOR_MAX_AGE, FUNDING_HISTORY_LIMIT,
 };
 use super::recovery::PositionReconciliationError;
 use anyhow::Result;
@@ -429,6 +429,24 @@ pub(super) async fn maker_cycle(
         );
 
         if let Some(audit) = audit {
+            // Funding first: it only touches the performance ledger's cashflow
+            // accumulator, never positions or orders, so it cannot disturb the
+            // reconciliation below.
+            if audit.funding.len() as u32 >= FUNDING_HISTORY_LIMIT {
+                // No silent caps: a full page means older funding since session
+                // start may have been cut off, so the attribution is suspect.
+                eprintln!(
+                    "⚠️  funding history page is full ({} rows); funding attribution may be truncated",
+                    audit.funding.len()
+                );
+            }
+            apply_funding_history(
+                ledger,
+                &audit.funding,
+                symbol,
+                session_started_at,
+                poll.applied_funding_ids(),
+            )?;
             for order in audit.open_orders.iter().chain(audit.filled_orders.iter()) {
                 adopt_order(ledger, order, run_order_prefix)?;
             }
