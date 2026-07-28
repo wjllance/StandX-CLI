@@ -1,5 +1,8 @@
 use super::ledger::{adopt_order, apply_rest_trade};
-use super::model::{is_current_run_order, is_maker_order, position_for_symbol, StreamHealth};
+use super::model::{
+    is_current_run_order, is_maker_order, optional_decimal, position_for_symbol, Decimal,
+    StreamHealth,
+};
 use super::output::{emit_live_fill, ts_now};
 use super::pipeline::{fetch_account_audit, AccountAudit};
 use crate::cli::OutputFormat;
@@ -200,14 +203,10 @@ pub(super) async fn recover_current_run_order_ids_for_reconciliation(
             Some("sell") => -1.0,
             _ => continue,
         };
-        let Ok(qty) = trade.qty.parse::<f64>() else {
+        let Some(qty) = optional_decimal(&trade.qty, Decimal::Positive) else {
             continue;
         };
-        if !qty.is_finite()
-            || qty <= 0.0
-            || side * position_gap <= 0.0
-            || qty > position_gap.abs() + gap.qty_tolerance
-        {
+        if side * position_gap <= 0.0 || qty > position_gap.abs() + gap.qty_tolerance {
             continue;
         }
         candidate_ids.insert(order_id);

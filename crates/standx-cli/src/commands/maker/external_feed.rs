@@ -12,6 +12,7 @@
 //! absent, and quoting continues unaffected. This task can never stop the
 //! maker.
 
+use super::model::Decimal;
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -138,7 +139,8 @@ fn parse_mid(text: &str) -> Option<f64> {
         serde_json::Value::Number(n) => n.as_f64(),
         _ => None,
     }
-    .filter(|mid| mid.is_finite() && *mid > 0.0)
+    // Same "usable price" rule the maker's own feed applies.
+    .filter(|mid| Decimal::Positive.admits(*mid))
 }
 
 /// Raw leader-vs-mark divergence in bps plus the sample age. `None` on any

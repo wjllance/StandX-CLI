@@ -313,13 +313,15 @@ pub(super) async fn run_ws_command_canary(
         &client,
         &commands,
         &mut responses,
-        &symbol,
-        &client_order_id,
-        quantity,
-        price,
-        info.qty_tick_decimals,
-        info.price_tick_decimals,
-        timeout,
+        CanaryOrderPlan {
+            symbol: &symbol,
+            client_order_id: &client_order_id,
+            quantity,
+            price,
+            qty_decimals: info.qty_tick_decimals,
+            price_decimals: info.price_tick_decimals,
+            timeout,
+        },
         &evidence,
     )
     .await;
@@ -363,20 +365,38 @@ pub(super) async fn run_ws_command_canary(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_commands(
-    client: &StandXClient,
-    commands: &OrderCommandSender,
-    responses: &mut mpsc::Receiver<OrderResponse>,
-    symbol: &str,
-    client_order_id: &str,
+/// The single bounded order the canary places, cancels, and verifies gone.
+///
+/// Matches the request-struct shape the sibling maker flows use
+/// (`CycleRequest` / `ReconcileRequest`): the plan travels as one value, the
+/// I/O handles stay explicit parameters.
+struct CanaryOrderPlan<'a> {
+    symbol: &'a str,
+    client_order_id: &'a str,
     quantity: f64,
     price: f64,
     qty_decimals: u32,
     price_decimals: u32,
+    /// Bounds each response wait and each REST visibility check.
     timeout: Duration,
+}
+
+async fn run_commands(
+    client: &StandXClient,
+    commands: &OrderCommandSender,
+    responses: &mut mpsc::Receiver<OrderResponse>,
+    plan: CanaryOrderPlan<'_>,
     evidence: &CanaryEvidence<'_>,
 ) -> Result<()> {
+    let CanaryOrderPlan {
+        symbol,
+        client_order_id,
+        quantity,
+        price,
+        qty_decimals,
+        price_decimals,
+        timeout,
+    } = plan;
     let create_request_id = commands
         .create_order(&CreateOrderParams {
             symbol: symbol.to_string(),

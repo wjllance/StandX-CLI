@@ -1,4 +1,5 @@
 use super::*;
+use crate::commands::maker::model::{optional_decimal, Decimal};
 
 pub(super) struct CycleAttempt {
     work_token: WorkToken,
@@ -697,8 +698,13 @@ impl MakerRuntime {
                     // only fetched in live mode, so these stay quiet in paper.
                     if self.loop_state.alerts.account_enabled() {
                         if let Some(balance) = balance.as_ref() {
-                            let equity = balance.equity.parse::<f64>().ok();
-                            let available = balance.cross_available.parse::<f64>().ok();
+                            // Finite-checked: a NaN equity would slip past a
+                            // bare parse and then silently never breach any
+                            // threshold, which is the one outcome an armed
+                            // alert must not produce.
+                            let equity = optional_decimal(&balance.equity, Decimal::Finite);
+                            let available =
+                                optional_decimal(&balance.cross_available, Decimal::Finite);
                             if let (Some(equity), Some(available)) = (equity, available) {
                                 self.loop_state.balance_floor_parse_warned = false;
                                 let fired =
