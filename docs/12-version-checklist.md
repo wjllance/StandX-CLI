@@ -71,11 +71,37 @@ https://github.com/wjllance/standx-cli/releases/download/vx.y.z/standx-vx.y.z-aa
 
 ### 4. 发布阶段
 
-- [ ] 合并 PR 到 main 分支
-- [ ] 创建 GitHub Release
-- [ ] 上传二进制文件
-- [ ] 更新 Pre-release 状态 (如适用)
+- [ ] 合并 PR 到 main 分支，等 main 的 CI 变绿
+- [ ] **发布 GitHub Release**（不是只推 tag，见下面的触发矩阵）：
+
+  ```bash
+  gh release create vX.Y.Z --target <全长 SHA> --title vX.Y.Z \
+    --notes-file RELEASE_NOTES_vX.Y.Z.md
+  ```
+
+  `--target` 只接受**全长 SHA 或分支名**，短 SHA 会报
+  `Release.target_commitish is invalid`。
+
+- [ ] 确认 workflow 里 **`release` 与 `update-homebrew` 两个 job 都绿**
+- [ ] 复核 tap 里的 formula 真的指向新版本（job 绿不等于 sed 写对了）：
+
+  ```bash
+  curl -s https://raw.githubusercontent.com/wjllance/homebrew-standx-cli/main/Formula/standx-cli.rb | grep -E 'url|sha256'
+  curl -sL https://github.com/wjllance/standx-cli/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256
+  ```
+
 - [ ] 通知用户
+
+#### 触发矩阵（2026-07-28 补，v1.1.0/v1.2.0 两次发版踩到）
+
+| 动作 | 跑哪些 job | 结果 |
+|---|---|---|
+| 推 `vX.Y.Z-rc.N`（**带**连字符） | `auto-prerelease` | 自动建 prerelease + 上传产物，不动 homebrew |
+| 推 `vX.Y.Z`（**不带**连字符） | 仅 `check` + `build-matrix` | **什么都不发布**——`auto-prerelease` 的条件是 `contains(github.ref, '-')` |
+| 发布 GitHub Release（无连字符 tag） | `release` → `update-homebrew` | 上传产物 + 更新 formula |
+
+`RELEASE_NOTES_<tag>.md` 的取用规则也不对称：`auto-prerelease` 会自动读它当正文，
+而 `release` job **不读**——正式版必须自己用 `--notes-file` 传。
 
 ## ⚠️ 常见错误
 
