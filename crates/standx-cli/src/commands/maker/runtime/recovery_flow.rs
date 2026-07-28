@@ -1,5 +1,6 @@
 use super::*;
 use crate::commands::maker::model::StreamHealth;
+use crate::commands::maker::output::ts_now;
 
 pub(super) fn mark_request_timeout_stream_unhealthy(
     account_stream_health: &standx_sdk::account_stream::AccountStreamHealth,
@@ -1160,7 +1161,7 @@ impl MakerRuntime {
                                             println!(
                                                 "{}",
                                                 serde_json::json!({
-                                                    "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                                                    "ts": ts_now(),
                                                     "symbol": symbol,
                                                     "action": "position_reconciliation",
                                                     "event": "failed_during_reconnect",

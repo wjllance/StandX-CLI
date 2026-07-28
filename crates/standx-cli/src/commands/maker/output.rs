@@ -302,7 +302,7 @@ pub(super) fn emit_maker_cycle(output: CycleOutput<'_>) {
 
     match output_format {
         OutputFormat::Json => {
-            let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let ts = ts_now();
             for fill in fills {
                 println!(
                     "{}",
@@ -765,7 +765,7 @@ pub(super) fn emit_guard_transition(
             println!(
                 "{}",
                 serde_json::json!({
-                    "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    "ts": ts_now(),
                     "cycle": cycle, "symbol": symbol,
                     "action": "external_guard",
                     "active": decision.active,
@@ -823,7 +823,7 @@ pub(super) fn log_maker_event(event: MakerLogEvent<'_>) {
     match output_format {
         OutputFormat::Json => {
             let mut payload = serde_json::json!({
-                "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "ts": ts_now(),
                 "cycle": cycle, "mode": "live", "symbol": symbol,
                 "action": action, "side": side, "level": level,
                 "price": format_decimals(price, price_decimals),
@@ -862,7 +862,7 @@ pub(super) fn emit_live_fill(
         OutputFormat::Json => println!(
             "{}",
             serde_json::json!({
-                "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "ts": ts_now(),
                 "symbol": symbol,
                 "cycle": cycle,
                 "action": "fill",
@@ -906,7 +906,7 @@ pub(super) fn emit_reconciliation_state(
         println!(
             "{}",
             serde_json::json!({
-                "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "ts": ts_now(),
                 "symbol": symbol,
                 "cycle": cycle,
                 "action": "position_reconciliation",
@@ -934,7 +934,7 @@ pub(super) fn emit_stop_loss_triggered(
         println!(
             "{}",
             serde_json::json!({
-                "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "ts": ts_now(),
                 "symbol": symbol,
                 "cycle": cycle,
                 "action": "stop_loss",
@@ -976,7 +976,7 @@ pub(super) fn emit_account_floor_triggered(
         println!(
             "{}",
             serde_json::json!({
-                "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "ts": ts_now(),
                 "symbol": symbol,
                 "cycle": cycle,
                 "action": "account_floor",
@@ -1031,7 +1031,7 @@ pub(super) fn emit_market_data_standby(
     println!(
         "{}",
         serde_json::json!({
-            "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "ts": ts_now(),
             "symbol": symbol,
             "cycle": cycle,
             "action": "market_data_standby",
@@ -1106,7 +1106,7 @@ pub(super) fn emit_residual_position_handoff(
         println!(
             "{}",
             serde_json::json!({
-                "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "ts": ts_now(),
                 "symbol": symbol,
                 "cycle": cycle,
                 "action": "residual_position",
@@ -1171,7 +1171,7 @@ pub(super) fn emit_reconciliation_snapshot_error(
         println!(
             "{}",
             serde_json::json!({
-                "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "ts": ts_now(),
                 "symbol": symbol,
                 "cycle": cycle,
                 "action": "position_reconciliation",
@@ -1197,7 +1197,7 @@ pub(super) fn emit_ledger_sync(
         println!(
             "{}",
             serde_json::json!({
-                "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "ts": ts_now(),
                 "symbol": symbol,
                 "action": "ledger_sync",
                 "event": "complete",
@@ -1216,7 +1216,7 @@ pub(super) fn emit_ledger_sync(
             println!(
                 "{}",
                 serde_json::json!({
-                    "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    "ts": ts_now(),
                     "symbol": symbol,
                     "action": "inventory_adopted",
                     "event": "complete",
@@ -1246,7 +1246,7 @@ pub(super) fn emit_startup_rejected(
         println!(
             "{}",
             serde_json::json!({
-                "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "ts": ts_now(),
                 "symbol": symbol,
                 "action": "startup_rejected",
                 "event": "position_over_limit",
@@ -1264,6 +1264,13 @@ pub(super) fn emit_startup_rejected(
 /// timestamp format every maker telemetry line uses.
 pub(super) fn ts_now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// As [`ts_now`], but with milliseconds. Only the WS command canary uses this:
+/// its whole purpose is to time a request/response round trip, and whole
+/// seconds cannot order two events inside the same second.
+pub(super) fn ts_now_millis() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 /// Emit a skipped-cycle event. Unlike the previous inline handling, all three

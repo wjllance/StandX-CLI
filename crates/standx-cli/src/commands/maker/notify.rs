@@ -1,3 +1,4 @@
+use super::output::ts_now;
 use crate::cli::{AlertWebhookFormat, OutputFormat};
 use standx_maker::{Alert, PositionAlertAnchor, PositionRiskKind};
 use std::time::Duration;
@@ -107,7 +108,7 @@ impl MakerNotifier {
         symbol: &str,
         await_delivery: bool,
     ) {
-        let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let ts = ts_now();
         if self.output_format == OutputFormat::Json {
             println!(
                 "{}",
@@ -125,7 +126,7 @@ impl MakerNotifier {
     }
 
     pub(super) async fn risk(&self, notice: RiskNotice<'_>, await_delivery: bool) {
-        let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let ts = ts_now();
         let delta = notice
             .position_before
             .zip(notice.position_after)
@@ -168,7 +169,7 @@ impl MakerNotifier {
         notice: RequestTimeoutNotice<'_>,
         await_delivery: bool,
     ) {
-        let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let ts = ts_now();
         let (text, raw) = request_timeout_payload(&notice, &ts);
         if self.output_format == OutputFormat::Json {
             println!("{raw}");
@@ -224,7 +225,7 @@ impl MakerNotifier {
     }
 
     pub(super) async fn alert(&self, alert: &Alert, symbol: &str, await_delivery: bool) {
-        let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let ts = ts_now();
         let label = if alert.firing {
             "🚨 ALERT"
         } else {

@@ -511,161 +511,8 @@ pub enum MakerCommands {
         /// StandX config directory when it exists.
         #[arg(long)]
         maker_config: Option<PathBuf>,
-        /// Half-spread from mark price in basis points
-        #[arg(long)]
-        spread_bps: Option<f64>,
-        /// Eligibility band guard in bps: never quote outside mark ± band
-        #[arg(long)]
-        band_bps: Option<f64>,
-        /// Per-side, per-level order quantity
-        #[arg(long)]
-        size: Option<f64>,
-        /// Number of quote levels per side
-        #[arg(long)]
-        levels: Option<u32>,
-        /// Spacing between levels in bps (when levels > 1)
-        #[arg(long)]
-        level_step_bps: Option<f64>,
-        /// Anti-flicker: re-quote only when mark moved more than this (bps)
-        /// since the order was placed
-        #[arg(long)]
-        refresh_bps: Option<f64>,
-        /// Loop interval in seconds
-        #[arg(short, long)]
-        interval: Option<u64>,
-        /// Max absolute position; suppress the side that would exceed it
-        #[arg(long)]
-        max_position: Option<f64>,
-        /// Inventory skew: at full inventory, shift the quote center this many
-        /// bps away from mark to favor the reducing side (0 disables). Only
-        /// takes effect in live mode; paper holds no position. Suggested
-        /// starting point: roughly your --spread-bps
-        #[arg(long)]
-        skew_bps: Option<f64>,
-        /// Actively exit inventory once |position| reaches this percent of
-        /// --max-position. 0 disables; requires --inventory-exit-qty.
-        #[arg(long)]
-        inventory_exit_pct: Option<f64>,
-        /// Maximum base quantity for one reduce-only inventory exit. 0
-        /// disables; requires --inventory-exit-pct.
-        #[arg(long)]
-        inventory_exit_qty: Option<f64>,
-        /// Sanity guard: skip the cycle (no places/cancels) when mark price
-        /// and book mid diverge by more than this (bps) — the data sources
-        /// disagree and acting on them would be unsafe
-        #[arg(long)]
-        max_divergence_bps: Option<f64>,
-        /// Volatility circuit breaker: halt quoting (pull all quotes) when the
-        /// mark's range over --vol-window cycles reaches this many bps; resume
-        /// once it falls below half that. 0 disables the breaker
-        #[arg(long)]
-        vol_pause_bps: Option<f64>,
-        /// Number of recent cycles the volatility breaker measures range over
-        #[arg(long)]
-        vol_window: Option<u32>,
-        /// Enable or disable the TOML-defined adaptive spread controller.
-        /// `--adaptive-spread=false` provides a baseline-arm override without
-        /// changing any tier geometry.
-        #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
-        adaptive_spread: Option<bool>,
-        /// Enable or disable the TOML-defined size skew controller.
-        /// `--size-skew=false` provides a baseline-arm override without
-        /// changing any size skew geometry.
-        #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
-        size_skew: Option<bool>,
-        /// Financial brake: when session mark-to-market PnL drops to -this
-        /// (quote units), run the fail-safe shutdown (freeze, cancel the maker
-        /// book, await critical webhook, exit). 0 disables
-        #[arg(long)]
-        stop_loss: Option<f64>,
-        /// Risk alert: fire when mark-to-market PnL drops to -this (quote
-        /// units). 0 disables
-        #[arg(long)]
-        alert_loss: Option<f64>,
-        /// Risk alert: fire when |position| reaches this percent of
-        /// --max-position. 0 disables
-        #[arg(long)]
-        alert_inventory_pct: Option<f64>,
-        /// Risk notification: fire when actual position changes by this
-        /// percent of --max-position since the last notification anchor.
-        /// Small changes accumulate; 0 disables.
-        #[arg(long)]
-        alert_position_change_pct: Option<f64>,
-        /// Risk alert: fire when two-sided uptime drops below this percent
-        /// (after warmup). 0 disables
-        #[arg(long)]
-        alert_uptime: Option<f64>,
-        /// Risk alert: fire when account equity drops below this (quote
-        /// units). Live-only (needs an account snapshot). 0 disables
-        #[arg(long)]
-        alert_equity_below: Option<f64>,
-        /// Risk alert: fire when available cross margin drops below this
-        /// (quote units). Live-only. 0 disables
-        #[arg(long)]
-        alert_margin_below: Option<f64>,
-        /// Hard floor (NOT an alert): stop the session when account equity
-        /// drops below this (quote units). Residual position is handed off,
-        /// never auto-flattened. Live-only. 0 disables (default)
-        #[arg(long)]
-        stop_equity_below: Option<f64>,
-        /// Hard floor (NOT an alert): stop the session when available cross
-        /// margin drops below this (quote units). Live-only. 0 disables
-        /// (default)
-        #[arg(long)]
-        stop_margin_below: Option<f64>,
-        /// Also POST risk alerts to this URL. stderr/JSON always get them
-        /// regardless. Payload shape is set by --alert-webhook-format
-        #[arg(long, env = "STANDX_SUPERVISOR_WEBHOOK")]
-        alert_webhook: Option<String>,
-        /// Webhook payload format for the target chat platform
-        #[arg(
-            long,
-            value_enum,
-            default_value = "slack",
-            env = "STANDX_SUPERVISOR_WEBHOOK_FORMAT"
-        )]
-        alert_webhook_format: AlertWebhookFormat,
-        /// Disable the WebSocket market feed and poll REST every cycle.
-        /// `--no-ws` enables REST polling; `--no-ws=false` forces the WS feed
-        /// back on even when a config file sets `no_ws = true`.
-        #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
-        no_ws: Option<bool>,
-        /// Place real orders (without this flag the bot runs in paper mode:
-        /// full loop, prints intended actions, no orders placed)
-        #[arg(long)]
-        live: bool,
-        /// Maximum authenticated order-response reconnect attempts per round.
-        /// Each attempt first cleans maker orders and must
-        /// reconcile an empty maker book before quoting resumes. 0 disables.
-        #[arg(long)]
-        order_response_reconnect_attempts: Option<u32>,
-        /// Base delay in seconds between order-response reconnect attempts.
-        /// Later attempts use bounded exponential backoff.
-        #[arg(long)]
-        order_response_reconnect_backoff: Option<u64>,
-        /// Maximum account-stream reconnect attempts per recovery round.
-        /// Each attempt reconnects the
-        /// authenticated account stream, replays buffered events, and backs
-        /// fill gaps with REST trades before reconciling the venue position.
-        /// 0 disables reconnect entirely (fail closed immediately).
-        #[arg(long)]
-        account_stream_reconnect_attempts: Option<u32>,
-        /// Base delay in seconds between account-stream reconnect attempts.
-        /// Later attempts use bounded exponential backoff.
-        #[arg(long)]
-        account_stream_reconnect_backoff: Option<u64>,
-        /// Deprecated compatibility option. Transport faults now remain
-        /// frozen and retry instead of stopping on an incident count.
-        #[arg(long, hide = true)]
-        recovery_incidents_per_window: Option<u32>,
-        /// Deprecated compatibility option; accepted but no longer used.
-        #[arg(long, hide = true)]
-        recovery_window_secs: Option<u64>,
-        /// Supervised fault injection: close the local order-response stream
-        /// after this many seconds. Hidden because it is only for live-gate
-        /// validation and is limited by the maker command to 60 seconds.
-        #[arg(long, hide = true)]
-        controlled_disconnect_after: Option<u64>,
+        #[command(flatten)]
+        flags: MakerRunFlags,
     },
     /// Deterministically replay a normalized maker NDJSON trace (no network or order I/O)
     Replay {
@@ -698,6 +545,172 @@ pub enum MakerCommands {
         )]
         alert_webhook_format: AlertWebhookFormat,
     },
+}
+
+/// Every `maker run` strategy flag.
+///
+/// Flattened into [`MakerCommands::Run`] rather than listed inline so the
+/// resolved-config path can take the whole set as one value: the CLI layer
+/// hands this struct to `config::merge`, which is then the only place that
+/// names a field and its default. Adding a knob touches this struct, the TOML
+/// mirror in `commands::maker::config`, and that one merge line.
+#[derive(clap::Args, Debug)]
+pub struct MakerRunFlags {
+    /// Half-spread from mark price in basis points
+    #[arg(long)]
+    pub spread_bps: Option<f64>,
+    /// Eligibility band guard in bps: never quote outside mark ± band
+    #[arg(long)]
+    pub band_bps: Option<f64>,
+    /// Per-side, per-level order quantity
+    #[arg(long)]
+    pub size: Option<f64>,
+    /// Number of quote levels per side
+    #[arg(long)]
+    pub levels: Option<u32>,
+    /// Spacing between levels in bps (when levels > 1)
+    #[arg(long)]
+    pub level_step_bps: Option<f64>,
+    /// Anti-flicker: re-quote only when mark moved more than this (bps)
+    /// since the order was placed
+    #[arg(long)]
+    pub refresh_bps: Option<f64>,
+    /// Loop interval in seconds
+    #[arg(short, long)]
+    pub interval: Option<u64>,
+    /// Max absolute position; suppress the side that would exceed it
+    #[arg(long)]
+    pub max_position: Option<f64>,
+    /// Inventory skew: at full inventory, shift the quote center this many
+    /// bps away from mark to favor the reducing side (0 disables). Only
+    /// takes effect in live mode; paper holds no position. Suggested
+    /// starting point: roughly your --spread-bps
+    #[arg(long)]
+    pub skew_bps: Option<f64>,
+    /// Actively exit inventory once |position| reaches this percent of
+    /// --max-position. 0 disables; requires --inventory-exit-qty.
+    #[arg(long)]
+    pub inventory_exit_pct: Option<f64>,
+    /// Maximum base quantity for one reduce-only inventory exit. 0
+    /// disables; requires --inventory-exit-pct.
+    #[arg(long)]
+    pub inventory_exit_qty: Option<f64>,
+    /// Sanity guard: skip the cycle (no places/cancels) when mark price
+    /// and book mid diverge by more than this (bps) — the data sources
+    /// disagree and acting on them would be unsafe
+    #[arg(long)]
+    pub max_divergence_bps: Option<f64>,
+    /// Volatility circuit breaker: halt quoting (pull all quotes) when the
+    /// mark's range over --vol-window cycles reaches this many bps; resume
+    /// once it falls below half that. 0 disables the breaker
+    #[arg(long)]
+    pub vol_pause_bps: Option<f64>,
+    /// Number of recent cycles the volatility breaker measures range over
+    #[arg(long)]
+    pub vol_window: Option<u32>,
+    /// Enable or disable the TOML-defined adaptive spread controller.
+    /// `--adaptive-spread=false` provides a baseline-arm override without
+    /// changing any tier geometry.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    pub adaptive_spread: Option<bool>,
+    /// Enable or disable the TOML-defined size skew controller.
+    /// `--size-skew=false` provides a baseline-arm override without
+    /// changing any size skew geometry.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    pub size_skew: Option<bool>,
+    /// Financial brake: when session mark-to-market PnL drops to -this
+    /// (quote units), run the fail-safe shutdown (freeze, cancel the maker
+    /// book, await critical webhook, exit). 0 disables
+    #[arg(long)]
+    pub stop_loss: Option<f64>,
+    /// Risk alert: fire when mark-to-market PnL drops to -this (quote
+    /// units). 0 disables
+    #[arg(long)]
+    pub alert_loss: Option<f64>,
+    /// Risk alert: fire when |position| reaches this percent of
+    /// --max-position. 0 disables
+    #[arg(long)]
+    pub alert_inventory_pct: Option<f64>,
+    /// Risk notification: fire when actual position changes by this
+    /// percent of --max-position since the last notification anchor.
+    /// Small changes accumulate; 0 disables.
+    #[arg(long)]
+    pub alert_position_change_pct: Option<f64>,
+    /// Risk alert: fire when two-sided uptime drops below this percent
+    /// (after warmup). 0 disables
+    #[arg(long)]
+    pub alert_uptime: Option<f64>,
+    /// Risk alert: fire when account equity drops below this (quote
+    /// units). Live-only (needs an account snapshot). 0 disables
+    #[arg(long)]
+    pub alert_equity_below: Option<f64>,
+    /// Risk alert: fire when available cross margin drops below this
+    /// (quote units). Live-only. 0 disables
+    #[arg(long)]
+    pub alert_margin_below: Option<f64>,
+    /// Hard floor (NOT an alert): stop the session when account equity
+    /// drops below this (quote units). Residual position is handed off,
+    /// never auto-flattened. Live-only. 0 disables (default)
+    #[arg(long)]
+    pub stop_equity_below: Option<f64>,
+    /// Hard floor (NOT an alert): stop the session when available cross
+    /// margin drops below this (quote units). Live-only. 0 disables
+    /// (default)
+    #[arg(long)]
+    pub stop_margin_below: Option<f64>,
+    /// Also POST risk alerts to this URL. stderr/JSON always get them
+    /// regardless. Payload shape is set by --alert-webhook-format
+    #[arg(long, env = "STANDX_SUPERVISOR_WEBHOOK")]
+    pub alert_webhook: Option<String>,
+    /// Webhook payload format for the target chat platform
+    #[arg(
+        long,
+        value_enum,
+        default_value = "slack",
+        env = "STANDX_SUPERVISOR_WEBHOOK_FORMAT"
+    )]
+    pub alert_webhook_format: AlertWebhookFormat,
+    /// Disable the WebSocket market feed and poll REST every cycle.
+    /// `--no-ws` enables REST polling; `--no-ws=false` forces the WS feed
+    /// back on even when a config file sets `no_ws = true`.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    pub no_ws: Option<bool>,
+    /// Place real orders (without this flag the bot runs in paper mode:
+    /// full loop, prints intended actions, no orders placed)
+    #[arg(long)]
+    pub live: bool,
+    /// Maximum authenticated order-response reconnect attempts per round.
+    /// Each attempt first cleans maker orders and must
+    /// reconcile an empty maker book before quoting resumes. 0 disables.
+    #[arg(long)]
+    pub order_response_reconnect_attempts: Option<u32>,
+    /// Base delay in seconds between order-response reconnect attempts.
+    /// Later attempts use bounded exponential backoff.
+    #[arg(long)]
+    pub order_response_reconnect_backoff: Option<u64>,
+    /// Maximum account-stream reconnect attempts per recovery round.
+    /// Each attempt reconnects the
+    /// authenticated account stream, replays buffered events, and backs
+    /// fill gaps with REST trades before reconciling the venue position.
+    /// 0 disables reconnect entirely (fail closed immediately).
+    #[arg(long)]
+    pub account_stream_reconnect_attempts: Option<u32>,
+    /// Base delay in seconds between account-stream reconnect attempts.
+    /// Later attempts use bounded exponential backoff.
+    #[arg(long)]
+    pub account_stream_reconnect_backoff: Option<u64>,
+    /// Deprecated compatibility option. Transport faults now remain
+    /// frozen and retry instead of stopping on an incident count.
+    #[arg(long, hide = true)]
+    pub recovery_incidents_per_window: Option<u32>,
+    /// Deprecated compatibility option; accepted but no longer used.
+    #[arg(long, hide = true)]
+    pub recovery_window_secs: Option<u64>,
+    /// Supervised fault injection: close the local order-response stream
+    /// after this many seconds. Hidden because it is only for live-gate
+    /// validation and is limited by the maker command to 60 seconds.
+    #[arg(long, hide = true)]
+    pub controlled_disconnect_after: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -888,13 +901,10 @@ mod tests {
             let Commands::Maker { command } = cli.command else {
                 panic!("expected maker command");
             };
-            let MakerCommands::Run {
-                adaptive_spread, ..
-            } = *command
-            else {
+            let MakerCommands::Run { flags, .. } = *command else {
                 panic!("expected maker run command");
             };
-            assert_eq!(adaptive_spread, Some(expected));
+            assert_eq!(flags.adaptive_spread, Some(expected));
         }
     }
 
@@ -906,10 +916,10 @@ mod tests {
             let Commands::Maker { command } = cli.command else {
                 panic!("expected maker command");
             };
-            let MakerCommands::Run { size_skew, .. } = *command else {
+            let MakerCommands::Run { flags, .. } = *command else {
                 panic!("expected maker run command");
             };
-            assert_eq!(size_skew, Some(expected));
+            assert_eq!(flags.size_skew, Some(expected));
         }
     }
 }

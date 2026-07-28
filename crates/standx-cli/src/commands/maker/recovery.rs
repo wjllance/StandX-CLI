@@ -1,6 +1,6 @@
 use super::ledger::{adopt_order, apply_rest_trade};
 use super::model::{is_current_run_order, is_maker_order, position_for_symbol, StreamHealth};
-use super::output::emit_live_fill;
+use super::output::{emit_live_fill, ts_now};
 use super::pipeline::{fetch_account_audit, AccountAudit};
 use crate::cli::OutputFormat;
 use anyhow::Result;
@@ -370,7 +370,7 @@ pub(super) async fn cancel_maker_orders_with_retry(
                     println!(
                         "{}",
                         serde_json::json!({
-                            "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                            "ts": ts_now(),
                             "symbol": symbol,
                             "action": "maker_cleanup",
                             "event": "complete",
@@ -390,7 +390,7 @@ pub(super) async fn cancel_maker_orders_with_retry(
                     println!(
                         "{}",
                         serde_json::json!({
-                            "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                            "ts": ts_now(),
                             "symbol": symbol,
                             "action": "maker_cleanup",
                             "event": "retry_incomplete",
@@ -486,7 +486,7 @@ fn emit_order_response_reconnect(
         println!(
             "{}",
             serde_json::json!({
-                "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "ts": ts_now(),
                 "symbol": symbol,
                 "action": "order_response_reconnect",
                 "event": event,
