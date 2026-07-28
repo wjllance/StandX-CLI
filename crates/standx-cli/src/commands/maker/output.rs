@@ -1,4 +1,5 @@
 use super::feed::WsSnapshotDiagnostics;
+use super::model::{optional_decimal, Decimal};
 use super::*;
 use standx_maker::{self as maker, Action, MakerConfig, MakerStats};
 use standx_sdk::account_stream::AccountEvent;
@@ -734,12 +735,12 @@ fn account_json(account: &Balance) -> serde_json::Value {
 }
 
 fn format_account_amount(value: &str) -> String {
-    value
-        .parse::<f64>()
-        .ok()
-        .filter(|amount| amount.is_finite())
-        .map(|amount| format!("{amount:.2}"))
-        .unwrap_or_else(|| value.to_string())
+    // Display only: an unparseable balance is shown verbatim rather than hidden,
+    // so an operator sees what the venue actually sent.
+    match optional_decimal(value, Decimal::Finite) {
+        Some(amount) => format!("{amount:.2}"),
+        None => value.to_string(),
+    }
 }
 
 fn side_str(side: OrderSide) -> &'static str {

@@ -62,6 +62,66 @@ pub fn unhealthy_stream<H: StreamHealth>(health: Option<&H>) -> Option<String> {
     }
 }
 
+/// What range a venue-supplied decimal has to land in to be usable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Decimal {
+    /// Any finite value. Fees, funding and PnL are legitimately signed, and a
+    /// rebate is a negative fee — only NaN/inf are unusable.
+    Finite,
+    /// Finite and `>= 0`: a fill quantity that has not filled yet is `0`.
+    NonNegative,
+    /// Finite and `> 0`: a price, or a quantity that must actually exist.
+    Positive,
+}
+
+impl Decimal {
+    pub(super) fn admits(self, value: f64) -> bool {
+        value.is_finite()
+            && match self {
+                Self::Finite => true,
+                Self::NonNegative => value >= 0.0,
+                Self::Positive => value > 0.0,
+            }
+    }
+
+    fn requirement(self) -> &'static str {
+        match self {
+            Self::Finite => "a finite number",
+            Self::NonNegative => "a finite number >= 0",
+            Self::Positive => "a finite number > 0",
+        }
+    }
+}
+
+/// Parse a decimal the venue sent as a string, failing closed when it is not a
+/// value the maker can act on.
+///
+/// The SDK hands prices, quantities and fees over as strings, so each consumer
+/// used to write the same two steps — parse, then range-check — and each wrote
+/// its own wording for the same two failures. `context` names the field being
+/// read (`"maker trade 42 price"`), so a converged message still says exactly
+/// which field of which record was wrong.
+pub(super) fn parse_decimal(context: &str, raw: &str, bound: Decimal) -> anyhow::Result<f64> {
+    let value = raw
+        .parse::<f64>()
+        .map_err(|_| anyhow::anyhow!("{context} '{raw}' is not a number"))?;
+    if !bound.admits(value) {
+        return Err(anyhow::anyhow!(
+            "{context} '{raw}' is not {}",
+            bound.requirement()
+        ));
+    }
+    Ok(value)
+}
+
+/// As [`parse_decimal`], for the paths that deliberately skip an unusable row
+/// rather than fail the session — a best-effort display value, or a REST trade
+/// scanned while reconciling. Those callers have nothing to report the reason
+/// to, so no `context` is required.
+pub(super) fn optional_decimal(raw: &str, bound: Decimal) -> Option<f64> {
+    raw.parse::<f64>().ok().filter(|value| bound.admits(*value))
+}
+
 /// Process exit code emitted when the maker performs an *intentional*
 /// fail-safe shutdown: order-response or market-data recovery failed, three
 /// maker cycles failed in a row, position reconciliation or an internal
@@ -386,19 +446,16 @@ pub(super) fn rest_order_observation(
         .id
         .parse::<u64>()
         .map_err(|_| anyhow::anyhow!("order has non-integer exchange ID '{}'", order.id))?;
-    let price = order
-        .price
-        .parse::<f64>()
-        .map_err(|_| anyhow::anyhow!("order {order_id} has invalid price '{}'", order.price))?;
-    let open_qty = order
-        .qty
-        .parse::<f64>()
-        .map_err(|_| anyhow::anyhow!("order {order_id} has invalid qty '{}'", order.qty))?;
-    if !price.is_finite() || !open_qty.is_finite() || price <= 0.0 || open_qty < 0.0 {
-        return Err(anyhow::anyhow!(
-            "order {order_id} has invalid projection values price={price}, qty={open_qty}"
-        ));
-    }
+    let price = parse_decimal(
+        &format!("order {order_id} price"),
+        &order.price,
+        Decimal::Positive,
+    )?;
+    let open_qty = parse_decimal(
+        &format!("order {order_id} qty"),
+        &order.qty,
+        Decimal::NonNegative,
+    )?;
     Ok(standx_maker::OrderObservation {
         order_id,
         client_order_id: order.cl_ord_id.clone(),
@@ -418,44 +475,31 @@ pub(super) fn stream_order_observation(
     } else {
         &order.price
     };
-    let price = if raw_price.is_empty() {
-        0.0
+    // A terminal update may legitimately carry no price (a cancel before any
+    // fill), so only a live order's price has to be strictly positive.
+    let price_bound = if terminal {
+        Decimal::NonNegative
     } else {
-        raw_price.parse::<f64>().map_err(|_| {
-            anyhow::anyhow!(
-                "account order {} has invalid price '{}'",
-                order.order_id,
-                raw_price
-            )
-        })?
+        Decimal::Positive
     };
-    let qty = order.qty.parse::<f64>().map_err(|_| {
-        anyhow::anyhow!(
-            "account order {} has invalid qty '{}'",
-            order.order_id,
-            order.qty
-        )
-    })?;
-    let fill_qty = order.fill_qty.parse::<f64>().map_err(|_| {
-        anyhow::anyhow!(
-            "account order {} has invalid fill qty '{}'",
-            order.order_id,
-            order.fill_qty
-        )
-    })?;
+    // An absent price reads as zero, and still has to satisfy the bound: a
+    // *live* order with no price is exactly the case that must fail closed.
+    let price = parse_decimal(
+        &format!("account order {} price", order.order_id),
+        if raw_price.is_empty() { "0" } else { raw_price },
+        price_bound,
+    )?;
+    let qty = parse_decimal(
+        &format!("account order {} qty", order.order_id),
+        &order.qty,
+        Decimal::NonNegative,
+    )?;
+    let fill_qty = parse_decimal(
+        &format!("account order {} fill qty", order.order_id),
+        &order.fill_qty,
+        Decimal::NonNegative,
+    )?;
     let open_qty = (qty - fill_qty).max(0.0);
-    if !price.is_finite()
-        || !qty.is_finite()
-        || !fill_qty.is_finite()
-        || (!terminal && price <= 0.0)
-        || qty < 0.0
-        || fill_qty < 0.0
-    {
-        return Err(anyhow::anyhow!(
-            "account order {} has invalid projection values",
-            order.order_id
-        ));
-    }
     Ok(standx_maker::OrderObservation {
         order_id: order.order_id,
         client_order_id: order.cl_ord_id.clone(),
@@ -487,17 +531,73 @@ pub(super) fn signed_position_quantity(
     raw_qty: &str,
     side: Option<OrderSide>,
 ) -> anyhow::Result<f64> {
-    let qty = raw_qty
-        .parse::<f64>()
-        .map_err(|_| anyhow::anyhow!("'{raw_qty}' is not numeric"))?;
-    if !qty.is_finite() {
-        return Err(anyhow::anyhow!("'{raw_qty}' is not finite"));
-    }
+    // A position quantity is unsigned at the venue; the side carries the sign,
+    // so zero is a legitimate flat reading.
+    let qty = parse_decimal("quantity", raw_qty, Decimal::Finite)?;
     Ok(match side {
         Some(OrderSide::Sell) => -qty.abs(),
         Some(OrderSide::Buy) => qty.abs(),
         None => qty,
     })
+}
+
+#[cfg(test)]
+mod decimal_tests {
+    use super::{optional_decimal, parse_decimal, Decimal};
+
+    #[test]
+    fn each_bound_admits_exactly_its_range() {
+        for (bound, admitted, rejected) in [
+            (
+                Decimal::Finite,
+                vec!["-1.5", "0", "2"],
+                vec!["NaN", "inf", "-inf"],
+            ),
+            (Decimal::NonNegative, vec!["0", "2"], vec!["-0.5", "NaN"]),
+            (Decimal::Positive, vec!["0.5"], vec!["0", "-0.5", "NaN"]),
+        ] {
+            for raw in admitted {
+                assert!(
+                    parse_decimal("field", raw, bound).is_ok(),
+                    "{bound:?} should admit {raw}"
+                );
+            }
+            for raw in rejected {
+                assert!(
+                    parse_decimal("field", raw, bound).is_err(),
+                    "{bound:?} should reject {raw}"
+                );
+            }
+        }
+    }
+
+    /// The whole point of converging the wording: the message still has to name
+    /// which field of which record was wrong, or a fail-closed stop becomes
+    /// undiagnosable.
+    #[test]
+    fn rejection_names_the_field_and_the_offending_value() {
+        let error = parse_decimal("maker trade 42 price", "bad", Decimal::Positive)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("maker trade 42 price"), "{error}");
+        assert!(error.contains("'bad'"), "{error}");
+
+        let error = parse_decimal("maker trade 42 price", "0", Decimal::Positive)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("maker trade 42 price"), "{error}");
+        assert!(error.contains("> 0"), "{error}");
+    }
+
+    /// The skip-the-row callers must not distinguish "unparseable" from
+    /// "out of range": both mean "unusable", and both produce `None`.
+    #[test]
+    fn optional_form_collapses_both_failures_to_none() {
+        assert_eq!(optional_decimal("1.25", Decimal::Positive), Some(1.25));
+        assert_eq!(optional_decimal("bad", Decimal::Positive), None);
+        assert_eq!(optional_decimal("0", Decimal::Positive), None);
+        assert_eq!(optional_decimal("NaN", Decimal::Finite), None);
+    }
 }
 
 #[cfg(test)]

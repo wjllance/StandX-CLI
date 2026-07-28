@@ -1,3 +1,4 @@
+use super::model::{optional_decimal, Decimal};
 use anyhow::Result;
 use standx_sdk::client::StandXClient;
 use standx_sdk::websocket::{StandXWebSocket, WsMarketUpdate, WsMessage};
@@ -202,11 +203,7 @@ fn update_is_newer<T>(previous: Option<&FeedMeta>, update: &WsMarketUpdate<T>) -
 fn parse_optional_positive_price(value: Option<&str>) -> Option<Option<f64>> {
     match value {
         None => Some(None),
-        Some(value) => value
-            .parse::<f64>()
-            .ok()
-            .filter(|price| price.is_finite() && *price > 0.0)
-            .map(Some),
+        Some(value) => optional_decimal(value, Decimal::Positive).map(Some),
     }
 }
 
@@ -405,10 +402,10 @@ pub(super) fn spawn_market_feed(
                                 if update.data.symbol.eq_ignore_ascii_case(&symbol) =>
                             {
                                 let received_at = update.received_at;
-                                if let Ok(mark) = update.data.mark_price.parse::<f64>() {
-                                    if !mark.is_finite() || mark <= 0.0 {
-                                        None
-                                    } else {
+                                if let Some(mark) =
+                                    optional_decimal(&update.data.mark_price, Decimal::Positive)
+                                {
+                                    {
                                         let mut s = state_task.write().await;
                                         if update_is_newer(s.mark_meta.as_ref(), &update) {
                                             s.mark = Some(mark);

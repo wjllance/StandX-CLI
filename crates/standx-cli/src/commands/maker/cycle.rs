@@ -1,7 +1,9 @@
 use super::ledger::{adopt_order, apply_funding_history, apply_rest_trade};
 #[cfg(test)]
 use super::ledger::{apply_account_trade, apply_order_update, maker_trade_fill};
-use super::model::{position_for_symbol, rest_order_observation, unhealthy_stream};
+use super::model::{
+    optional_decimal, position_for_symbol, rest_order_observation, unhealthy_stream, Decimal,
+};
 use super::output::{
     emit_cycle_skip, emit_guard_transition, emit_maker_cycle, log_maker_event, CycleOutput,
     ExitStatus, MakerLogEvent,
@@ -191,9 +193,10 @@ fn account_floor_stop(
             BALANCE_FLOOR_MAX_AGE.as_secs(),
         ));
     }
-    let parse = |raw: &str| raw.parse::<f64>().ok().filter(|value| value.is_finite());
-    let equity = parse(&balance.equity);
-    let available = parse(&balance.cross_available);
+    // A floor's own reading must be usable; an unparseable field is reported as
+    // unevaluable below rather than silently treated as "no breach".
+    let equity = optional_decimal(&balance.equity, Decimal::Finite);
+    let available = optional_decimal(&balance.cross_available, Decimal::Finite);
     if (equity_armed && equity.is_none()) || (margin_armed && available.is_none()) {
         return Some(AccountFloorError::balance_unreadable(
             &balance.equity,
@@ -1227,7 +1230,7 @@ mod tests {
         assert!(maker_trade_fill(&trade(Some("sell"), "bad", "0.02"))
             .unwrap_err()
             .to_string()
-            .contains("invalid price"));
+            .contains("price 'bad' is not a number"));
     }
 
     #[test]

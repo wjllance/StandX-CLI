@@ -1,5 +1,6 @@
 //! SDK payload adapter for the pure maker ledger.
 
+use super::model::{parse_decimal, Decimal};
 use anyhow::Result;
 use standx_maker::{ExecutionCosts, LedgerTrade, MakerFill, MakerLedger, MakerStats, TradeSource};
 use standx_sdk::account_stream::{OrderUpdate, TradeUpdate};
@@ -171,17 +172,16 @@ pub(super) fn maker_trade_fill(trade: &Trade) -> Result<(OrderSide, f64, f64)> {
 }
 
 fn trade_values(trade_id: u64, price: &str, qty: &str) -> Result<(f64, f64)> {
-    let price = price
-        .parse::<f64>()
-        .map_err(|_| anyhow::anyhow!("maker trade {trade_id} has invalid price '{price}'"))?;
-    let qty = qty
-        .parse::<f64>()
-        .map_err(|_| anyhow::anyhow!("maker trade {trade_id} has invalid qty '{qty}'"))?;
-    if !price.is_finite() || price <= 0.0 || !qty.is_finite() || qty <= 0.0 {
-        return Err(anyhow::anyhow!(
-            "maker trade {trade_id} has non-positive price/qty"
-        ));
-    }
+    let price = parse_decimal(
+        &format!("maker trade {trade_id} price"),
+        price,
+        Decimal::Positive,
+    )?;
+    let qty = parse_decimal(
+        &format!("maker trade {trade_id} qty"),
+        qty,
+        Decimal::Positive,
+    )?;
     Ok((price, qty))
 }
 
@@ -247,15 +247,11 @@ pub(super) fn apply_funding_history(
             applied.insert(entry.id);
             continue;
         }
-        let qty = entry.qty.parse::<f64>().map_err(|_| {
-            anyhow::anyhow!("funding row {} has invalid qty '{}'", entry.id, entry.qty)
-        })?;
-        if !qty.is_finite() {
-            return Err(anyhow::anyhow!(
-                "funding row {} has non-finite qty",
-                entry.id
-            ));
-        }
+        let qty = parse_decimal(
+            &format!("funding row {} qty", entry.id),
+            &entry.qty,
+            Decimal::Finite,
+        )?;
         let convertible = quote.is_some_and(|quote| {
             entry.asset.eq_ignore_ascii_case(quote)
                 || entry.asset.eq_ignore_ascii_case(&format!("D{quote}"))
@@ -297,15 +293,12 @@ fn rest_execution_costs(trade: &Trade) -> Result<Option<ExecutionCosts>> {
     let Some(raw_qty) = trade.fee_qty.as_deref() else {
         return Ok(None);
     };
-    let fee = raw_qty
-        .parse::<f64>()
-        .map_err(|_| anyhow::anyhow!("maker trade {} has invalid fee qty '{raw_qty}'", trade.id))?;
-    if !fee.is_finite() {
-        return Err(anyhow::anyhow!(
-            "maker trade {} has non-finite fee qty",
-            trade.id
-        ));
-    }
+    // A rebate is a negative fee, so only NaN/inf are rejected here.
+    let fee = parse_decimal(
+        &format!("maker trade {} fee qty", trade.id),
+        raw_qty,
+        Decimal::Finite,
+    )?;
     let (Some(asset), Some(symbol)) = (trade.fee_asset.as_deref(), trade.symbol.as_deref()) else {
         return Ok(None);
     };
@@ -595,7 +588,13 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("non-positive price/qty"));
+        // The converged message must still name the offending field and value.
+        assert!(
+            error
+                .to_string()
+                .contains("qty 'NaN' is not a finite number > 0"),
+            "unexpected rejection message: {error}"
+        );
     }
 
     #[test]
