@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`standx update`** (alias `self-update`) — replace the running binary with the
+  latest GitHub release. `--check` reports installed vs latest and changes
+  nothing; `--pre` considers pre-releases; `--force` reinstalls the current
+  version; `--yes` skips the prompt (required when stdin is not a TTY).
+  `-o json` emits `update_check` / `update_applied`
+  - The release asset for the running platform is downloaded over TLS, its
+    SHA-256 verified against the published `checksums.txt`, and the unpacked
+    binary asked for its own `--version` to confirm it matches the release before
+    an atomic rename over the running executable. Any failure leaves the existing
+    binary untouched
+  - Checksum verification covers corruption and truncation, **not** provenance:
+    the checksum ships from the same place as the archive. A detached signature
+    would be the next step and is not implemented
+  - A Homebrew-managed install is refused with a pointer to `brew upgrade
+    standx-cli`, so the formula and the installed binary cannot silently diverge.
+    An unwritable install directory is an error with instructions — the command
+    never elevates privileges
+  - Stable checks resolve the latest tag through the `releases/latest` redirect
+    rather than the REST API, so they are not subject to the 60-per-hour
+    unauthenticated API limit. Only `--pre` needs the API, and it names the rate
+    limit explicitly (and honours `GITHUB_TOKEN`) instead of surfacing a bare 403
+
 ## [1.1.0] - 2026-07-28
 
 Maker safety-track tier 2 (stage 5-b), complete net-PnL attribution, and the

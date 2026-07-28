@@ -17,6 +17,7 @@ mod order;
 mod portfolio;
 mod stream;
 mod trade;
+mod update;
 mod util;
 
 pub use account::handle_account;
@@ -33,4 +34,5 @@ pub use order::handle_order;
 pub use portfolio::{handle_portfolio, PortfolioCommand};
 pub use stream::handle_stream;
 pub use trade::handle_trade;
+pub use update::handle_update;
 pub use util::parse_time_string;

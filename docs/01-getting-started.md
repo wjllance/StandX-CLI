@@ -19,6 +19,17 @@ brew install standx-cli
 standx --version
 ```
 
+### 升级
+
+```bash
+standx update --check   # 只看版本差异，不改任何东西
+standx update           # 下载、校验 sha256、原子替换当前二进制
+```
+
+Homebrew 装的用 `brew upgrade standx-cli`——`standx update` 会检测到并拒绝自替换，
+避免 formula 与实际二进制不一致。安装目录不可写时会直接报错并给出说明，**不会**自动
+提权。
+
 ### 方式二：直接下载二进制
 
 ```bash

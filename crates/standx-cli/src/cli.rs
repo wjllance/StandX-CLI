@@ -198,6 +198,27 @@ pub enum Commands {
         #[command(subcommand)]
         command: Box<MakerCommands>,
     },
+    /// Update this binary to the latest GitHub release
+    ///
+    /// Downloads the release asset for this platform, verifies its published
+    /// sha256, and atomically replaces the running executable. Refuses to touch
+    /// a Homebrew-managed install (use `brew upgrade standx-cli`) and never
+    /// elevates privileges.
+    #[command(visible_alias = "self-update")]
+    Update {
+        /// Only report current vs latest; change nothing
+        #[arg(long)]
+        check: bool,
+        /// Skip the confirmation prompt (required when stdin is not a TTY)
+        #[arg(short = 'y', long = "yes")]
+        assume_yes: bool,
+        /// Consider pre-release versions as update candidates
+        #[arg(long)]
+        pre: bool,
+        /// Reinstall even when the latest version is already installed
+        #[arg(long)]
+        force: bool,
+    },
     /// Record StandX vs Hyperliquid mark prices to NDJSON to measure StandX's
     /// price lag (read-only diagnostic; no auth, no orders).
     LagRecorder {

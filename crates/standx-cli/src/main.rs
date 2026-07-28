@@ -166,6 +166,7 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Block { .. } => "block",
         Commands::Maker { .. } => "maker",
         Commands::LagRecorder { .. } => "lag-recorder",
+        Commands::Update { .. } => "update",
     }
 }
 
@@ -301,6 +302,14 @@ async fn execute_command(
             commands::handle_lag_recorder(symbol, hl_coin, out, flush_secs, status_secs, verbose)
                 .await?;
         }
+        Commands::Update {
+            check,
+            assume_yes,
+            pre,
+            force,
+        } => {
+            commands::handle_update(check, assume_yes, pre, force, output).await?;
+        }
     }
     Ok(())
 }
@@ -326,6 +335,12 @@ async fn handle_dry_run(command: &Commands, output: OutputFormat) -> Result<(), 
         Commands::LagRecorder { .. } => {
             "Would record StandX/Hyperliquid prices to NDJSON (read-only, safe to execute)"
         }
+        Commands::Update { check: true, .. } => {
+            "Would report the installed version against the latest GitHub release (read-only)"
+        }
+        Commands::Update { .. } => {
+            "Would download the latest release, verify its published sha256, and replace this binary"
+        }
     };
 
     let command_label = match command {
@@ -343,6 +358,7 @@ async fn handle_dry_run(command: &Commands, output: OutputFormat) -> Result<(), 
         Commands::Block { .. } => "block",
         Commands::Maker { .. } => "maker",
         Commands::LagRecorder { .. } => "lag-recorder",
+        Commands::Update { .. } => "update",
     };
     let dry_run_info = serde_json::json!({
         "dry_run": true,

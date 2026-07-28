@@ -1862,6 +1862,7 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
+ "sha2",
  "standx-maker",
  "standx-sdk",
  "tabled",
