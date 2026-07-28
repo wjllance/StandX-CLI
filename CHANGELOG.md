@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-28
+
+Self-update. `standx --version` now also matches its release tag as a rule rather
+than by accident (see the v1.1.0 versioning note).
+
 ### Added
 - **`standx update`** (alias `self-update`) — replace the running binary with the
   latest GitHub release. `--check` reports installed vs latest and changes
@@ -33,6 +38,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     rather than the REST API, so they are not subject to the 60-per-hour
     unauthenticated API limit. Only `--pre` needs the API, and it names the rate
     limit explicitly (and honours `GITHUB_TOKEN`) instead of surfacing a bare 403
+  - Known gaps, tracked rather than hidden: provenance verification is not
+    implemented (#336), `--force` still permits a silent downgrade and `--pre`
+    can select an unpublished draft (#337)
+
+### Fixed
+- `standx <subcommand> --help` no longer risks a clap duplicate-option panic in
+  debug builds for the update command: `--yes` exists only as the global flag, and
+  a test now runs clap's `debug_assert()` over the update subtree. Release builds
+  compile those assertions out, which is exactly how a duplicated `--yes` survived
+  manual smoke testing
+  - Unrelated and still open: `standx block list --help` panics in debug builds
+    because `-s` is claimed by both `--symbol` and `--status`. Fixing it changes a
+    published short flag, so it is its own change — which is why the new assertion
+    is scoped to the update subtree instead of the whole command tree
 
 ## [1.1.0] - 2026-07-28
 
