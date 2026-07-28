@@ -52,6 +52,11 @@ pub(super) fn correlation_failure_detail(
     use maker::ResponseCorrelation;
 
     let tail = match correlation {
+        ResponseCorrelation::VenueContradiction { .. } => {
+            "account stream already showed this order live at the venue and the book adopted it, \
+             but the command channel rejected the placement"
+                .to_string()
+        }
         ResponseCorrelation::Contradictory {
             resolution,
             resolved_in,
