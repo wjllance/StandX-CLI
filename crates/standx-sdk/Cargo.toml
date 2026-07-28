@@ -2,6 +2,7 @@
 name = "standx-sdk"
 version = "0.1.0"
 description = "Rust SDK for the StandX perpetual DEX - REST client, WebSocket streams, models, and signing"
+readme = "README.md"
 keywords = ["standx", "trading", "crypto", "sdk", "perpetual"]
 categories = ["api-bindings", "cryptography::cryptocurrencies"]
 edition.workspace = true

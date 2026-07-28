@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Documentation positioning: agent-first, but OpenClaw is no longer privileged.** The README tagline is now "Trade by Intent. Built for Agents, Not Buttons."; OpenClaw sits alongside Claude / Cursor / LangChain / AutoGPT instead of ahead of them. The `--openclaw` flag, `STANDX_OPENCLAW_MODE`, and the `openclaw/` skill package are unchanged — only their framing is. `standx --help` and the `standx-cli` crate description no longer read "OpenClaw-first"
+- **README claims that did not match the code are fixed.** `--confirm` / `--no-confirm` never existed and are gone (`--yes` is documented as what it actually gates today: `standx update`'s confirmation, and nothing else — order/leverage/margin have no prompt to skip); "Rate limiting — built-in protection" is replaced by what actually ships (transport failures and HTTP 429 classified as retryable with `RateLimitExceeded { retry_after }`, and no client-side throttle); `--dry-run` is described as the category-level check it is rather than an order simulator; the workspace is described as three crates, removing the last `standx_sdk::maker` reference in the repo
+
+### Added
+- `crates/standx-sdk/README.md` — standalone crate README: module tour, REST method table, `tabled` feature, and the presentation-free contract (opt-in WebSocket debug tracing goes to stderr). The root README gains a `Rust SDK` section so the library has an entry in the table of contents
+- `crates/standx-maker/README.md` — a pointer document for the crate boundary (no I/O, deterministic, `standx-sdk` only), with a coarse module map and links to `docs/13-maker.md`, `docs/14-maker-live-gate.md`, and `AGENTS.md`. Deliberately carries no flags, config keys, or PnL figures, which live in `docs/`
+
 ## [1.2.0] - 2026-07-28
 
 Self-update. `standx --version` now also matches its release tag as a rule rather
