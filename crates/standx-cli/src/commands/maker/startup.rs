@@ -388,18 +388,15 @@ pub(super) async fn run_startup(
             );
             notifier
                 .risk(
-                    RiskNotice {
-                        kind: "startup_position_limit",
-                        severity: "critical",
-                        event: "startup_rejected",
-                        message: &message,
-                        symbol: &symbol,
-                        cycle: 0,
-                        position_before: None,
-                        position_after: Some(starting_position),
-                        expected: None,
-                        observed: Some(starting_position),
-                    },
+                    RiskNotice::critical(
+                        "startup_position_limit",
+                        "startup_rejected",
+                        &message,
+                        &symbol,
+                        0,
+                    )
+                    .position_after(starting_position)
+                    .observed(starting_position),
                     true,
                 )
                 .await;
@@ -431,18 +428,16 @@ pub(super) async fn run_startup(
             account_stream_handle.abort();
             notifier
                 .risk(
-                    RiskNotice {
-                        kind: "position_reconciliation",
-                        severity: "critical",
-                        event: "startup_sync_failed",
-                        message: "position changed while the account stream was authenticating",
-                        symbol: &symbol,
-                        cycle: 0,
-                        position_before: Some(starting_position),
-                        position_after: Some(post_auth_position),
-                        expected: Some(starting_position),
-                        observed: Some(post_auth_position),
-                    },
+                    RiskNotice::critical(
+                        "position_reconciliation",
+                        "startup_sync_failed",
+                        "position changed while the account stream was authenticating",
+                        &symbol,
+                        0,
+                    )
+                    .position_change(starting_position, post_auth_position)
+                    .expected(starting_position)
+                    .observed(post_auth_position),
                     true,
                 )
                 .await;
@@ -503,18 +498,10 @@ pub(super) async fn run_startup(
             let message = format!("adopted non-zero starting inventory {starting_position:+.8}");
             notifier
                 .risk(
-                    RiskNotice {
-                        kind: "inventory_adopted",
-                        severity: "warning",
-                        event: "startup",
-                        message: &message,
-                        symbol: &symbol,
-                        cycle: 0,
-                        position_before: Some(0.0),
-                        position_after: Some(starting_position),
-                        expected: Some(starting_position),
-                        observed: Some(starting_position),
-                    },
+                    RiskNotice::warning("inventory_adopted", "startup", &message, &symbol, 0)
+                        .position_change(0.0, starting_position)
+                        .expected(starting_position)
+                        .observed(starting_position),
                     false,
                 )
                 .await;

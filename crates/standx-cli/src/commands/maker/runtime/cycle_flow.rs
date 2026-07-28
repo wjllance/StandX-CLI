@@ -598,31 +598,29 @@ impl MakerRuntime {
                     if halted != breaker_halted_before {
                         let (severity, event, message) = if halted {
                             (
-                                "warning",
+                                RiskSeverity::Warning,
                                 "entered",
                                 "volatility breaker entered; maker quotes are being pulled",
                             )
                         } else {
                             (
-                                "resolved",
+                                RiskSeverity::Resolved,
                                 "cleared",
                                 "volatility breaker cleared; quoting may resume",
                             )
                         };
                         notifier
                             .risk(
-                                RiskNotice {
-                                    kind: "volatility_breaker",
+                                RiskNotice::with_severity(
                                     severity,
+                                    "volatility_breaker",
                                     event,
                                     message,
                                     symbol,
                                     cycle,
-                                    position_before: None,
-                                    position_after: Some(self.loop_state.ledger.expected_position),
-                                    expected: Some(self.loop_state.ledger.expected_position),
-                                    observed: None,
-                                },
+                                )
+                                .position_after(self.loop_state.ledger.expected_position)
+                                .expected(self.loop_state.ledger.expected_position),
                                 false,
                             )
                             .await;
@@ -630,36 +628,22 @@ impl MakerRuntime {
                     if !exit_pending_before && exit_pending_after {
                         notifier
                             .risk(
-                                RiskNotice {
-                                    kind: "inventory_exit",
-                                    severity: "warning",
-                                    event: "submitted",
-                                    message: "reduce-only inventory exit submitted",
+                                RiskNotice::warning(
+                                    "inventory_exit",
+                                    "submitted",
+                                    "reduce-only inventory exit submitted",
                                     symbol,
                                     cycle,
-                                    position_before: None,
-                                    position_after: Some(self.loop_state.ledger.expected_position),
-                                    expected: Some(self.loop_state.ledger.expected_position),
-                                    observed: None,
-                                },
+                                )
+                                .position_after(self.loop_state.ledger.expected_position)
+                                .expected(self.loop_state.ledger.expected_position),
                                 false,
                             )
                             .await;
                     } else if exit_pending_before && !exit_pending_after {
                         notifier
                             .risk(
-                                RiskNotice {
-                                    kind: "inventory_exit",
-                                    severity: "resolved",
-                                    event: "confirmed",
-                                    message: "reduce-only inventory exit is no longer pending after ledger reconciliation",
-                                    symbol,
-                                    cycle,
-                                    position_before: None,
-                                    position_after: Some(self.loop_state.ledger.expected_position),
-                                    expected: Some(self.loop_state.ledger.expected_position),
-                                    observed: Some(self.loop_state.ledger.expected_position),
-                                },
+                                RiskNotice::resolved("inventory_exit", "confirmed", "reduce-only inventory exit is no longer pending after ledger reconciliation", symbol, cycle).position_after(self.loop_state.ledger.expected_position).expected(self.loop_state.ledger.expected_position).observed(self.loop_state.ledger.expected_position),
                                 false,
                             )
                         .await;
@@ -672,18 +656,7 @@ impl MakerRuntime {
                         // the same contract as the pre-fix refused cycle.
                         notifier
                             .risk(
-                                RiskNotice {
-                                    kind: "inventory_exit",
-                                    severity: "warning",
-                                    event: "failed",
-                                    message: "inventory exit cycle failed: inventory exit is still awaiting venue confirmation; refusing to submit another",
-                                    symbol,
-                                    cycle,
-                                    position_before: None,
-                                    position_after: Some(self.loop_state.ledger.expected_position),
-                                    expected: Some(self.loop_state.ledger.expected_position),
-                                    observed: None,
-                                },
+                                RiskNotice::warning("inventory_exit", "failed", "inventory exit cycle failed: inventory exit is still awaiting venue confirmation; refusing to submit another", symbol, cycle).position_after(self.loop_state.ledger.expected_position).expected(self.loop_state.ledger.expected_position),
                                 false,
                             )
                         .await;
@@ -705,7 +678,7 @@ impl MakerRuntime {
                     } else {
                         self.loop_state.stats.position()
                     };
-                    if self.loop_state.alerts.enabled() {
+                    if self.loop_state.alerts.session_enabled() {
                         let fired = self.loop_state.alerts.evaluate(
                             &self.loop_state.stats,
                             session_position,
@@ -761,21 +734,7 @@ impl MakerRuntime {
                             );
                             notifier
                                 .risk(
-                                    RiskNotice {
-                                        kind: "stop_loss",
-                                        severity: "critical",
-                                        event: "triggered",
-                                        message: &format!(
-                                            "session PnL {pnl:+.2} breached stop-loss -{:.2}; shutting down",
-                                            args.stop_loss
-                                        ),
-                                        symbol,
-                                        cycle,
-                                        position_before: None,
-                                        position_after: Some(self.loop_state.ledger.expected_position),
-                                        expected: Some(self.loop_state.ledger.expected_position),
-                                        observed: None,
-                                    },
+                                    RiskNotice::critical("stop_loss", "triggered", &format!( "session PnL {pnl:+.2} breached stop-loss -{:.2}; shutting down", args.stop_loss ), symbol, cycle).position_after(self.loop_state.ledger.expected_position).expected(self.loop_state.ledger.expected_position),
                                     true,
                                 )
                                 .await;
@@ -813,18 +772,15 @@ impl MakerRuntime {
                         );
                         notifier
                             .risk(
-                                RiskNotice {
-                                    kind: "account_floor",
-                                    severity: "critical",
-                                    event: floor.cause.event(),
-                                    message: &format!("{}; shutting down", floor.detail),
+                                RiskNotice::critical(
+                                    "account_floor",
+                                    floor.cause.event(),
+                                    &format!("{}; shutting down", floor.detail),
                                     symbol,
                                     cycle,
-                                    position_before: None,
-                                    position_after: Some(self.loop_state.ledger.expected_position),
-                                    expected: Some(self.loop_state.ledger.expected_position),
-                                    observed: None,
-                                },
+                                )
+                                .position_after(self.loop_state.ledger.expected_position)
+                                .expected(self.loop_state.ledger.expected_position),
                                 true,
                             )
                             .await;
@@ -882,22 +838,7 @@ impl MakerRuntime {
                                 recovery_effect_stop: EffectFailureStop::PositionReconciliation,
                                 cleanup_failure_prefix: String::new(),
                                 cleanup_failed_exit: MakerExit::PositionReconciliation,
-                                notice: FreezeNotice::Risk(RiskNotice {
-                                    kind: "position_reconciliation",
-                                    severity: "warning",
-                                    event: "frozen",
-                                    message: match &mismatch.cause {
-                                        PositionReconciliationCause::CycleInvalidation => "account update invalidated active cycle; placements frozen and maker cleanup starting",
-                                        PositionReconciliationCause::UnknownCurrentRunOrder => "unknown current-run order detected; placements frozen and maker cleanup starting",
-                                        PositionReconciliationCause::PositionMismatch => "position mismatch detected; placements frozen and maker cleanup starting",
-                                    },
-                                    symbol,
-                                    cycle,
-                                    position_before: None,
-                                    position_after: None,
-                                    expected: Some(mismatch.expected),
-                                    observed: Some(mismatch.observed),
-                                }),
+                                notice: FreezeNotice::Risk(RiskNotice::warning("position_reconciliation", "frozen", match &mismatch.cause { PositionReconciliationCause::CycleInvalidation => "account update invalidated active cycle; placements frozen and maker cleanup starting", PositionReconciliationCause::UnknownCurrentRunOrder => "unknown current-run order detected; placements frozen and maker cleanup starting", PositionReconciliationCause::PositionMismatch => "position mismatch detected; placements frozen and maker cleanup starting", }, symbol, cycle).expected(mismatch.expected).observed(mismatch.observed)),
                                 frozen_note: Some(ReconciliationStateNote {
                                     cause: reconciliation_cause,
                                     expected: mismatch.expected,
@@ -1067,18 +1008,7 @@ impl MakerRuntime {
                                         expected: self.loop_state.ledger.expected_position,
                                         observed: last_observed,
                                     }),
-                                    notice: RiskNotice {
-                                        kind: "position_reconciliation",
-                                        severity: "resolved",
-                                        event: "recovered",
-                                        message: "position ledger recovered within the 3-second freeze window; quoting may resume from an empty maker book",
-                                        symbol,
-                                        cycle,
-                                        position_before: None,
-                                        position_after: None,
-                                        expected: Some(self.loop_state.ledger.expected_position),
-                                        observed: Some(last_observed),
-                                    },
+                                    notice: RiskNotice::resolved("position_reconciliation", "recovered", "position ledger recovered within the 3-second freeze window; quoting may resume from an empty maker book", symbol, cycle).expected(self.loop_state.ledger.expected_position).observed(last_observed),
                                 },
                             )
                             .await;
@@ -1095,18 +1025,7 @@ impl MakerRuntime {
                         );
                         notifier
                             .risk(
-                                RiskNotice {
-                                    kind: "position_reconciliation",
-                                    severity: "critical",
-                                    event: "failed",
-                                    message: "position ledger remained inconsistent after the 3-second freeze window",
-                                    symbol,
-                                    cycle,
-                                    position_before: None,
-                                    position_after: None,
-                                    expected: Some(self.loop_state.ledger.expected_position),
-                                    observed: Some(last_observed),
-                                },
+                                RiskNotice::critical("position_reconciliation", "failed", "position ledger remained inconsistent after the 3-second freeze window", symbol, cycle).expected(self.loop_state.ledger.expected_position).observed(last_observed),
                                 true,
                             )
                         .await;
@@ -1128,18 +1047,15 @@ impl MakerRuntime {
                         let message = format!("inventory exit cycle failed: {e}");
                         notifier
                             .risk(
-                                RiskNotice {
-                                    kind: "inventory_exit",
-                                    severity: "warning",
-                                    event: "failed",
-                                    message: &message,
+                                RiskNotice::warning(
+                                    "inventory_exit",
+                                    "failed",
+                                    &message,
                                     symbol,
                                     cycle,
-                                    position_before: None,
-                                    position_after: Some(self.loop_state.ledger.expected_position),
-                                    expected: Some(self.loop_state.ledger.expected_position),
-                                    observed: None,
-                                },
+                                )
+                                .position_after(self.loop_state.ledger.expected_position)
+                                .expected(self.loop_state.ledger.expected_position),
                                 false,
                             )
                             .await;

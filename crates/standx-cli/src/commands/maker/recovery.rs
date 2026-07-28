@@ -1,5 +1,5 @@
 use super::ledger::{adopt_order, apply_rest_trade};
-use super::model::{is_current_run_order, is_maker_order, position_for_symbol};
+use super::model::{is_current_run_order, is_maker_order, position_for_symbol, StreamHealth};
 use super::output::emit_live_fill;
 use super::pipeline::{fetch_account_audit, AccountAudit};
 use crate::cli::OutputFormat;
@@ -842,9 +842,7 @@ pub(super) async fn reconnect_order_response(
                     }
 
                     if !health.is_healthy() {
-                        let reason = health.failure_reason().unwrap_or_else(|| {
-                            "new order-response session became unhealthy during reconciliation without a recorded reason".to_string()
-                        });
+                        let reason = health.failure_detail();
                         handle.abort();
                         last_error = Some(anyhow::anyhow!(
                             "new order-response session failed during reconciliation: {reason}"
