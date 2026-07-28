@@ -35,7 +35,8 @@ docs/
 ├── 24-maker-guard-spinoff-design.md # 阶段 3-guard 独立立项设计与判据
 ├── 25-maker-short-term-roadmap-2026-07-27.md # Maker 短期迭代路线图快照（2026-07-27，当前）
 ├── 26-maker-stage5b-design.md # 阶段 5-b 安全轨二级设计与实现记录
-└── 27-maker-baseline-pnl-collection-runbook.md # 冻结基线 PnL 绝对读数采集手册
+├── 27-maker-baseline-pnl-collection-runbook.md # 冻结基线 PnL 绝对读数采集手册
+└── 28-experiment-protocol.md # 实验轨规程（预注册判据、未判项登记）
 ```
 
 ---
@@ -71,6 +72,7 @@ docs/
 | [25-maker-short-term-roadmap-2026-07-27.md](25-maker-short-term-roadmap-2026-07-27.md) | Maker 短期迭代路线图快照（阶段 3 关闭后的当前快照） | 开发参考 |
 | [26-maker-stage5b-design.md](26-maker-stage5b-design.md) | 阶段 5-b（安全轨二级）退出政策 typed 分离、残余仓位交接与账户硬熔断 | 开发参考 |
 | [27-maker-baseline-pnl-collection-runbook.md](27-maker-baseline-pnl-collection-runbook.md) | 冻结基线 PnL 绝对读数采集（单臂 2–3 天）前置、授权与记录清单 | 操作手册 |
+| [28-experiment-protocol.md](28-experiment-protocol.md) | 实验轨规程：四件套、预注册判据模板、未判项登记、观测项降级规则 | 开发参考 |
 
 ---
 
