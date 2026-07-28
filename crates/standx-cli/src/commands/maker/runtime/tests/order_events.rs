@@ -1,4 +1,7 @@
 use super::*;
+use standx_maker::{
+    ProjectionRequestResolution, RequestLifecycle, RequestOperation, ResponseCorrelation,
+};
 
 #[test]
 fn apply_order_response_keeps_accepted_placement() {
@@ -12,7 +15,12 @@ fn apply_order_response_keeps_accepted_placement() {
         2,
     )
     .unwrap();
-    assert!(matched);
+    assert!(!matched.fails_closed());
+    assert_eq!(matched.label(), "matched");
+    assert_eq!(
+        matched.operation().map(RequestOperation::label),
+        Some("place")
+    );
     assert_eq!(
         projection.pending_places().len(),
         1,
@@ -22,14 +30,27 @@ fn apply_order_response_keeps_accepted_placement() {
 }
 
 #[test]
-fn order_response_correlation_failed_only_on_uncorrelated_request_ids() {
-    // A matched ack is never a correlation failure, even while the runtime
-    // is frozen for another reason.
-    assert!(!order_response_correlation_failed(true, Some("req-1")));
-    // A response whose request_id matches no pending request fails closed.
-    assert!(order_response_correlation_failed(false, Some("req-1")));
-    // A response without a request_id cannot be correlated or escalated.
-    assert!(!order_response_correlation_failed(false, None));
+fn correlation_verdicts_decide_which_acknowledgements_fail_closed() {
+    let projection = projection_with_pending(&["req-1"]);
+
+    // A matched ack is never a correlation failure, even while the runtime is
+    // frozen for another reason.
+    let matched = projection.classify_response(Some("req-1"), true);
+    assert_eq!(matched.label(), "matched");
+    assert!(!matched.fails_closed());
+
+    // An ID this run never registered fails closed — and is now reported as an
+    // orphan rather than as a bare "unexpected request_id".
+    let orphan = projection.classify_response(Some("req-unknown"), true);
+    assert_eq!(orphan, ResponseCorrelation::Orphan);
+    assert!(orphan.fails_closed());
+
+    // A frame with no request_id at all is a protocol violation. The old
+    // boolean predicate ignored this case outright, which is exactly the
+    // blanket-ignore path #277 rules out.
+    let unidentified = projection.classify_response(None, true);
+    assert_eq!(unidentified, ResponseCorrelation::Unidentified);
+    assert!(unidentified.fails_closed());
 }
 
 #[test]
@@ -69,9 +90,16 @@ fn account_invalidation_with_matched_buffered_ack_reconciles_without_order_respo
         2,
     )
     .unwrap();
-    assert!(matched, "buffered ack correlates with the pending request");
-    if order_response_correlation_failed(matched, request_id.as_deref()) {
-        health.mark_unhealthy("order-response correlation failed closed");
+    assert!(
+        !matched.fails_closed(),
+        "buffered ack correlates with the pending request"
+    );
+    if matched.fails_closed() {
+        health.mark_unhealthy(correlation_failure_detail(
+            &matched,
+            request_id.as_deref(),
+            projection.generation(),
+        ));
     }
 
     // A matched ack must leave the order-response stream healthy; otherwise
@@ -122,7 +150,7 @@ fn apply_order_response_drops_rejected_placement() {
         2,
     )
     .unwrap();
-    assert!(matched);
+    assert!(!matched.fails_closed());
     assert!(
         projection.pending_places().is_empty(),
         "rejected placement is removed"
@@ -144,41 +172,30 @@ fn apply_order_response_matches_cancel_acknowledgement() {
         }),
     );
 
-    assert!(apply_order_response(
-        order_response(Some("cancel-1"), 0),
-        &mut projection,
-        OutputFormat::Quiet,
-        "BTC-USD",
-        1,
-        2,
-    )
-    .unwrap());
+    let verdict = correlate(&mut projection, Some("cancel-1"), 0);
+    assert_eq!(verdict.label(), "matched");
+    assert_eq!(
+        verdict.operation().map(RequestOperation::label),
+        Some("cancel")
+    );
     assert!(projection.pending_cancels().is_empty());
 }
 
 #[test]
 fn duplicate_place_ack_matches_completed_request_after_cleanup() {
     let mut projection = projection_with_pending(&["req-1"]);
-    assert!(apply_order_response(
-        order_response(Some("req-1"), 0),
-        &mut projection,
-        OutputFormat::Quiet,
-        "BTC-USD",
-        1,
-        2,
-    )
-    .unwrap());
+    assert_eq!(
+        correlate(&mut projection, Some("req-1"), 0).label(),
+        "matched"
+    );
     projection.clear_orders_and_pending();
 
-    assert!(apply_order_response(
-        order_response(Some("req-1"), 0),
-        &mut projection,
-        OutputFormat::Quiet,
-        "BTC-USD",
-        2,
-        2,
-    )
-    .unwrap());
+    // The tombstone still identifies the request, and the duplicate agrees with
+    // the recorded resolution, so it is a late-but-consistent delivery — not the
+    // "unexpected request_id" the old boolean reported it as.
+    let duplicate = correlate(&mut projection, Some("req-1"), 0);
+    assert_eq!(duplicate.label(), "late_known");
+    assert!(!duplicate.fails_closed());
 }
 
 #[test]
@@ -197,15 +214,7 @@ fn delayed_account_order_and_replayed_ack_survive_account_reconnect() {
             cycle: 1,
         }),
     );
-    assert!(apply_order_response(
-        order_response(Some("req-1"), 0),
-        &mut projection,
-        OutputFormat::Quiet,
-        "BTC-USD",
-        1,
-        2,
-    )
-    .unwrap());
+    assert!(!correlate(&mut projection, Some("req-1"), 0).fails_closed());
     projection.apply(1, AccountProjectionEvent::AdvanceCycle { cycle: 4 });
     projection.reset_after_cleanup_preserving_pending_acks(2, 0.0);
 
@@ -221,40 +230,16 @@ fn delayed_account_order_and_replayed_ack_survive_account_reconnect() {
         }),
     );
     assert!(!outcome.unknown_current_run_order);
-    assert!(apply_order_response(
-        order_response(Some("req-1"), 0),
-        &mut projection,
-        OutputFormat::Quiet,
-        "BTC-USD",
-        4,
-        2,
-    )
-    .unwrap());
+    assert!(!correlate(&mut projection, Some("req-1"), 0).fails_closed());
 }
 
 #[test]
 fn duplicate_place_rejection_matches_completed_request_after_cleanup() {
     let mut projection = projection_with_pending(&["req-1"]);
-    assert!(apply_order_response(
-        order_response(Some("req-1"), 400),
-        &mut projection,
-        OutputFormat::Quiet,
-        "BTC-USD",
-        1,
-        2,
-    )
-    .unwrap());
+    assert!(!correlate(&mut projection, Some("req-1"), 400).fails_closed());
     projection.clear_orders_and_pending();
 
-    assert!(apply_order_response(
-        order_response(Some("req-1"), 400),
-        &mut projection,
-        OutputFormat::Quiet,
-        "BTC-USD",
-        2,
-        2,
-    )
-    .unwrap());
+    assert!(!correlate(&mut projection, Some("req-1"), 400).fails_closed());
 }
 
 #[test]
@@ -271,50 +256,49 @@ fn duplicate_cancel_ack_matches_completed_request_after_cleanup() {
             cycle: 1,
         }),
     );
-    assert!(apply_order_response(
-        order_response(Some("cancel-1"), 0),
-        &mut projection,
-        OutputFormat::Quiet,
-        "BTC-USD",
-        1,
-        2,
-    )
-    .unwrap());
+    assert!(!correlate(&mut projection, Some("cancel-1"), 0).fails_closed());
     projection.clear_orders_and_pending();
 
-    assert!(apply_order_response(
-        order_response(Some("cancel-1"), 0),
-        &mut projection,
-        OutputFormat::Quiet,
-        "BTC-USD",
-        2,
-        2,
-    )
-    .unwrap());
+    assert!(!correlate(&mut projection, Some("cancel-1"), 0).fails_closed());
 }
 
 #[test]
 fn contradictory_replay_for_completed_request_remains_fail_closed() {
     let mut projection = projection_with_pending(&["req-1"]);
-    assert!(apply_order_response(
-        order_response(Some("req-1"), 0),
-        &mut projection,
-        OutputFormat::Quiet,
-        "BTC-USD",
-        1,
-        2,
-    )
-    .unwrap());
+    assert!(!correlate(&mut projection, Some("req-1"), 0).fails_closed());
 
-    assert!(!apply_order_response(
-        order_response(Some("req-1"), 400),
-        &mut projection,
-        OutputFormat::Quiet,
-        "BTC-USD",
-        2,
-        2,
-    )
-    .unwrap());
+    // The tombstone records PlaceAccepted; a rejection for the same request
+    // cannot also be true. This is a contradiction, not an unknown ID, and the
+    // verdict now says so.
+    let verdict = correlate(&mut projection, Some("req-1"), 400);
+    assert!(verdict.fails_closed());
+    assert_eq!(verdict.label(), "contradictory");
+    assert_eq!(
+        verdict,
+        ResponseCorrelation::Contradictory {
+            operation: RequestOperation::Place,
+            resolution: ProjectionRequestResolution::PlaceAccepted,
+            resolved_in: 1,
+            // The accepted place is still awaiting its account-order
+            // observation, which is exactly when a stray rejection is most
+            // dangerous: the slot is open and the maker believes it is filled.
+            lifecycle: RequestLifecycle::AwaitingVenue,
+        }
+    );
+    // The failure detail must let an operator reconstruct all of it.
+    let detail = correlation_failure_detail(&verdict, Some("req-1"), projection.generation());
+    for expected in [
+        "verdict=contradictory",
+        "request_id=req-1",
+        "operation=place",
+        "lifecycle=awaiting_venue",
+        "place_accepted",
+    ] {
+        assert!(
+            detail.contains(expected),
+            "{expected} missing from: {detail}"
+        );
+    }
 }
 
 #[test]
@@ -381,40 +365,32 @@ fn apply_order_response_matches_late_ack_after_terminal_account_order() {
     assert!(projection.pending_places().is_empty());
     assert_eq!(projection.pending_request_count(), 1);
 
-    assert!(apply_order_response(
-        order_response(Some("req-1"), 0),
-        &mut projection,
-        OutputFormat::Quiet,
-        "BTC-USD",
-        1,
-        2,
-    )
-    .unwrap());
+    assert!(!correlate(&mut projection, Some("req-1"), 0).fails_closed());
     assert_eq!(projection.pending_request_count(), 0);
 }
 
 #[test]
 fn apply_order_response_reports_unmatched_ids() {
     let mut projection = projection_with_pending(&["req-1"]);
-    assert!(!apply_order_response(
-        order_response(Some("other"), 0),
-        &mut projection,
-        OutputFormat::Quiet,
-        "BTC-USD",
-        1,
-        2,
-    )
-    .unwrap());
-    assert!(!apply_order_response(
-        order_response(None, 0),
-        &mut projection,
-        OutputFormat::Quiet,
-        "BTC-USD",
-        1,
-        2,
-    )
-    .unwrap());
+
+    // An ID this run never registered.
+    let orphan = correlate(&mut projection, Some("other"), 0);
+    assert_eq!(orphan, ResponseCorrelation::Orphan);
+    assert!(orphan.fails_closed());
+
+    // A frame carrying no request_id at all: a protocol violation, reported
+    // separately rather than folded into "unknown ID".
+    let unidentified = correlate(&mut projection, None, 0);
+    assert_eq!(unidentified, ResponseCorrelation::Unidentified);
+    assert!(unidentified.fails_closed());
+    assert!(
+        correlation_failure_detail(&unidentified, None, projection.generation())
+            .contains("carried no request_id")
+    );
+
+    // Neither observation may touch the registry on its way out.
     assert_eq!(projection.pending_places().len(), 1);
+    assert_eq!(projection.pending_request_count(), 1);
 }
 
 #[test]

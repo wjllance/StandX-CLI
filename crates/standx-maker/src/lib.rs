@@ -35,7 +35,7 @@ pub use account_projection::{
     AccountProjectionEvent, MakerAccountProjection, OrderObservation, OrderResponseContinuity,
     ProjectedOrder, ProjectionOutcome, ProjectionPendingCancel, ProjectionPendingPlace,
     ProjectionPendingRequest, ProjectionRegistryError, ProjectionRequestResolution,
-    MAX_PENDING_ORDER_REQUESTS,
+    RequestLifecycle, RequestOperation, ResponseCorrelation, MAX_PENDING_ORDER_REQUESTS,
 };
 pub use external_guard::{
     ExternalDivergence, GuardConfig, GuardController, GuardDecision, GuardError,

@@ -421,6 +421,7 @@ impl MakerRuntime {
                         request_id.as_deref(),
                         response.accepted(),
                     );
+                    let generation = session.projection.generation();
                     let outcome = apply_order_response(
                         response,
                         &mut session.projection,
@@ -432,6 +433,7 @@ impl MakerRuntime {
                     if let Some(reason) = order_response_failure(
                         &outcome,
                         request_id.as_deref(),
+                        generation,
                         &mut self.recovery.runtime_state,
                     ) {
                         session.order_response_health.mark_unhealthy(reason);
