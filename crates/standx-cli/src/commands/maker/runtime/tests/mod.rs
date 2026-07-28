@@ -47,6 +47,25 @@ fn projection_with_pending(request_ids: &[&str]) -> MakerAccountProjection {
     projection
 }
 
+/// Apply one acknowledgement and return its correlation verdict. Keeps the
+/// permutation tests reading as a sequence of observations rather than a wall of
+/// repeated `apply_order_response` argument lists.
+fn correlate(
+    projection: &mut MakerAccountProjection,
+    request_id: Option<&str>,
+    code: i64,
+) -> standx_maker::ResponseCorrelation {
+    apply_order_response(
+        order_response(request_id, code),
+        projection,
+        OutputFormat::Quiet,
+        "BTC-USD",
+        1,
+        2,
+    )
+    .expect("acknowledgement must not be a cancel rejection")
+}
+
 fn order_response(request_id: Option<&str>, code: i64) -> OrderResponse {
     OrderResponse {
         code,

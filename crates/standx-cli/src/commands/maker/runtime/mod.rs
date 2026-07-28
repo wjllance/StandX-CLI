@@ -45,7 +45,7 @@ use events::{
     OrderResponseObservation, OutcomeSink, ORDER_REQUEST_TIMEOUT,
 };
 #[cfg(test)]
-use events::{order_response_correlation_failed, AccountEventOutcome, CancelRejection};
+use events::{correlation_failure_detail, AccountEventOutcome, CancelRejection};
 use recovery_flow::*;
 use state::*;
 pub(super) async fn run_maker(

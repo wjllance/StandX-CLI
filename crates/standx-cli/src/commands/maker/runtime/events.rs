@@ -38,14 +38,60 @@ pub(super) fn request_timeout_notice<'a>(
     }
 }
 
-/// A buffered or queued order-response signals a genuine correlation failure
-/// only when it carried a `request_id` that matched no pending request. A
-/// matched accepted placement/cancel or rejected placement remains correlated,
-/// even when processed while the runtime is already frozen for an unrelated
-/// account event. A matched rejected cancellation is classified separately and
-/// fails closed because the maker cannot assume the order is gone.
-pub(super) fn order_response_correlation_failed(matched: bool, request_id: Option<&str>) -> bool {
-    request_id.is_some() && !matched
+/// Operator-facing detail for a correlation that must stop live order work.
+///
+/// Every fail-closed stop has to carry enough to reconstruct where the request
+/// came from and how far it had got, so the fields are always present:
+/// the verdict, the request ID, the operation it carried, and its last known
+/// lifecycle state. The variant-specific tail says what made it unsafe.
+pub(super) fn correlation_failure_detail(
+    correlation: &maker::ResponseCorrelation,
+    request_id: Option<&str>,
+    generation: u64,
+) -> String {
+    use maker::ResponseCorrelation;
+
+    let tail = match correlation {
+        ResponseCorrelation::Contradictory {
+            resolution,
+            resolved_in,
+            ..
+        } => format!(
+            "acknowledgement contradicts the recorded resolution {} from generation {resolved_in}",
+            resolution_label(*resolution)
+        ),
+        ResponseCorrelation::Orphan => {
+            "request ID was never registered in this run".to_string()
+        }
+        ResponseCorrelation::Unverifiable => {
+            "request is registered but its recorded resolution was evicted, so consistency cannot be checked".to_string()
+        }
+        ResponseCorrelation::Unidentified => {
+            "acknowledgement carried no request_id, which the protocol requires".to_string()
+        }
+        // Not fail-closed; included so the match stays exhaustive if the policy
+        // in `fails_closed` ever changes.
+        ResponseCorrelation::Matched { .. } | ResponseCorrelation::LateKnown { .. } => {
+            "correlated".to_string()
+        }
+    };
+    format!(
+        "order-response correlation failed closed: verdict={} request_id={} operation={} lifecycle={} generation={generation}; {tail}",
+        correlation.label(),
+        request_id.unwrap_or("<none>"),
+        correlation
+            .operation()
+            .map_or("<unknown>", maker::RequestOperation::label),
+        correlation.lifecycle().label(),
+    )
+}
+
+fn resolution_label(resolution: maker::ProjectionRequestResolution) -> &'static str {
+    match resolution {
+        maker::ProjectionRequestResolution::PlaceAccepted => "place_accepted",
+        maker::ProjectionRequestResolution::PlaceRejected => "place_rejected",
+        maker::ProjectionRequestResolution::CancelResolved => "cancel_resolved",
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -56,18 +102,22 @@ pub(super) struct CancelRejection {
 }
 
 pub(super) fn order_response_failure(
-    outcome: &std::result::Result<bool, CancelRejection>,
+    outcome: &std::result::Result<maker::ResponseCorrelation, CancelRejection>,
     request_id: Option<&str>,
+    generation: u64,
     runtime_state: &mut MakerState,
 ) -> Option<String> {
     match outcome {
-        Ok(matched) if order_response_correlation_failed(*matched, request_id) => {
-            let request_id = request_id.expect("correlation failure requires request ID");
+        Ok(correlation) if correlation.fails_closed() => {
+            // A malformed frame has no ID to report; the runtime still has to be
+            // told the placement channel is no longer trustworthy.
             runtime_state.handle(MakerEvent::OrderResponseUnmatched {
-                request_id: request_id.to_string(),
+                request_id: request_id.unwrap_or("<none>").to_string(),
             });
-            Some(format!(
-                "order-response correlation failed closed: unexpected request_id={request_id}"
+            Some(correlation_failure_detail(
+                correlation,
+                request_id,
+                generation,
             ))
         }
         Err(rejection) => {
@@ -170,6 +220,7 @@ pub(super) fn apply_order_responses_observed(
             request_id.as_deref(),
             response.accepted(),
         );
+        let generation = projection.generation();
         let outcome = apply_order_response(
             response,
             projection,
@@ -178,7 +229,8 @@ pub(super) fn apply_order_responses_observed(
             observation.cycle,
             observation.price_decimals,
         );
-        if let Some(error) = order_response_failure(&outcome, request_id.as_deref(), runtime_state)
+        if let Some(error) =
+            order_response_failure(&outcome, request_id.as_deref(), generation, runtime_state)
         {
             return Err(anyhow::anyhow!(error));
         }
@@ -192,16 +244,26 @@ pub(super) fn apply_order_response(
     symbol: &str,
     cycle: u64,
     price_decimals: u32,
-) -> std::result::Result<bool, CancelRejection> {
-    let Some(request_id) = response.request_id.as_deref() else {
-        return Ok(false);
-    };
-    let Some(pending) = projection.pending_request(request_id).cloned() else {
-        if let Some(resolution) = projection.completed_request_resolution(request_id) {
-            return Ok(resolution.accepts_response(response.accepted()));
+) -> std::result::Result<maker::ResponseCorrelation, CancelRejection> {
+    let request_id = response.request_id.as_deref();
+    let correlation = projection.classify_response(request_id, response.accepted());
+    // Only a live pending request produces new projection state. Everything else
+    // is either idempotent (a late duplicate) or refused by the caller's
+    // fail-closed policy, and must not mutate the projection on the way out.
+    if !matches!(
+        correlation,
+        maker::ResponseCorrelation::Matched {
+            lifecycle: maker::RequestLifecycle::AwaitingAck,
+            ..
         }
-        return Ok(false);
-    };
+    ) {
+        return Ok(correlation);
+    }
+    let request_id = request_id.expect("a matched correlation carries a request ID");
+    let pending = projection
+        .pending_request(request_id)
+        .cloned()
+        .expect("a matched correlation has a pending entry");
     let generation = projection.generation();
     match pending {
         ProjectionPendingRequest::Cancel(_) => {
@@ -249,7 +311,7 @@ pub(super) fn apply_order_response(
             }
         }
     }
-    Ok(true)
+    Ok(correlation)
 }
 
 pub(super) struct AccountEventContext<'a> {

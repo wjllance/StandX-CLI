@@ -91,6 +91,161 @@ impl ProjectionPendingRequest {
             Self::Cancel(pending) => &pending.request_id,
         }
     }
+
+    pub fn operation(&self) -> RequestOperation {
+        match self {
+            Self::Place(_) => RequestOperation::Place,
+            Self::Cancel(_) => RequestOperation::Cancel,
+        }
+    }
+}
+
+/// Which order-affecting command a request carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestOperation {
+    Place,
+    Cancel,
+}
+
+impl RequestOperation {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Place => "place",
+            Self::Cancel => "cancel",
+        }
+    }
+}
+
+/// How far a request has progressed through its two independent lifecycles.
+///
+/// A request is registered before its network write, so "registered but never
+/// acknowledged" is a state the maker can observe and report — which is what
+/// distinguishes a lost write from a venue that never answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestLifecycle {
+    /// Registered and awaiting its command acknowledgement.
+    AwaitingAck,
+    /// Acknowledged, but its venue exposure (the quote slot) is still open —
+    /// an accepted place whose account-order observation has not arrived.
+    AwaitingVenue,
+    /// Both halves resolved; only a bounded tombstone remains.
+    Retired,
+    /// The registry has no record of the request at all.
+    Unknown,
+}
+
+impl RequestLifecycle {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::AwaitingAck => "awaiting_ack",
+            Self::AwaitingVenue => "awaiting_venue",
+            Self::Retired => "retired",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// What an observed order-response acknowledgement turned out to be.
+///
+/// This replaces a bare `matched: bool`. That boolean collapsed four materially
+/// different situations into one "unexpected request_id" diagnostic, so an
+/// operator reading a fail-closed stop could not tell a protocol violation from
+/// a late-but-consistent duplicate, or a contradicted local view from an ID this
+/// run never minted. Every variant below names one of those situations, and
+/// [`ResponseCorrelation::fails_closed`] is the single place the safety policy
+/// for each is written down.
+///
+/// Note on run scope: the SDK mints `request_id` as a bare UUIDv4 with no run or
+/// generation marker, so an acknowledgement from a *different run* that somehow
+/// reached this stream is indistinguishable from [`Self::Orphan`]. Separating
+/// those two would require run-scoped request identities minted in `standx-sdk`,
+/// the way client order IDs already carry a run prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResponseCorrelation {
+    /// Matched a request still awaiting its acknowledgement.
+    Matched {
+        operation: RequestOperation,
+        lifecycle: RequestLifecycle,
+    },
+    /// The request is already resolved and this acknowledgement agrees with the
+    /// recorded outcome: a duplicate or delayed delivery, idempotent to drop.
+    ///
+    /// `resolved_in` is the generation that resolved it, which may predate the
+    /// current one — a replayed ack crossing an account-stream reconnect is the
+    /// expected case, not a fault. It is carried for diagnostics only: a
+    /// duplicate of something already applied stays safe to drop whatever epoch
+    /// resolved it, because dropping it changes nothing.
+    LateKnown {
+        operation: RequestOperation,
+        resolution: ProjectionRequestResolution,
+        resolved_in: u64,
+        lifecycle: RequestLifecycle,
+    },
+    /// The request is resolved but this acknowledgement contradicts the recorded
+    /// outcome — the local view and the venue's cannot both be right.
+    Contradictory {
+        operation: RequestOperation,
+        resolution: ProjectionRequestResolution,
+        resolved_in: u64,
+        lifecycle: RequestLifecycle,
+    },
+    /// A well-formed `request_id` this run's registry has never held — neither
+    /// pending nor a tombstone. Either the venue invented it or our registration
+    /// was lost before the write.
+    Orphan,
+    /// The request is registered and its acknowledgement already resolved, but
+    /// the tombstone recording *how* it resolved has been evicted from the
+    /// bounded history. The acknowledgement cannot be checked for consistency,
+    /// and "cannot check" is not "consistent".
+    Unverifiable,
+    /// No `request_id` at all. The protocol requires one on every command
+    /// acknowledgement, so this is a protocol violation, not an unknown ID.
+    Unidentified,
+}
+
+impl ResponseCorrelation {
+    /// Stable snake_case name for structured diagnostics.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Matched { .. } => "matched",
+            Self::LateKnown { .. } => "late_known",
+            Self::Contradictory { .. } => "contradictory",
+            Self::Orphan => "orphan_current_run",
+            Self::Unverifiable => "unverifiable",
+            Self::Unidentified => "unidentified",
+        }
+    }
+
+    pub fn operation(&self) -> Option<RequestOperation> {
+        match self {
+            Self::Matched { operation, .. }
+            | Self::LateKnown { operation, .. }
+            | Self::Contradictory { operation, .. } => Some(*operation),
+            Self::Orphan | Self::Unverifiable | Self::Unidentified => None,
+        }
+    }
+
+    pub fn lifecycle(&self) -> RequestLifecycle {
+        match self {
+            Self::Matched { lifecycle, .. }
+            | Self::LateKnown { lifecycle, .. }
+            | Self::Contradictory { lifecycle, .. } => *lifecycle,
+            Self::Unverifiable => RequestLifecycle::AwaitingVenue,
+            Self::Orphan | Self::Unidentified => RequestLifecycle::Unknown,
+        }
+    }
+
+    /// Whether observing this correlation must stop live order work.
+    ///
+    /// Deliberately *not* a blanket "unknown means ignore": only the two
+    /// consistent outcomes continue. `LateKnown` is a duplicate of something
+    /// already applied, so dropping it changes nothing; everything else is
+    /// either a contradiction, a wrong-epoch decision, an ID the maker cannot
+    /// account for, or a malformed frame — none of which the maker may quietly
+    /// keep quoting through.
+    pub fn fails_closed(&self) -> bool {
+        !matches!(self, Self::Matched { .. } | Self::LateKnown { .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,6 +365,11 @@ struct PendingEntry {
 struct CompletedRequest {
     request: ProjectionPendingRequest,
     resolution: ProjectionRequestResolution,
+    /// Projection generation the request was resolved in. A tombstone that
+    /// outlived its generation still identifies the request, but an
+    /// acknowledgement arriving against it belongs to a superseded epoch and
+    /// must be reported as such rather than as an unknown ID.
+    generation: u64,
 }
 
 impl CompletedRequest {
@@ -470,6 +630,80 @@ impl MakerAccountProjection {
             .any(|entry| entry.request_id() == request_id)
     }
 
+    /// Classify one observed order-response acknowledgement against the request
+    /// registry. Pure lookup: the caller decides what to do with the verdict.
+    ///
+    /// Checked pending-first, then tombstones, because a request that is both
+    /// still awaiting its ack and already tombstoned cannot exist — an entry is
+    /// tombstoned only once its ack lifecycle closed.
+    pub fn classify_response(
+        &self,
+        request_id: Option<&str>,
+        accepted: bool,
+    ) -> ResponseCorrelation {
+        let Some(request_id) = request_id else {
+            return ResponseCorrelation::Unidentified;
+        };
+        if let Some(entry) = self
+            .pending
+            .iter()
+            .find(|entry| entry.ack_pending && entry.request_id() == request_id)
+        {
+            return ResponseCorrelation::Matched {
+                operation: entry.request.operation(),
+                lifecycle: RequestLifecycle::AwaitingAck,
+            };
+        }
+        // The ack lifecycle has closed, so the tombstone — not the still-open
+        // quote slot — is the authority on what the outcome was. An entry whose
+        // slot is open is reported as such, but a second acknowledgement is
+        // still judged against the recorded resolution: a rejection arriving for
+        // an accepted place contradicts it whether or not the venue has
+        // confirmed the order yet.
+        let slot_still_open = self
+            .pending
+            .iter()
+            .any(|entry| entry.request_id() == request_id);
+        let Some(completed) = self
+            .completed
+            .iter()
+            .rev()
+            .find(|entry| entry.request_id() == request_id)
+        else {
+            return if slot_still_open {
+                // Registered, ack resolved, but the tombstone that recorded the
+                // outcome has been evicted. Consistency cannot be checked, and
+                // "cannot check" is not "consistent".
+                ResponseCorrelation::Unverifiable
+            } else {
+                ResponseCorrelation::Orphan
+            };
+        };
+        let operation = completed.request.operation();
+        let resolution = completed.resolution;
+        let resolved_in = completed.generation;
+        let lifecycle = if slot_still_open {
+            RequestLifecycle::AwaitingVenue
+        } else {
+            RequestLifecycle::Retired
+        };
+        if resolution.accepts_response(accepted) {
+            ResponseCorrelation::LateKnown {
+                operation,
+                resolution,
+                resolved_in,
+                lifecycle,
+            }
+        } else {
+            ResponseCorrelation::Contradictory {
+                operation,
+                resolution,
+                resolved_in,
+                lifecycle,
+            }
+        }
+    }
+
     pub fn completed_request_resolution(
         &self,
         request_id: &str,
@@ -691,6 +925,7 @@ impl MakerAccountProjection {
         self.completed.push_back(CompletedRequest {
             request,
             resolution,
+            generation: self.generation,
         });
         if self.completed.len() > MAX_COMPLETED_ORDER_REQUESTS {
             self.completed.pop_front();
@@ -985,6 +1220,203 @@ mod tests {
             ref_center: 100.0,
             cycle: 1,
         }
+    }
+
+    /// Every step a request's identity can be observed through, so a
+    /// permutation test reads as an ordered list of observations.
+    #[derive(Debug, Clone, Copy)]
+    enum Step {
+        /// Register the place before any network write.
+        Submit,
+        /// Command-stream acknowledgement (accepted / rejected).
+        Ack { accepted: bool },
+        /// Account-stream order update closing the quote slot.
+        Venue { terminal: bool },
+        /// Recovery bumped the generation, preserving pending acks.
+        ReconnectPreservingAcks,
+    }
+
+    fn drive(steps: &[Step]) -> MakerAccountProjection {
+        let mut projection = MakerAccountProjection::new(1, PREFIX, 0.0, 0.005, 0.00005);
+        let mut generation = 1;
+        for step in steps {
+            match *step {
+                Step::Submit => {
+                    projection.apply(
+                        generation,
+                        AccountProjectionEvent::PlaceSubmitted(pending("req-1")),
+                    );
+                }
+                Step::Ack { accepted } => {
+                    let event = if accepted {
+                        AccountProjectionEvent::PlaceAccepted {
+                            request_id: "req-1".to_owned(),
+                        }
+                    } else {
+                        AccountProjectionEvent::PlaceRejected {
+                            request_id: "req-1".to_owned(),
+                        }
+                    };
+                    projection.apply(generation, event);
+                }
+                Step::Venue { terminal } => {
+                    projection.apply(
+                        generation,
+                        AccountProjectionEvent::OrderObserved(order(
+                            if terminal { 0.0 } else { 0.2 },
+                            terminal,
+                        )),
+                    );
+                }
+                Step::ReconnectPreservingAcks => {
+                    generation += 1;
+                    projection.reset_after_cleanup_preserving_pending_acks(generation, 0.0);
+                }
+            }
+        }
+        projection
+    }
+
+    /// The classification table, pinned per ordering. These are the permutations
+    /// #277 requires: WS-then-account, account-then-WS, duplicates, delayed
+    /// deliveries, partial-fill-then-cancel, reconnect replay, and wrong IDs.
+    #[test]
+    fn correlation_verdict_is_pinned_for_every_observation_ordering() {
+        let accepted = Step::Ack { accepted: true };
+        let rejected = Step::Ack { accepted: false };
+        let resting = Step::Venue { terminal: false };
+        let gone = Step::Venue { terminal: true };
+
+        // (steps already observed, the ack now arriving, expected verdict label)
+        let cases: Vec<(&str, Vec<Step>, bool, &str)> = vec![
+            (
+                "registered, awaiting its first ack",
+                vec![Step::Submit],
+                true,
+                "matched",
+            ),
+            (
+                "WS ack then account order: duplicate ack after the slot closed",
+                vec![Step::Submit, accepted, resting],
+                true,
+                "late_known",
+            ),
+            (
+                "account order then WS ack: adoption closed the slot first",
+                vec![Step::Submit, resting],
+                true,
+                "matched",
+            ),
+            (
+                "duplicate ack while the venue has not confirmed yet",
+                vec![Step::Submit, accepted],
+                true,
+                "late_known",
+            ),
+            (
+                "rejection contradicting an accepted place, slot still open",
+                vec![Step::Submit, accepted],
+                false,
+                "contradictory",
+            ),
+            (
+                "acceptance contradicting a rejected place",
+                vec![Step::Submit, rejected],
+                true,
+                "contradictory",
+            ),
+            (
+                "partial fill then terminal: ack replayed after the order is gone",
+                vec![Step::Submit, accepted, resting, gone],
+                true,
+                "late_known",
+            ),
+            (
+                "reconnect replay: ack resolved in the previous generation",
+                vec![Step::Submit, accepted, Step::ReconnectPreservingAcks],
+                true,
+                "late_known",
+            ),
+            (
+                "ack arriving before anything was registered",
+                vec![],
+                true,
+                "orphan_current_run",
+            ),
+        ];
+
+        for (name, steps, accepted_response, expected) in cases {
+            let projection = drive(&steps);
+            let verdict = projection.classify_response(Some("req-1"), accepted_response);
+            assert_eq!(verdict.label(), expected, "case: {name}");
+            // The safety policy follows from the verdict, nothing else.
+            assert_eq!(
+                verdict.fails_closed(),
+                !matches!(expected, "matched" | "late_known"),
+                "case: {name}"
+            );
+        }
+    }
+
+    /// A reconnect that preserves pending acks must keep the *pending* ack
+    /// matched, not demote it to a tombstone verdict — that is the whole point of
+    /// preserving it across the generation bump.
+    #[test]
+    fn reconnect_preserving_acks_keeps_an_unacknowledged_request_matched() {
+        let projection = drive(&[Step::Submit, Step::ReconnectPreservingAcks]);
+        let verdict = projection.classify_response(Some("req-1"), true);
+        assert_eq!(
+            verdict,
+            ResponseCorrelation::Matched {
+                operation: RequestOperation::Place,
+                lifecycle: RequestLifecycle::AwaitingAck,
+            }
+        );
+    }
+
+    /// A missing `request_id` is a protocol violation with its own verdict. It
+    /// must never share the "unknown ID" path, and it must never be ignored.
+    #[test]
+    fn a_frame_without_a_request_id_is_reported_as_a_protocol_violation() {
+        let projection = drive(&[Step::Submit]);
+        let verdict = projection.classify_response(None, true);
+        assert_eq!(verdict, ResponseCorrelation::Unidentified);
+        assert!(verdict.fails_closed());
+        assert_eq!(verdict.lifecycle(), RequestLifecycle::Unknown);
+        assert_eq!(verdict.operation(), None);
+    }
+
+    /// Tombstone eviction must not silently become "consistent". Once the
+    /// recorded resolution is gone the maker cannot check the acknowledgement,
+    /// so it fails closed instead of assuming agreement.
+    #[test]
+    fn evicting_the_resolution_tombstone_fails_closed_rather_than_assuming_agreement() {
+        let mut projection = MakerAccountProjection::new(1, PREFIX, 0.0, 0.005, 0.00005);
+        projection.apply(1, AccountProjectionEvent::PlaceSubmitted(pending("req-1")));
+        projection.apply(
+            1,
+            AccountProjectionEvent::PlaceAccepted {
+                request_id: "req-1".to_owned(),
+            },
+        );
+        assert_eq!(
+            projection.classify_response(Some("req-1"), true).label(),
+            "late_known"
+        );
+
+        // Push the tombstone out of the bounded history. The quote slot stays
+        // open the whole time, so the request is still registered.
+        for index in 0..=MAX_COMPLETED_ORDER_REQUESTS {
+            let request_id = format!("filler-{index}");
+            let mut filler = pending(&request_id);
+            filler.client_order_id = format!("{PREFIX}q0000000{index}b0");
+            projection.apply(1, AccountProjectionEvent::PlaceSubmitted(filler));
+            projection.apply(1, AccountProjectionEvent::PlaceRejected { request_id });
+        }
+
+        let verdict = projection.classify_response(Some("req-1"), true);
+        assert_eq!(verdict, ResponseCorrelation::Unverifiable);
+        assert!(verdict.fails_closed());
     }
 
     fn order(open_qty: f64, terminal: bool) -> OrderObservation {
