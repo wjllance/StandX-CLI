@@ -1,6 +1,7 @@
 # ADR 0001：Maker 事故恢复的监督架构
 
-- 状态：已采纳（2026-07-15）
+- 状态：已采纳（2026-07-15）；**已修订（2026-07-27）——C-lite 触发条件命中，
+  落地形态判定为折中 C-lite，决策 1 的分工维持不变，见文末[修订记录](#修订记录2026-07-27c-lite-触发条件命中)**
 - 相关：[13-maker.md](../13-maker.md)、[14-maker-live-gate.md](../14-maker-live-gate.md)、[18-maker-strategy-roadmap.md](../18-maker-strategy-roadmap.md)
 
 ## 背景
@@ -78,3 +79,60 @@ BackfillPending → VerificationPending → Ready / Stop`），CLI 退化为薄�
   偿还时机绑定到「真正需要扩张时」。
 - **落实**：本规则应在 review 中据以拦截「第四条过程分支」类改动；相关 PR 若命中上述任一
   触发条件，应引用本 ADR 并转向 C-lite 设计。
+
+## 修订记录（2026-07-27）：C-lite 触发条件命中
+
+本节补记 2026-07-16 起落地的行情降级/恢复对本 ADR 决策 3 的影响——触发条件当时即已
+命中，但 ADR 一直未修订（该缺口在 [20 号短期路线图](../20-maker-short-term-roadmap-2026-07.md)
+里挂了 P2 至今）。
+
+### 触发事实
+
+行情降级与恢复作为**第四种恢复目标**落地：
+
+- `RecoveryTarget::MarketData`（`crates/standx-maker/src/runtime.rs:29`，与
+  `AccountStream` / `OrderResponse` / `PositionReconciliation` 并列）；
+- CLI 侧对应第四条恢复相位（`crates/standx-cli/src/commands/maker/runtime/recovery_flow.rs:442`
+  的 `FreezeSpec { target: RecoveryTarget::MarketData, .. }`）；
+- 降级前引入了 `Grace` 中间态（见下），即决策 3 的第一条触发（新增恢复阶段）也一并命中。
+
+按决策 3 的字面规则，这本应直接转向 C-lite 迁移。
+
+### 实际落地形态：折中 C-lite（判定为已满足触发规则的意图）
+
+实现没有往 CLI 增加第四份手写过程体，而是把**判定策略下沉进 core 纯状态机**、
+**执行体继续复用共享执行器**：
+
+- core 纯状态机 `MarketDataHealth`（`crates/standx-maker/src/market_data.rs:127`，
+  相位 `Healthy → Grace{first_bad_ms, consecutive} → Degraded{class, ...}`）承载全部
+  判定：Transport / MarketState 故障分类、降级迟滞（`bad_observations_to_degrade` +
+  `bad_grace_ms`）、恢复门槛（`coherent_snapshots_to_recover` 个连续 coherent 快照）。
+  这些是纯函数式转移，可直接单测，无 I/O。
+- CLI 四条相位共用同一批执行器：`FreezeSpec` / `ResumeSpec`（`recovery_flow.rs:154` /
+  `:252`）、`freeze_and_cleanup_for_recovery`（`:183`）、
+  `resume_quoting_after_recovery`（`:270`）、`probe_position_convergence`
+  （`crates/standx-cli/src/commands/maker/recovery.rs:327`）。第四条相位只是多一组
+  `FreezeSpec` 参数，不是第四份过程代码。
+
+**结论**：触发规则的设立意图是「禁止 CLI 恢复过程体增殖」，这一意图在本次扩张中由
+「策略下沉 core + 执行体共享」满足。决策 1（外框在 core、执行体在 CLI 薄执行器）的
+分工未变，不再启动完整方案 C 的迁移。方案 D 的触发条件未变化，仍不预留结构。
+
+### 更新后的扩张规则（替代决策 3 的字面判据）
+
+往后按以下判据执行，其余不变：
+
+- 新增恢复**目标**或**阶段**时，若判定逻辑落在 core 纯状态机、执行体仍在现有共享执行器
+  （`FreezeSpec`/`ResumeSpec` + 三件共享原语）内表达 → 视为 C-lite 内的正常扩张，
+  引用本节记录即可，**不需要**新的 ADR 或迁移。
+- 一旦某次扩张需要在 CLI 新写一份过程体，或需要绕过共享执行器 → 仍然直接迁移完整
+  方案 C，并新开 ADR。
+- 第三条触发（**任何一次新的次序漂移事故**，两条相位在共享步骤上再次分叉）**不变**，
+  且优先级最高：漂移事故一旦发生，无论形态如何都迁移 C。
+
+### 本次修订不涉及的相邻债务
+
+行情降级仍与其他故障共享同一恢复预算（"熔断豁免"缺口），阈值边界震荡时可能把降级
+累计成硬停。该项属于降级政策而非本 ADR 的分工问题，按
+[18 号路线图阶段 5 二级](../18-maker-strategy-roadmap.md)的"背离恢复迟滞、熔断豁免等
+剩余硬化项"处理，不在本次修订范围。
