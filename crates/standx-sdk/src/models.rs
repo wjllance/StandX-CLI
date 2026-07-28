@@ -324,6 +324,39 @@ pub struct FundingRate {
     pub updated_at: String,
 }
 
+/// One row of the authenticated funding payment/receipt history
+/// (`GET /api/query_funding_history`).
+///
+/// `qty` is the signed cashflow in `asset`: **negative is paid, positive is
+/// received** (verified against live data on 2026-07-28), which matches the
+/// sign convention of the maker performance ledger's funding input.
+///
+/// Two deliberate deviations from the published schema, both observed on live
+/// responses:
+/// - the documented `transact_time` field is **not returned**, so `created_at`
+///   is the event time (kept optional here in case it appears later);
+/// - the endpoint returns a **bare JSON array**, not the `{code, message,
+///   result}` envelope that `query_trades` uses.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FundingHistoryEntry {
+    /// Monotonic row id; usable as the `last_id` pagination cursor.
+    pub id: i64,
+    pub user: String,
+    /// Settlement asset of the cashflow (e.g. `DUSD` for a `-USD` symbol).
+    pub asset: String,
+    pub symbol: String,
+    #[serde(deserialize_with = "string_or_number_to_string")]
+    pub qty: String,
+    /// Row kind; funding cashflows are `funding_fee`. Callers must filter
+    /// rather than assume this endpoint only ever returns one kind.
+    pub txn_type: String,
+    pub created_at: String,
+    pub updated_at: String,
+    /// Documented but absent from live responses; prefer `created_at`.
+    #[serde(default)]
+    pub transact_time: Option<String>,
+}
+
 /// Block trade taker info
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TakerInfo {

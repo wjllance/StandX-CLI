@@ -80,7 +80,7 @@ chunk。在此边界内，实盘数据采集不再需要逐阶段的 paper 长�
 | 2 | alpha | 波动驱动 spread / refresh（v0 阶梯） | spread 控制器、时间窗波动 | 时间片 A/B 风险改善，收益/uptime 不越过退化线 |
 | 4 | 已终止（07-20） | 漂移感知报价 | 加宽 A/B 判负记录 | 恒宽 live 显著为负，条件化 credit 坍塌，回设计储备 |
 | 3 | accepted（07-25，v1 拆单 nonlinear_skew） | 库存控制器（非线性 price skew） | 加仓侧中心非线性前移（更陡但不停） | p95 尾部 -29%、mo30 4/4 对改善 ~25%、uptime/撤单无污染；PnL 未判项保留 |
-| 5-b | 安全轨二级（本轮范围 `implemented`，07-27） | 分级异常与退出政策（剩余范围） | trim/wind-down typed 分离、halt 退出语义定稿（D1）、残余仓位 handoff、flatten 保持默认关、equity/margin alert 与 hard floor 拆名 | 扩大规模的前置；立项与实现记录见 [26-maker-stage5b-design.md](26-maker-stage5b-design.md) |
+| 5-b | 安全轨二级（本轮范围已合并 main，07-28；剩余硬化项未做） | 分级异常与退出政策（剩余范围） | trim/wind-down typed 分离、halt 退出语义定稿（D1）、残余仓位 handoff、flatten 保持默认关、equity/margin alert 与 hard floor 拆名 | 扩大规模的前置；立项与实现记录见 [26-maker-stage5b-design.md](26-maker-stage5b-design.md) |
 
 ## 统一验收口径
 
@@ -532,7 +532,11 @@ mark 动量驱动的非对称报价，比原 microprice 设计更薄：不需要
   即本级（5-b）范围内定稿。
 - stop-loss 后残余仓位输出明确 handoff；自动 flatten 必须是默认关闭、单独授权的 live policy。
 - equity/margin 的 alert 与 hard floor 使用不同配置名和不同 typed outcome。
-- 背离恢复迟滞、熔断豁免等剩余硬化项按需纳入。
+- 背离恢复迟滞、熔断豁免等剩余硬化项按需纳入。**2026-07-28 复核：熔断豁免关闭
+  （共享恢复熔断已不存在，无可豁免对象），恢复迟滞与 tick 阈值降级为观测项并预注册了
+  立项触发条件，见
+  [Divergence 降级复核记录](evidence/maker-divergence-degradation-review-2026-07-28.md)。
+  5-b 名下不再有待写的代码。**
 
 ### 验收标准
 

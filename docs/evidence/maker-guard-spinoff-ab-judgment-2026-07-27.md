@@ -76,8 +76,8 @@ sha256 `6314a37462e3bfda2cb21f14e503fae4d2997dca449f329de80e7ab22be4b9fc`）。
 - 残余仓位：baseline#4 收尾留 -0.1 HYPE 空头（entry 59.642，~$5.8），
   按不自动平仓原则未动，release owner 选择手动处置（2026-07-27 会话
   记录）。后续任何实验启动前的 FLAT 复核会发现它。
-  **处置结果待回填（2026-07-27）**：截至本次修订未确认是否已平。复核命令
-  （需 owner 的认证会话）：`standx -o json account positions` +
-  `standx -o json account orders`；FLAT 前置已写入
-  [23 号手册 preflight](../23-maker-stage3v1-live-ab-runbook.md)。
+  **已处置（2026-07-28，owner 确认）**：手动平仓完成，账户回到 FLAT；处置方式与
+  成交明细未留档（金额约 $5.8，不影响本轮判定的任何指标）。后续实验的 FLAT 前置
+  仍按 [23 号手册 preflight](../23-maker-stage3v1-live-ab-runbook.md) 实测
+  `standx -o json account positions` + `account orders`，不依赖本记录。
 - token 有效期覆盖全程，无中断；OpenObserve 上传连续。

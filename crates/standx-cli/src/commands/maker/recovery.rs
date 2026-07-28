@@ -266,6 +266,10 @@ async fn reconcile_account_audit(
         positions,
         filled_orders,
         trades,
+        // Funding is attribution-only and is owned by the periodic audit, whose
+        // id dedup set lives in the poll state. Recovery reconciles positions
+        // and orders; folding cashflows in here would need that same set.
+        funding: _,
     } = audit;
     for order in open_orders.iter().chain(filled_orders.iter()) {
         adopt_order(ledger, order, request.run_order_prefix)?;
@@ -1015,6 +1019,7 @@ mod tests {
             positions: vec![short_position()],
             filled_orders: vec![filled_sell_order()],
             trades: vec![sell_trade(now)],
+            funding: Vec::new(),
         }
     }
 
@@ -1024,6 +1029,7 @@ mod tests {
             positions: vec![short_position()],
             filled_orders: Vec::new(),
             trades: Vec::new(),
+            funding: Vec::new(),
         }
     }
 
@@ -1202,6 +1208,16 @@ mod tests {
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(wrapped(serde_json::to_string(trades).unwrap()))
+            .create_async()
+            .await;
+        // The audit fetch also reads funding history (a bare array). Recovery
+        // ignores those rows, but the request still has to succeed.
+        server
+            .mock("GET", "/api/query_funding_history")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
             .create_async()
             .await;
         let client = StandXClient::with_base_url(server.url()).unwrap();

@@ -22,36 +22,41 @@
   vs baseline +0.006（两臂窗口活跃度不同，混淆无法分离）。**没有任何证据说明当前冻结
   基线在自身规模上是否赚钱。**
 - 阶段 4 已终止（07-20，加宽 live 显著为负）；阶段 2 未 accepted，基线继承走的是阶段 3 链。
-- **安全轨**：一级（运维件）已完成；二级（5-b）未做，是扩大规模（加 size / max_position /
+- **安全轨**：一级（运维件）已完成；二级（5-b）的四项主体已合并 main（07-28，见下），
+  剩余硬化项（Divergence B/C/D）未做。5-b 是扩大规模（加 size / max_position /
   多 symbol）的强制前置。
 - `maker-recovery-dedup` **挂账项可关闭**：分支的 7 个提交已以不同 sha 全部落在 main
   （`173ecd7` / `b1fc8fe` / `be2be10` / `0ef92c2` / `51512b6` 等），分支本身只是落后 main
   79 个提交的旧副本。处置 = 封存/删除远端分支，不需要再补 live 验证。
-- **Divergence 降级**：方案 A（分类 + standby）已在 main；B（恢复迟滞）/ C（熔断豁免）/
-  D（tick 阈值）未做。C 与六条架构建议 #6 的缺口是同一件事。
+- **Divergence 降级（2026-07-28 复核结论）**：A（分类 + standby）已在 main；
+  **C（熔断豁免）关闭——前提消失**（共享恢复熔断早已从代码移除，只剩两个 deprecated
+  配置字段，没有任何跨恢复累计的计数器）；**B（恢复迟滞）/ D（tick 阈值）降级为观测项**，
+  致命后果已从"60s 后硬停"变成"standby 期间不报价"，立项触发条件已预注册。复核记录见
+  [maker-divergence-degradation-review-2026-07-28.md](evidence/maker-divergence-degradation-review-2026-07-28.md)。
+  六条架构建议 #6 的缺口随 C 一并关闭。
 - **ADR 0001 已修订**（2026-07-27）：C-lite 触发条件确认命中，落地形态判定为折中 C-lite，
   往后的扩张判据已写入 ADR 修订记录。此项从债务清单移除。
 - **质量债务**：#259 / #260 / #261 / #227 / #277 仍 open（#226 已关闭）。
-- **待确认的运维尾巴**：guard 轮 baseline#4 收尾留下的 -0.1 HYPE 空头（entry 59.642，
-  ~$5.8），owner 手动处置，处置结果未回填。**任何下一个实验的 FLAT 前置会被它卡住。**
+- **运维尾巴已清**：guard 轮 baseline#4 收尾留下的 -0.1 HYPE 空头已由 owner 手动处置
+  （2026-07-28 确认，账户回到 FLAT）。下一个实验的 FLAT 前置不再被它卡住，但仍按
+  runbook 实测而非依赖本记录。
 
 ## 阻塞前置（先清）
 
-1. **残余 -0.1 HYPE 空头**：确认已平并回填到 guard 判定报告的运维记录。查仓/处置需要
-   owner 的认证会话（本机 `standx auth status` 为未认证，maker 的 env-only 凭证在
-   `/etc/standx/*.env`，root 0600）。
+1. ~~**残余 -0.1 HYPE 空头**~~：已处置（2026-07-28 owner 确认），已回填 guard 判定报告。
 2. **auth token 有效期**：任何 live 动作前按
    [23 号手册的 token 前置](23-maker-stage3v1-live-ab-runbook.md)确认剩余有效期覆盖
    整个采集窗口（07-24 事件教训）。
 
 ## 主线：5-b 安全轨二级（已裁决，2026-07-27）
 
-release owner 于 2026-07-27 裁定主线为**候选 1（5-b）**。本轮四项范围已实现、离线验证
-全绿、未合并且无 live 动作；立项与实现记录见
-[26-maker-stage5b-design.md](26-maker-stage5b-design.md)。候选 2（基线 PnL 采集）仍是
-推荐的并行项且不占人力，候选 3 保持支线。
+release owner 于 2026-07-27 裁定主线为**候选 1（5-b）**。本轮四项范围已实现并
+**合并 main**（2026-07-28，PR #332 / `469550a`，含一轮对抗式复审的三处返工），
+离线验证与 CI 全绿，无 live 动作；立项与实现记录见
+[26-maker-stage5b-design.md](26-maker-stage5b-design.md)。5-b 剩余条目（Divergence
+B/C/D 等硬化项）未做。候选 2（基线 PnL 采集）仍是推荐的下一步且不占人力，候选 3 保持支线。
 
-### 候选 1（已选为主线，本轮范围 `implemented`）：5-b 安全轨二级
+### 候选 1（已选为主线，四项主体已合并 main）：5-b 安全轨二级
 
 18 号文档写明的下一步，也是**唯一能解锁扩大规模的路**。范围（见
 [18 号阶段 5 剩余范围](18-maker-strategy-roadmap.md)）：
@@ -61,17 +66,23 @@ release owner 于 2026-07-27 裁定主线为**候选 1（5-b）**。本轮四项
   v1 上线而过，v1 范围不触碰退出语义，已在 18 号文档中对齐）；
 - stop-loss 后残余仓位的显式 handoff；自动 flatten 必须默认关闭 + 单独授权；
 - equity/margin 的 alert 与 hard floor 拆配置名、拆 typed outcome；
-- 背离恢复迟滞（Divergence B）、熔断豁免（Divergence C = 架构建议 #6 缺口）按需并入。
+- 背离恢复迟滞（Divergence B）、熔断豁免（Divergence C = 架构建议 #6 缺口）按需并入
+  ——**2026-07-28 复核后关闭/降级为观测项，5-b 名下不再有待写的代码**（见现状盘点）。
 
 优点：纯代码 + 默认关 + replay 等价，**不消耗 live 时间片**，可与候选 2 完全并行。
 经济动因：SIP-5A 奖励在当前规模 ≈ 0，不扩规模，刚 accepted 的两个机制也兑现不了收益。
 
-### 候选 2（推荐与候选 1 并行）：基线 PnL 绝对读数采集
+### 候选 2（**当前主线**，2026-07-28）：基线 PnL 绝对读数采集
 
 用新冻结基线单臂连续跑 2–3 天，只求 PnL / markout / uptime 的**绝对读数**，不做 A/B、
 不设预注册判据、不带晋级压力。理由：5-b 完成后的下一步就是放大 size，而放大一个
 "不知道是否赚钱"的基线会把损耗按比例放大。这一步把 PnL 未判项从"结构性缺口"降级为
 "有数字的已知量"。占用人力极小（开机 + 每日看一眼遥测）。
+
+**手册已就绪**：[27-maker-baseline-pnl-collection-runbook.md](27-maker-baseline-pnl-collection-runbook.md)
+（前置检查、授权文本模板、单臂跑法、每日记录清单、异常处置、终止条件）。等 release owner
+填授权文本即可开跑；采集顺带记录 `divergence_standby` 事件，为 Divergence B 是否立项提供
+唯一证据来源。
 
 ### 候选 3：挂账清理与质量债
 

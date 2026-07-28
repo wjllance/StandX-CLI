@@ -310,6 +310,12 @@ pub struct PerformanceSummary {
     pub execution_costs_unavailable: u64,
     pub funding_quote: f64,
     pub funding_available: bool,
+    /// Funding rows that exist but are **not** inside `funding_quote`: a
+    /// settlement asset that is neither the quote nor its D-prefixed form, or a
+    /// row that arrived out of chronological order. Counted rather than
+    /// dropped — an unattributed cashflow makes the attribution incomplete, and
+    /// `net_pnl_complete` must say so.
+    pub funding_unattributed: u64,
     pub net_pnl_complete: bool,
     pub exit_cost_quote: f64,
     pub inventory_mtm_change_quote: f64,
@@ -340,6 +346,7 @@ pub struct PerformanceLedger {
     rebate_quote: f64,
     funding_quote: f64,
     funding_observed: bool,
+    funding_unattributed: u64,
     exit_cost_quote: f64,
     seen_trade_ids: HashSet<u64>,
     costs_by_trade_id: HashMap<u64, ExecutionCosts>,
@@ -378,6 +385,7 @@ impl PerformanceLedger {
             rebate_quote: 0.0,
             funding_quote: 0.0,
             funding_observed: false,
+            funding_unattributed: 0,
             exit_cost_quote: 0.0,
             seen_trade_ids: HashSet::new(),
             costs_by_trade_id: HashMap::new(),
@@ -565,6 +573,15 @@ impl PerformanceLedger {
         Ok(())
     }
 
+    /// A funding cashflow that exists but could not be folded into
+    /// `funding_quote` (unconvertible settlement asset, or an out-of-order
+    /// arrival the monotonic ledger cannot accept). Never silently dropped: it
+    /// clears `net_pnl_complete` the same way an unconvertible execution cost
+    /// does.
+    pub fn record_unattributed_funding(&mut self) {
+        self.funding_unattributed = self.funding_unattributed.saturating_add(1);
+    }
+
     pub fn observe_quote_quality(
         &mut self,
         interval: QuoteQualityInterval,
@@ -647,7 +664,10 @@ impl PerformanceLedger {
             execution_costs_unavailable,
             funding_quote: self.funding_quote,
             funding_available: self.funding_observed,
-            net_pnl_complete: execution_costs_unavailable == 0 && self.funding_observed,
+            funding_unattributed: self.funding_unattributed,
+            net_pnl_complete: execution_costs_unavailable == 0
+                && self.funding_observed
+                && self.funding_unattributed == 0,
             exit_cost_quote: self.exit_cost_quote,
             inventory_mtm_change_quote,
             net_pnl_quote,

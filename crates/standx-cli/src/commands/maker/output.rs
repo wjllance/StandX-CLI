@@ -672,6 +672,7 @@ fn performance_json(summary: &maker::PerformanceSummary) -> serde_json::Value {
         "fee_quote": summary.fee_quote,
         "rebate_quote": summary.rebate_quote,
         "execution_costs_unavailable": summary.execution_costs_unavailable,
+        "funding_unattributed": summary.funding_unattributed,
         "funding_quote": summary.funding_quote,
         "funding_available": summary.funding_available,
         "net_pnl_complete": summary.net_pnl_complete,
@@ -991,6 +992,57 @@ pub(super) fn emit_account_floor_triggered(
             stop.event, stop.detail
         );
     }
+}
+
+/// One market-data standby heartbeat, as machine-readable fields.
+///
+/// The `risk_notification` heartbeat carries the same facts, but only inside its
+/// human `message` string. Standby duration is the input to a pre-registered
+/// decision (whether the missing recovery hysteresis — Divergence B — is worth
+/// implementing: see
+/// `docs/evidence/maker-divergence-degradation-review-2026-07-28.md`), and a
+/// threshold you can only measure by regexing a sentence is not a threshold.
+pub(super) struct MarketDataStandby<'a> {
+    pub(super) fault_class: &'a str,
+    pub(super) paused_secs: u64,
+    pub(super) quoteable_streak: u32,
+    pub(super) snapshots_required: u32,
+    /// Current mark/mid divergence; `None` when no sample is available or the
+    /// fault is transport-class (where divergence is not the trigger).
+    pub(super) divergence_bps: Option<f64>,
+    pub(super) threshold_bps: f64,
+    pub(super) maker_book_empty: bool,
+}
+
+/// Emit the standby heartbeat as its own countable event.
+///
+/// JSON only: the human/quiet paths already print the risk-notification line,
+/// and a second sentence per minute would only add noise there.
+pub(super) fn emit_market_data_standby(
+    output_format: OutputFormat,
+    symbol: &str,
+    cycle: u64,
+    standby: MarketDataStandby<'_>,
+) {
+    if output_format != OutputFormat::Json {
+        return;
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "symbol": symbol,
+            "cycle": cycle,
+            "action": "market_data_standby",
+            "fault_class": standby.fault_class,
+            "paused_secs": standby.paused_secs,
+            "quoteable_streak": standby.quoteable_streak,
+            "snapshots_required": standby.snapshots_required,
+            "divergence_bps": standby.divergence_bps.map(|bps| (bps * 100.0).round() / 100.0),
+            "threshold_bps": standby.threshold_bps,
+            "maker_book_empty": standby.maker_book_empty,
+        })
+    );
 }
 
 /// Residual-position handoff on shutdown (stage 5-b).

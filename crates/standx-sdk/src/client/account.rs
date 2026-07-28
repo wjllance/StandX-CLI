@@ -19,6 +19,36 @@ struct ApiListResponse<T> {
     result: Vec<T>,
 }
 
+fn funding_history_query(
+    symbol: Option<&str>,
+    from: Option<i64>,
+    last_id: Option<i64>,
+    limit: Option<u32>,
+) -> Result<Vec<(&'static str, String)>> {
+    let mut query = Vec::new();
+    if let Some(symbol) = symbol {
+        query.push(("symbol", symbol.to_string()));
+    }
+    if let Some(from) = from {
+        let start = Utc
+            .timestamp_opt(from, 0)
+            .single()
+            .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
+            .ok_or_else(|| Error::Validation {
+                field: "from".to_string(),
+                message: format!("invalid Unix timestamp: {from}"),
+            })?;
+        query.push(("start", start));
+    }
+    if let Some(last_id) = last_id {
+        query.push(("last_id", last_id.to_string()));
+    }
+    if let Some(limit) = limit {
+        query.push(("limit", limit.to_string()));
+    }
+    Ok(query)
+}
+
 fn trade_history_query(
     symbol: &str,
     from: i64,
@@ -297,6 +327,51 @@ impl StandXClient {
         Ok(wrapper.result)
     }
 
+    /// Get the authenticated funding payment/receipt history.
+    ///
+    /// `from` bounds the window (session start, so a long-lived account's older
+    /// funding never enters a fresh session's attribution) and `last_id` is the
+    /// incremental cursor — rows arrive newest-first, so callers that want
+    /// chronological order must sort. There is deliberately no `end`: callers
+    /// always want everything up to now.
+    ///
+    /// Unlike [`Self::get_user_trades`], this endpoint returns a bare JSON
+    /// array rather than the `{code, message, result}` envelope.
+    pub async fn get_funding_history(
+        &self,
+        symbol: Option<&str>,
+        from: Option<i64>,
+        last_id: Option<i64>,
+        limit: Option<u32>,
+    ) -> Result<Vec<crate::models::FundingHistoryEntry>> {
+        let url = format!("{}/api/query_funding_history", self.base_url);
+        let headers = self.auth_headers()?;
+        let query = funding_history_query(symbol, from, last_id, limit)?;
+
+        let response = self
+            .client
+            .get(&url)
+            .headers(headers)
+            .query(&query)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(Error::Api {
+                code: status.as_u16(),
+                message: text,
+                endpoint: Some("/api/query_funding_history".to_string()),
+                retryable: status.as_u16() >= 500,
+            });
+        }
+
+        Ok(response
+            .json::<Vec<crate::models::FundingHistoryEntry>>()
+            .await?)
+    }
+
     /// Get position config (includes leverage)
     pub async fn get_position_config(&self, symbol: &str) -> Result<crate::models::PositionConfig> {
         let url = format!("{}/api/query_position_config", self.base_url);
@@ -455,6 +530,51 @@ mod trade_history_tests {
         assert_eq!(query[2], ("end", "2026-07-10T15:16:00Z".to_string()));
         assert_eq!(query[3], ("limit", "500".to_string()));
         assert!(query.iter().all(|(key, _)| *key != "from" && *key != "to"));
+    }
+
+    /// The funding endpoint's params are all optional, so an empty query must
+    /// stay empty rather than sending stray defaults the venue would reject.
+    #[test]
+    fn funding_history_query_is_all_optional() {
+        assert!(funding_history_query(None, None, None, None)
+            .expect("valid query")
+            .is_empty());
+
+        let query =
+            funding_history_query("HYPE-USD".into(), Some(1_783_696_499), Some(42), Some(200))
+                .expect("valid query");
+        assert_eq!(query[0], ("symbol", "HYPE-USD".to_string()));
+        assert_eq!(query[1], ("start", "2026-07-10T15:14:59Z".to_string()));
+        assert_eq!(query[2], ("last_id", "42".to_string()));
+        assert_eq!(query[3], ("limit", "200".to_string()));
+        // The venue takes `start`, not `from`, and has no `end` here.
+        assert!(query
+            .iter()
+            .all(|(key, _)| *key != "from" && *key != "end" && *key != "to"));
+    }
+
+    #[test]
+    fn funding_history_query_rejects_impossible_timestamp() {
+        let error = funding_history_query(None, Some(i64::MAX), None, None).unwrap_err();
+        assert!(matches!(error, Error::Validation { field, .. } if field == "from"));
+    }
+
+    /// Pins the two verified deviations from the published schema: a bare array
+    /// body (no `{code,message,result}` envelope) and a missing `transact_time`.
+    #[test]
+    fn funding_history_entry_parses_live_shape() {
+        let body = r#"[{"asset":"DUSD","created_at":"2026-07-27T03:00:00.254907Z","id":530060896,"qty":"0.000074457","symbol":"HYPE-USD","txn_type":"funding_fee","updated_at":"2026-07-27T03:00:00.254907Z","user":"solana_x"},
+                       {"asset":"DUSD","created_at":"2026-07-27T01:00:00.179068Z","id":529761428,"qty":"-0.000119095","symbol":"HYPE-USD","txn_type":"funding_fee","updated_at":"2026-07-27T01:00:00.179068Z","user":"solana_x"}]"#;
+        let rows: Vec<crate::models::FundingHistoryEntry> =
+            serde_json::from_str(body).expect("live funding shape parses");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, 530060896);
+        assert_eq!(rows[0].txn_type, "funding_fee");
+        assert_eq!(rows[0].asset, "DUSD");
+        assert!(rows[0].transact_time.is_none());
+        // Signed cashflow: received then paid.
+        assert_eq!(rows[0].qty.parse::<f64>().unwrap(), 0.000074457);
+        assert!(rows[1].qty.parse::<f64>().unwrap() < 0.0);
     }
 
     #[test]

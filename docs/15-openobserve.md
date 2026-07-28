@@ -277,13 +277,20 @@ python3 scripts/test_openobserve_ingest.py
 python3 scripts/test_openobserve_dashboard.py
 ```
 
-## 6. Deadman 告警（进程静默死亡）
+## 6. Push 告警（deadman + critical risk）
 
-Dashboard 是纯拉取式的，需要人盯着看。如果进程被 SIGKILL / OOM / panic /
-宿主宕机静默杀死，cleanup 不会执行、也不会发出 "stopped" 通知，挂单会留在盘口。
-`scripts/openobserve_alerts.py` 在 OpenObserve 上创建一个定时 deadman 告警：当
-`standx_maker` stream 在最近约 3 分钟内没有任何 `action='cycle_summary'` 事件时，
-POST 到指定 webhook。
+Dashboard 是纯拉取式的，需要人盯着看。`scripts/openobserve_alerts.py` 在 OpenObserve
+上 upsert **两条**定时告警，覆盖两类互不重叠的失败：
+
+| 告警 | 触发条件 | 覆盖的情况 |
+|---|---|---|
+| `standx_maker_deadman` | `standx_maker` stream 在最近约 3 分钟内没有任何 `action='cycle_summary'` | **进程死了**：SIGKILL / OOM / panic / 宿主宕机——cleanup 没跑、"stopped" 通知没发、挂单留在盘口 |
+| `standx_maker_critical_risk` | stream 里出现任何 `severity='critical'` 的行 | **进程还活着但出事了**：stop-loss、账户硬熔断、accounting invariant、cleanup 残余订单、残余仓位交接/UNKNOWN |
+
+第二条是 2026-07-28 补的。在它之前，上述 critical 事件的**唯一即时通道是 maker 进程
+自己发的 webhook POST，而那个 POST 不重试**——端点慢或挂掉就没人知道；deadman 也不会响，
+因为进程还在正常发 cycle_summary。无人值守长跑（见
+[27 号采集手册](27-maker-baseline-pnl-collection-runbook.md)）必须两条都配。
 
 ```bash
 set -a
@@ -292,15 +299,23 @@ set +a
 export OPENOBSERVE_ALERT_WEBHOOK="https://hooks.slack.com/services/XXX/YYY/ZZZ"
 # 可选，默认 3 分钟无 cycle_summary 即触发
 export OPENOBSERVE_ALERT_MINUTES=3
+# 可选，默认 5 分钟；critical 事件在 fail-safe 停机时成串出现，静默窗把一次事故收敛成一条通知
+export OPENOBSERVE_CRITICAL_SILENCE_MINUTES=5
 python3 scripts/openobserve_alerts.py
 ```
 
-脚本会 upsert 一个 template、一个 destination 和一个告警（同名则更新），鉴权和
-env 变量与 dashboard 脚本一致。告警在窗口内静默去抖，长时间宕机不会刷屏。这个
-push 通道与 maker 进程解耦：即使进程已经无法自己发通知，deadman 仍会触发。
+每条告警各自 upsert 一个 template、一个 destination 和告警本体（同名则更新；
+OpenObserve 把 template 绑在 destination 上，两条文案不同所以不能共用）。鉴权和 env
+变量与 dashboard 脚本一致。
 
-进程内 webhook（`--alert-webhook`）负责活着时的风险/停止通知；deadman 负责进程
-彻底消失的情况。两者互补，实盘两者都应配置。
+**critical 告警的已知限制**：文案只说"窗口内出现了 critical 行"，不说是哪一条——
+本部署上只验证过 `{stream_name}` / `{alert_name}` / `{org_name}` 三个变量会被替换。
+具体行去 dashboard 的 "Rejections & Error Signals" 面板看。告警条件用的是
+`severity='critical'` 单条件（不是逐 action 列举），因此以后新增的 critical 事件自动被
+覆盖，不需要再改这个脚本。
+
+进程内 webhook（`--alert-webhook`）负责活着时的风险/停止通知；这两条 OpenObserve 告警
+是与进程解耦的第二通道。实盘三者都应配置。
 
 ## 7. 安全边界
 
