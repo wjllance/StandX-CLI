@@ -459,23 +459,62 @@ mod tests {
         ));
     }
 
+    /// Invariant: a freeze owns the runtime until recovery completes. Market
+    /// ticks arriving while frozen must neither schedule cycle work directly nor
+    /// *arm* one for later — a leaked `replan_requested` would survive the
+    /// freeze and make the resume place quotes off a market snapshot taken
+    /// before the incident.
     #[test]
     fn frozen_ignores_timer_and_market_changed() {
         let mut state = MakerState::starting();
         state.handle(MakerEvent::StartupReady);
-        let token = next_cycle(&mut state);
+        let cycle = next_cycle(&mut state);
         // Freeze on a position mismatch and drain the abort + cleanup it queues.
         state.handle(MakerEvent::PositionMismatch);
         assert!(state.is_frozen());
-        while state.next_effect().is_some() {}
+        let cleanup = loop {
+            match state.next_effect() {
+                Some(MakerEffect::Cleanup { token, .. }) => break token,
+                Some(_) => {}
+                None => panic!("freeze must queue a cleanup"),
+            }
+        };
+        // The aborted cycle reports back late; it must not resurrect anything.
+        state.handle(MakerEvent::CycleCompleted(cycle));
+        assert_eq!(state.next_effect(), None);
 
-        // While frozen, market ticks must not schedule any new cycle work or
-        // arm a replan — the recovery flow owns the state until it completes.
+        // Ticks while frozen produce nothing and leave the phase alone.
         state.handle(MakerEvent::Timer);
         state.handle(MakerEvent::MarketChanged);
         assert_eq!(state.next_effect(), None);
         assert!(state.is_frozen());
-        let _ = token;
+
+        // Drive recovery to completion. The resume owes exactly one cycle: a
+        // second one here would be the replan those frozen ticks should not
+        // have armed.
+        state.handle(MakerEvent::CleanupCompleted(cleanup));
+        let recovery = match state.next_effect() {
+            Some(MakerEffect::Recover { token, .. }) => token,
+            effect => panic!("expected recovery, got {effect:?}"),
+        };
+        state.handle(MakerEvent::RecoverySucceeded(recovery));
+        let resumed = match state.next_effect() {
+            Some(MakerEffect::RunCycle(token)) => token,
+            effect => panic!("resume must schedule one cycle, got {effect:?}"),
+        };
+        assert_eq!(state.next_effect(), None);
+        assert!(matches!(state.phase(), RuntimePhase::Ready));
+
+        // A replan armed while frozen would not show up at the resume itself
+        // (which schedules its cycle unconditionally) but one cycle later: the
+        // stale flag would ride through and queue an extra cycle here.
+        state.handle(MakerEvent::CycleCompleted(resumed));
+        assert_eq!(state.next_effect(), Some(MakerEffect::CommitCycle(resumed)));
+        assert_eq!(
+            state.next_effect(),
+            None,
+            "market ticks ignored while frozen must not leave a replan armed"
+        );
     }
 
     #[test]
