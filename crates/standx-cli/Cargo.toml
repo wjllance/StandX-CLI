@@ -31,6 +31,10 @@ tokio-tungstenite.workspace = true
 # HTTP (risk-alert webhook delivery)
 reqwest.workspace = true
 
+# Self-update: verify the published sha256 of a downloaded release asset.
+# Already in the tree via ed25519-dalek, so this adds no new compilation unit.
+sha2 = "0.10"
+
 # Serialization
 serde.workspace = true
 serde_json.workspace = true

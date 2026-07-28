@@ -76,6 +76,19 @@ brew install standx-cli
 cargo install standx-cli
 ```
 
+#### Keeping it current
+
+```bash
+standx update --check     # compare installed vs latest release, change nothing
+standx update             # download, verify sha256, replace this binary
+standx update --yes       # same, no prompt (for scripts)
+```
+
+`update` refuses to touch a Homebrew-managed binary — use `brew upgrade
+standx-cli` there so the formula and the binary stay in agreement. It never
+elevates privileges: if the install directory is not writable it says so instead
+of reaching for `sudo`.
+
 ### 2. Configure
 
 StandX CLI requires authentication for most operations. You need:
@@ -435,6 +448,27 @@ rails.
 
 For local structured log collection and SQL analysis, see
 **[docs/15-openobserve.md](docs/15-openobserve.md)**.
+
+### Self-update
+
+```bash
+standx update --check              # report installed vs latest; exit
+standx update                      # verify + replace (prompts unless --yes)
+standx update --pre                # allow pre-release candidates
+standx update --force              # reinstall the current version
+standx -o json update --check      # machine-readable check
+```
+
+The release asset for the running platform is downloaded over TLS and its
+SHA-256 verified against the `checksums.txt` published beside it, the archive's
+`standx` binary is asked for its own `--version` to confirm it matches the
+release, and only then is it atomically renamed over the running executable.
+
+Two limits worth knowing: checksum verification protects against a corrupted or
+truncated download, **not** against a compromised release (the checksum ships
+from the same place as the archive — provenance would need a detached
+signature); and a Homebrew-managed install is refused rather than silently
+diverging from its formula.
 
 ---
 
