@@ -1,12 +1,12 @@
 #!/bin/sh
 # StandX CLI One-line Installer
-# Supports macOS (Intel/Apple Silicon) and Linux (x86_64/ARM64)
+# Supports macOS (Apple Silicon) and Linux (x86_64/ARM64)
 
 set -e
 
 REPO="wjllance/standx-cli"
 BINARY_NAME="standx"
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 
 # Colors
 RED='\033[0;31m'
@@ -14,10 +14,23 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+say() {
+    printf '%b\n' "$*"
+}
+
+warn() {
+    printf '%b\n' "${YELLOW}$*${NC}" >&2
+}
+
+die() {
+    printf '%b\n' "${RED}Error: $*${NC}" >&2
+    exit 1
+}
+
 # Detect target platform
 get_target() {
-    local os=$(uname -s)
-    local arch=$(uname -m)
+    os=$(uname -s)
+    arch=$(uname -m)
 
     case "$os" in
         Darwin)
@@ -26,8 +39,7 @@ get_target() {
                     echo "aarch64-apple-darwin"
                     ;;
                 *)
-                    echo "${RED}Error: Unsupported macOS architecture: $arch${NC}" >&2
-                    exit 1
+                    die "Unsupported macOS architecture: $arch"
                     ;;
             esac
             ;;
@@ -40,76 +52,106 @@ get_target() {
                     echo "x86_64-unknown-linux-gnu"
                     ;;
                 *)
-                    echo "${RED}Error: Unsupported Linux architecture: $arch${NC}" >&2
-                    exit 1
+                    die "Unsupported Linux architecture: $arch"
                     ;;
             esac
             ;;
         *)
-            echo "${RED}Error: Unsupported operating system: $os${NC}" >&2
-            exit 1
+            die "Unsupported operating system: $os"
             ;;
     esac
 }
 
-# Get latest version tag
+# Get latest version tag.
+# Prefers the github.com redirect (not subject to API rate limits) and falls
+# back to the REST API. Prints nothing and returns 1 when both fail.
 get_latest_tag() {
-    local api_url="https://api.github.com/repos/${REPO}/releases/latest"
-    local tag=$(curl -sSL "$api_url" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+        "https://github.com/${REPO}/releases/latest" 2>/dev/null \
+        | sed -n 's#.*/releases/tag/##p')
 
     if [ -z "$tag" ]; then
-        echo "${RED}Error: Unable to get latest version information${NC}" >&2
-        exit 1
+        tag=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
+            | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     fi
 
+    [ -n "$tag" ] || return 1
     echo "$tag"
+}
+
+# Compute the SHA256 of a file. Returns 2 when no hashing tool is available.
+sha256_of() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        return 2
+    fi
 }
 
 # Main installation logic
 main() {
-    echo "${GREEN}=== StandX CLI Installer ===${NC}"
+    say "${GREEN}=== StandX CLI Installer ===${NC}"
     echo ""
 
-    # Detect platform
-    local target=$(get_target)
-    echo "Detected platform: ${YELLOW}$target${NC}"
+    command -v curl >/dev/null 2>&1 || die "curl is required but was not found"
+    command -v tar >/dev/null 2>&1 || die "tar is required but was not found"
 
-    # Get latest version
-    echo "Fetching latest version information..."
-    local tag=$(get_latest_tag)
-    echo "Latest version: ${YELLOW}$tag${NC}"
+    # Detect platform
+    target=$(get_target)
+    say "Detected platform: ${YELLOW}$target${NC}"
+
+    # Resolve version (STANDX_VERSION overrides discovery, e.g. STANDX_VERSION=v1.2.0)
+    if [ -n "${STANDX_VERSION:-}" ]; then
+        tag="$STANDX_VERSION"
+        say "Requested version: ${YELLOW}$tag${NC}"
+    else
+        echo "Fetching latest version information..."
+        tag=$(get_latest_tag) || die "Unable to determine the latest version.
+GitHub may be rate-limiting or blocking this network. Retry later, or pin a
+version explicitly:
+  curl -sSL https://raw.githubusercontent.com/${REPO}/main/install.sh | STANDX_VERSION=v1.2.0 sh"
+        say "Latest version: ${YELLOW}$tag${NC}"
+    fi
 
     # Construct download URL
-    local tarball_name="${BINARY_NAME}-${tag}-${target}.tar.gz"
-    local download_url="https://github.com/${REPO}/releases/download/${tag}/${tarball_name}"
-    local checksums_url="https://github.com/${REPO}/releases/download/${tag}/checksums.txt"
+    tarball_name="${BINARY_NAME}-${tag}-${target}.tar.gz"
+    download_url="https://github.com/${REPO}/releases/download/${tag}/${tarball_name}"
+    checksums_url="https://github.com/${REPO}/releases/download/${tag}/checksums.txt"
 
     # Create temp directory
-    local tmp_dir=$(mktemp -d)
-    trap "rm -rf $tmp_dir" EXIT
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' EXIT
 
     # Download tarball
     echo ""
     echo "Downloading ${tarball_name}..."
-    if ! curl -sSL -o "${tmp_dir}/${tarball_name}" "$download_url"; then
-        echo "${RED}Error: Download failed${NC}" >&2
-        exit 1
+    if ! curl -fsSL -o "${tmp_dir}/${tarball_name}" "$download_url"; then
+        die "Download failed: $download_url
+No release asset for this platform and version. Check
+https://github.com/${REPO}/releases/tag/${tag} for available downloads."
     fi
 
     # Download checksums.txt
     echo "Downloading checksums.txt..."
-    if ! curl -sSL -o "${tmp_dir}/checksums.txt" "$checksums_url"; then
-        echo "${YELLOW}Warning: Unable to download checksums.txt, skipping verification${NC}"
+    if ! curl -fsSL -o "${tmp_dir}/checksums.txt" "$checksums_url"; then
+        warn "Warning: Unable to download checksums.txt, skipping verification"
     else
-        # Verify SHA256
         echo "Verifying file integrity..."
-        cd "$tmp_dir"
-        if ! sha256sum -c checksums.txt --ignore-missing 2>/dev/null | grep -q "${tarball_name}: OK"; then
-            echo "${RED}Error: SHA256 verification failed, file may be corrupted or tampered${NC}" >&2
-            exit 1
+        expected=$(awk -v f="$tarball_name" \
+            '$2 == f || $2 == "*" f {print $1; exit}' "${tmp_dir}/checksums.txt")
+        if [ -z "$expected" ]; then
+            warn "Warning: ${tarball_name} is not listed in checksums.txt, skipping verification"
+        elif ! actual=$(sha256_of "${tmp_dir}/${tarball_name}"); then
+            warn "Warning: no sha256 tool (shasum/sha256sum) found, skipping verification"
+        elif [ "$actual" != "$expected" ]; then
+            die "SHA256 verification failed, file may be corrupted or tampered
+  expected: $expected
+  actual:   $actual"
+        else
+            say "${GREEN}✓ Verification passed${NC}"
         fi
-        echo "${GREEN}✓ Verification passed${NC}"
-        cd - >/dev/null
     fi
 
     # Extract
@@ -118,19 +160,15 @@ main() {
     tar -xzf "${tmp_dir}/${tarball_name}" -C "$tmp_dir"
 
     # Check extracted binary
-    local binary_path="${tmp_dir}/${BINARY_NAME}"
+    binary_path="${tmp_dir}/${BINARY_NAME}"
     if [ ! -f "$binary_path" ]; then
-        echo "${RED}Error: Binary file ${BINARY_NAME} not found after extraction${NC}" >&2
-        exit 1
+        die "Binary file ${BINARY_NAME} not found after extraction"
     fi
 
     # Check install directory permissions
     if [ ! -d "$INSTALL_DIR" ]; then
-        echo "${YELLOW}Install directory $INSTALL_DIR does not not exist, attempting to create...${NC}"
-        if ! sudo mkdir -p "$INSTALL_DIR"; then
-            echo "${RED}Error: Unable to create install directory${NC}" >&2
-            exit 1
-        fi
+        warn "Install directory $INSTALL_DIR does not exist, attempting to create..."
+        sudo mkdir -p "$INSTALL_DIR" || die "Unable to create install directory"
     fi
 
     # Install
@@ -140,8 +178,9 @@ main() {
         mv "$binary_path" "${INSTALL_DIR}/${BINARY_NAME}"
         chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
     else
-        echo "${YELLOW}Administrator privileges required to install to $INSTALL_DIR${NC}"
-        sudo mv "$binary_path" "${INSTALL_DIR}/${BINARY_NAME}"
+        warn "Administrator privileges required to install to $INSTALL_DIR"
+        sudo mv "$binary_path" "${INSTALL_DIR}/${BINARY_NAME}" \
+            || die "Unable to install to ${INSTALL_DIR} (sudo failed)"
         sudo chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
     fi
 
@@ -149,17 +188,17 @@ main() {
     echo ""
     echo "Verifying installation..."
     if command -v "$BINARY_NAME" >/dev/null 2>&1; then
-        local version=$($BINARY_NAME --version 2>/dev/null || echo "unknown")
-        echo "${GREEN}✓ Installation successful!${NC}"
+        version=$($BINARY_NAME --version 2>/dev/null || echo "unknown")
+        say "${GREEN}✓ Installation successful!${NC}"
         echo ""
-        echo "Version: ${YELLOW}$version${NC}"
+        say "Version: ${YELLOW}$version${NC}"
         echo ""
         echo "Get started with:"
-        echo "  ${YELLOW}standx --help${NC}          Show help"
-        echo "  ${YELLOW}standx --version${NC}       Show version"
-        echo "  ${YELLOW}standx auth login${NC}      Authenticate"
+        say "  ${YELLOW}standx --help${NC}          Show help"
+        say "  ${YELLOW}standx --version${NC}       Show version"
+        say "  ${YELLOW}standx auth login${NC}      Authenticate"
     else
-        echo "${YELLOW}Warning: Installation complete, but $BINARY_NAME is not in PATH${NC}"
+        warn "Warning: Installation complete, but $BINARY_NAME is not in PATH"
         echo "Please ensure $INSTALL_DIR is in your PATH environment variable"
     fi
 }
