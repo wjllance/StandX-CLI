@@ -4,6 +4,7 @@ use standx_maker::{
     OrderObservation, ProjectionPendingCancel, ProjectionPendingPlace, RequestTimeoutPhase,
 };
 use standx_sdk::account_stream::{OrderUpdate, PositionUpdate};
+use standx_sdk::models::OrderSide;
 use standx_sdk::order_response::OrderResponseHealth;
 
 fn pending_place(request_id: &str) -> ProjectionPendingPlace {

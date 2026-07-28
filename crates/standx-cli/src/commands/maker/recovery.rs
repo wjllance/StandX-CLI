@@ -934,6 +934,118 @@ mod tests {
     const ORDER_ID: u64 = 11_575_317_826;
     const TRADE_ID: u64 = 900_001;
 
+    /// Snapshot-validation fixtures. Deliberately separate from the
+    /// reconciliation fixtures above: these exercise ownership and trade-ID
+    /// stability, so they need to vary the client order ID freely.
+    fn snapshot_order(id: &str, cl_ord_id: Option<&str>) -> Order {
+        Order {
+            id: id.to_string(),
+            cl_ord_id: cl_ord_id.map(str::to_string),
+            symbol: SYMBOL.to_string(),
+            side: OrderSide::Buy,
+            order_type: OrderType::Limit,
+            qty: "0.2".to_string(),
+            fill_qty: "0".to_string(),
+            price: "59.40".to_string(),
+            status: OrderStatus::New,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        }
+    }
+
+    fn snapshot_position(side: &str, qty: &str) -> Position {
+        serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "symbol": SYMBOL,
+            "side": side,
+            "qty": qty,
+            "entry_price": "59.40",
+            "entry_value": "11.88",
+            "holding_margin": "1",
+            "initial_margin": "1",
+            "leverage": "1",
+            "mark_price": "59.40",
+            "margin_asset": "USDT",
+            "margin_mode": "cross",
+            "position_value": "11.88",
+            "realized_pnl": "0",
+            "required_margin": "1",
+            "status": "open",
+            "upnl": "0",
+            "time": "now",
+            "created_at": "now",
+            "updated_at": "now",
+            "user": "test"
+        }))
+        .unwrap()
+    }
+
+    fn snapshot_trade(id: u64, order_id: u64) -> Trade {
+        Trade {
+            id,
+            time: "now".to_string(),
+            price: "59.40".to_string(),
+            qty: "0.2".to_string(),
+            side: Some("buy".to_string()),
+            is_buyer_taker: false,
+            fee_asset: None,
+            fee_qty: None,
+            pnl: None,
+            order_id: Some(order_id),
+            symbol: Some(SYMBOL.to_string()),
+            value: None,
+        }
+    }
+
+    #[test]
+    fn reconnect_snapshot_requires_empty_maker_book_and_valid_ledger() {
+        let manual = snapshot_order("99", Some("manual-order"));
+        let filled = snapshot_order("42", Some("sxmk-filled"));
+        let snapshot = validate_reconnect_snapshot(
+            SYMBOL,
+            "sxmk-",
+            &[manual],
+            &[snapshot_position("sell", "0.2")],
+            &[filled],
+            &[snapshot_trade(7, 42)],
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.position, -0.2);
+        assert_eq!(snapshot.maker_filled_orders, 1);
+        assert_eq!(snapshot.maker_trades, 1);
+    }
+
+    #[test]
+    fn reconnect_snapshot_rejects_residual_maker_order() {
+        let error = validate_reconnect_snapshot(
+            SYMBOL,
+            "sxmk-",
+            &[snapshot_order("42", Some("sxmk-still-open"))],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("appeared after cleanup"));
+    }
+
+    #[test]
+    fn reconnect_snapshot_rejects_unstable_maker_trade_id() {
+        let error = validate_reconnect_snapshot(
+            SYMBOL,
+            "sxmk-",
+            &[],
+            &[],
+            &[snapshot_order("42", Some("sxmk-filled"))],
+            &[snapshot_trade(0, 42)],
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("stable trade ID"));
+    }
+
     #[test]
     fn reconnect_error_classification_keeps_auth_terminal_and_transport_retryable() {
         let auth = anyhow::Error::new(standx_sdk::Error::AuthRequired {
@@ -1339,5 +1451,252 @@ mod tests {
 
         assert!(matches!(probe, ConvergenceProbe::SnapshotFailed(_)));
         assert_eq!(fills_sink, 0);
+    }
+}
+
+#[cfg(test)]
+mod live_gate_tests {
+    //! End-to-end checks over a mocked REST surface: the controlled-disconnect
+    //! live gate, cleanup retry against a stale open-order read, and fast
+    //! current-run fill recovery by order ID. They live here rather than in the
+    //! command module because every one of them drives a `recovery` entry point.
+
+    use super::*;
+    // The controlled-disconnect gate spans both halves of the live session: it
+    // drains the order-response stream, then verifies the REST cleanup that
+    // follows, so it needs the runtime's order-response entry point too.
+    use crate::commands::maker::runtime::apply_order_responses;
+
+    use mockito::{Matcher, Server};
+    use standx_maker::{MakerAccountProjection, MakerState};
+
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let lock = crate::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self {
+                key,
+                original,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+    #[tokio::test]
+    async fn controlled_disconnect_fails_closed_then_cleans_only_maker_orders() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        drop(sender);
+        let mut projection = MakerAccountProjection::new(1, "sxmk-test-", 0.0, 0.005, 0.00005);
+        let mut runtime_state = MakerState::starting();
+
+        let error = apply_order_responses(
+            &mut receiver,
+            &mut projection,
+            &mut runtime_state,
+            OutputFormat::Quiet,
+            "BTC-USD",
+            7,
+            2,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("disconnected"));
+        eprintln!("controlled disconnect -> fail-safe: {error}");
+
+        let _jwt = EnvGuard::set("STANDX_JWT", "controlled-test-jwt");
+        let mut server = Server::new_async().await;
+        let open_before = server
+            .mock("GET", "/api/query_open_orders")
+            .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"code":0,"message":"ok","result":[
+                    {"id":"42","cl_ord_id":"sxmk-controlled-buy","symbol":"BTC-USD","side":"buy","order_type":"limit","qty":"0.001","fill_qty":"0","price":"63000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:00Z"},
+                    {"id":"99","cl_ord_id":"manual-order","symbol":"BTC-USD","side":"sell","order_type":"limit","qty":"0.001","fill_qty":"0","price":"65000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:00Z"}
+                ]}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let cancel = server
+            .mock("POST", "/api/cancel_orders")
+            .match_body(Matcher::Json(serde_json::json!({ "order_id_list": [42] })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"code":0,"message":"accepted"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let open_after = server
+            .mock("GET", "/api/query_open_orders")
+            .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"code":0,"message":"ok","result":[
+                    {"id":"99","cl_ord_id":"manual-order","symbol":"BTC-USD","side":"sell","order_type":"limit","qty":"0.001","fill_qty":"0","price":"65000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:00Z"}
+                ]}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = StandXClient::with_base_url(server.url()).unwrap();
+        cancel_maker_orders_with_retry(&client, "BTC-USD", 3, OutputFormat::Quiet)
+            .await
+            .unwrap();
+
+        open_before.assert_async().await;
+        cancel.assert_async().await;
+        open_after.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn maker_cleanup_retries_stale_open_order_verification() {
+        let _jwt = EnvGuard::set("STANDX_JWT", "controlled-test-jwt");
+        let mut server = Server::new_async().await;
+        let maker_and_manual = r#"{"code":0,"message":"ok","result":[
+            {"id":"42","cl_ord_id":"sxmk-controlled-buy","symbol":"BTC-USD","side":"buy","order_type":"limit","qty":"0.001","fill_qty":"0","price":"63000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:00Z"},
+            {"id":"99","cl_ord_id":"manual-order","symbol":"BTC-USD","side":"sell","order_type":"limit","qty":"0.001","fill_qty":"0","price":"65000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:00Z"}
+        ]}"#;
+        let manual_only = r#"{"code":0,"message":"ok","result":[
+            {"id":"99","cl_ord_id":"manual-order","symbol":"BTC-USD","side":"sell","order_type":"limit","qty":"0.001","fill_qty":"0","price":"65000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:00Z"}
+        ]}"#;
+        let open_before = server
+            .mock("GET", "/api/query_open_orders")
+            .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(maker_and_manual)
+            .expect(1)
+            .create_async()
+            .await;
+        let cancel_first = server
+            .mock("POST", "/api/cancel_orders")
+            .match_body(Matcher::Json(serde_json::json!({ "order_id_list": [42] })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"code":0,"message":"accepted"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let stale_verify = server
+            .mock("GET", "/api/query_open_orders")
+            .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(maker_and_manual)
+            .expect(1)
+            .create_async()
+            .await;
+        let open_retry = server
+            .mock("GET", "/api/query_open_orders")
+            .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(maker_and_manual)
+            .expect(1)
+            .create_async()
+            .await;
+        let cancel_retry = server
+            .mock("POST", "/api/cancel_orders")
+            .match_body(Matcher::Json(serde_json::json!({ "order_id_list": [42] })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"code":0,"message":"accepted"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let cleared_verify = server
+            .mock("GET", "/api/query_open_orders")
+            .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(manual_only)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = StandXClient::with_base_url(server.url()).unwrap();
+        cancel_maker_orders_with_retry(&client, "BTC-USD", 3, OutputFormat::Quiet)
+            .await
+            .unwrap();
+
+        open_before.assert_async().await;
+        cancel_first.assert_async().await;
+        stale_verify.assert_async().await;
+        open_retry.assert_async().await;
+        cancel_retry.assert_async().await;
+        cleared_verify.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn reconciliation_recovers_fast_current_run_fill_by_order_id() {
+        let _jwt = EnvGuard::set("STANDX_JWT", "controlled-test-jwt");
+        let mut server = Server::new_async().await;
+        let order_lookup = server
+            .mock("GET", "/api/query_order")
+            .match_query(Matcher::UrlEncoded(
+                "order_id".into(),
+                "11477424747".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"id":"11477424747","cl_ord_id":"sxmk-0123456789ab-q00000001b0","symbol":"XAG-USD","side":"buy","order_type":"limit","qty":"0.001","fill_qty":"0.001","price":"59.89","status":"filled","created_at":"2026-07-11T07:06:05Z","updated_at":"2026-07-11T07:06:07Z"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let trade = Trade {
+            id: 316_912_722,
+            time: "2026-07-11T07:06:07.128726Z".to_string(),
+            price: "59.89".to_string(),
+            qty: "0.001".to_string(),
+            side: Some("buy".to_string()),
+            is_buyer_taker: false,
+            fee_asset: Some("DUSD".to_string()),
+            fee_qty: Some("0.000005989".to_string()),
+            pnl: Some("0.00008".to_string()),
+            order_id: Some(11_477_424_747),
+            symbol: Some("XAG-USD".to_string()),
+            value: Some("0.05989".to_string()),
+        };
+        let client = StandXClient::with_base_url(server.url()).unwrap();
+        let mut ledger = MakerLedger::new(-0.001);
+
+        recover_current_run_order_ids_for_reconciliation(
+            &client,
+            &[trade],
+            PositionGap {
+                expected: -0.001,
+                observed: 0.0,
+                qty_tolerance: 0.0005,
+                run_order_prefix: "sxmk-0123456789ab-",
+            },
+            &mut ledger,
+        )
+        .await;
+
+        assert!(ledger.maker_order_ids.contains(&11_477_424_747));
+        assert!(ledger.exit_order_ids.is_empty());
+        order_lookup.assert_async().await;
     }
 }
