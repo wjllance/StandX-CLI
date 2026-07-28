@@ -26,6 +26,68 @@ pub(super) struct ShutdownReport<'a> {
     pub(super) order_response_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// Settlement window between the two post-cleanup position snapshots.
+///
+/// Sized off the same intuition as the position-mismatch probe's 0.5–1.5s
+/// ladder: a fill that lands while cleanup is cancelling needs a moment to show
+/// up in the REST position view.
+const POSITION_SETTLEMENT_DELAY: Duration = Duration::from_millis(1_500);
+
+/// Read the venue position after cleanup, requiring agreement before believing
+/// "flat".
+///
+/// A single snapshot is not enough to *clear* the account: an order that filled
+/// during cancellation may not have propagated to the REST position view yet, so
+/// one zero reading can hide real exposure — and unlike a non-zero reading,
+/// nobody gets told. A non-flat reading is returned as soon as it is seen (it is
+/// already actionable, and the handoff must fire); a flat one is only believed
+/// after a second snapshot past a settlement delay also reads flat. A failed or
+/// unreadable snapshot returns `None`, which the caller renders as `unknown`
+/// rather than flat.
+///
+/// This bounds the shutdown by one extra delay, well inside the deployment's
+/// stop grace period. `settlement_delay` is a parameter only so tests can drive
+/// the two-snapshot logic without waiting real time; production always passes
+/// [`POSITION_SETTLEMENT_DELAY`].
+pub(super) async fn confirm_venue_position(
+    client: &StandXClient,
+    symbol: &str,
+    qty_tolerance: f64,
+    settlement_delay: Duration,
+) -> Option<f64> {
+    let snapshot = |attempt: u32| async move {
+        match client.get_positions(Some(symbol)).await {
+            Ok(positions) => match position_for_symbol(&positions, symbol) {
+                Ok(position) => Some(position),
+                Err(error) => {
+                    eprintln!("⚠️  post-cleanup position snapshot {attempt} unreadable: {error}");
+                    None
+                }
+            },
+            Err(error) => {
+                eprintln!("⚠️  post-cleanup position snapshot {attempt} failed: {error}");
+                None
+            }
+        }
+    };
+
+    let first = snapshot(1).await?;
+    if !first.is_finite() || first.abs() > qty_tolerance {
+        // Already exposure; no point waiting to confirm what must be handed off.
+        return Some(first);
+    }
+    tokio::time::sleep(settlement_delay).await;
+    let second = snapshot(2).await?;
+    if !second.is_finite() || second.abs() > qty_tolerance {
+        return Some(second);
+    }
+    // Two agreeing flat reads separated by the settlement delay. This is still
+    // evidence rather than proof — propagation slower than the delay would fool
+    // it — which is why the runbook's FLAT precheck re-measures independently
+    // before the next session starts.
+    Some(second)
+}
+
 /// Abort feed/stream tasks, cancel any residual maker orders, print the human
 /// summary, and deliver the stopped-lifecycle notifications. Runs on every
 /// exit path; returns the process result (fail-safe error or clean Ok).
@@ -127,19 +189,7 @@ pub(super) async fn shutdown_report(report: ShutdownReport<'_>) -> Result<()> {
     // word. Ask the venue; if it will not answer, say so instead of reporting a
     // ledger snapshot as confirmed.
     let venue_position = if live {
-        match client.get_positions(Some(symbol)).await {
-            Ok(positions) => match position_for_symbol(&positions, symbol) {
-                Ok(position) => Some(position),
-                Err(error) => {
-                    eprintln!("⚠️  post-cleanup position snapshot unreadable: {error}");
-                    None
-                }
-            },
-            Err(error) => {
-                eprintln!("⚠️  post-cleanup position snapshot failed: {error}");
-                None
-            }
-        }
+        confirm_venue_position(client, symbol, qty_tolerance, POSITION_SETTLEMENT_DELAY).await
     } else {
         // Paper mode has no venue; the simulation is the authority.
         Some(sim_position)

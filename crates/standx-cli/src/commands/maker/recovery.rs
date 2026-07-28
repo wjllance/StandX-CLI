@@ -1019,7 +1019,7 @@ mod tests {
             positions: vec![short_position()],
             filled_orders: vec![filled_sell_order()],
             trades: vec![sell_trade(now)],
-            funding: Vec::new(),
+            funding: Ok(Vec::new()),
         }
     }
 
@@ -1029,7 +1029,7 @@ mod tests {
             positions: vec![short_position()],
             filled_orders: Vec::new(),
             trades: Vec::new(),
-            funding: Vec::new(),
+            funding: Ok(Vec::new()),
         }
     }
 
