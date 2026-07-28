@@ -151,6 +151,11 @@ pub(super) struct MakerFileConfig {
     pub alert_uptime: Option<f64>,
     pub alert_equity_below: Option<f64>,
     pub alert_margin_below: Option<f64>,
+    /// Account-level hard floors (stage 5-b). Distinct from the `alert_*`
+    /// thresholds above: breaching these stops the session through
+    /// `RuntimeStopReason::AccountFloor`. Default (absent / 0) = off.
+    pub stop_equity_below: Option<f64>,
+    pub stop_margin_below: Option<f64>,
     pub no_ws: Option<bool>,
     pub order_response_reconnect_attempts: Option<u32>,
     pub order_response_reconnect_backoff: Option<u64>,
@@ -211,6 +216,24 @@ mod tests {
         assert_eq!(config.stop_loss, Some(25.0));
         assert_eq!(config.alert_equity_below, Some(100.0));
         assert_eq!(config.alert_margin_below, Some(40.0));
+        // Stage 5-b hard floors are absent unless configured: alert thresholds
+        // must never arm the solvency brake by proxy.
+        assert_eq!(config.stop_equity_below, None);
+        assert_eq!(config.stop_margin_below, None);
+    }
+
+    #[test]
+    fn parses_account_hard_floor_fields_separately_from_alerts() {
+        let config: MakerFileConfig = toml::from_str(
+            "stop_equity_below = 80
+stop_margin_below = 20
+",
+        )
+        .unwrap();
+        assert_eq!(config.stop_equity_below, Some(80.0));
+        assert_eq!(config.stop_margin_below, Some(20.0));
+        assert_eq!(config.alert_equity_below, None);
+        assert_eq!(config.alert_margin_below, None);
     }
 
     #[test]
@@ -417,6 +440,30 @@ add_side_factor = 0.5
         assert!(!guard.enabled);
         assert_eq!(guard.enter_bps, 8.0);
         assert_eq!(guard.exit_bps, 3.0);
+    }
+
+    /// The frozen production baseline (docs/25: skew + guard both on) must keep
+    /// parsing untouched, and stage 5-b must not have armed anything in it: the
+    /// account hard floors stay absent, so the new solvency brake cannot fire
+    /// on the production config until an operator adds them deliberately.
+    #[test]
+    fn frozen_production_baseline_parses_with_hard_floors_unarmed() {
+        let config: MakerFileConfig = toml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/maker-guard-hype-candidate.toml"
+        )))
+        .unwrap();
+
+        // The two accepted stage 3 mechanisms are the baseline.
+        assert!(config.nonlinear_skew.as_ref().unwrap().enabled.unwrap());
+        assert!(config.external_guard.as_ref().unwrap().enabled.unwrap());
+        // Alerts stay armed…
+        assert_eq!(config.alert_equity_below, Some(94.0));
+        assert_eq!(config.alert_margin_below, Some(30.0));
+        assert_eq!(config.stop_loss, Some(5.0));
+        // …and the stage 5-b hard floors stay off.
+        assert_eq!(config.stop_equity_below, None);
+        assert_eq!(config.stop_margin_below, None);
     }
 
     #[test]

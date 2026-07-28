@@ -84,6 +84,8 @@ standx maker run <SYMBOL> [OPTIONS]
 | `--alert-uptime` | `0` | 风险告警：双边 uptime 跌破此百分比时告警（过预热期后）。0 关闭 |
 | `--alert-equity-below` | `0` | 账户 equity 低于此绝对值时告警；仅 live、需要账户快照。0 关闭 |
 | `--alert-margin-below` | `0` | cross available margin 低于此绝对值时告警；仅 live。0 关闭 |
+| `--stop-equity-below` | `0` | **硬熔断**（不是告警）：账户 equity 低于此绝对值时 fail-safe 停机并交接残余仓位；仅 live。0 关闭 |
+| `--stop-margin-below` | `0` | **硬熔断**（不是告警）：cross available margin 低于此绝对值时 fail-safe 停机并交接残余仓位；仅 live。0 关闭 |
 | `--alert-webhook` | 无 | 除 stderr/JSON 外，把告警 POST 到此 URL |
 | `--alert-webhook-format` | `slack` | webhook 报文格式：`slack` / `feishu` / `telegram` / `raw` |
 | `--no-ws` | 关 | 禁用 WebSocket 行情，改为每轮 REST 轮询 |
@@ -214,7 +216,13 @@ center = mark × (1 − skew_bps × clamp(position / max_position, ±1) / 1e4)
 三种输出格式：
 
 - **表格（默认）**：每轮一行 `[时间] #轮次 mark= bid= ask= pos= pnl= | hold= place= cancel=`，其下缩进列出 PLACE / CANCEL / HOLD / FILL 明细。Live 模式还会打印 `ACCOUNT balance= equity= available= upnl=`，数据来自最近一次 REST 账户快照（正常每 30 秒刷新；启用 equity/margin floor 时，account-stream `balance` 更新会立即触发一次权威 REST 刷新；短暂失败时最多复用 60 秒）；这里的账户 `upnl` 与机器人本次会话的 `pnl` 是两个不同口径。
-- **JSON（`--output json` 或 `--openclaw`）**：每个动作一行 JSON；每轮末尾一条 `cycle_summary`，保留原字段并新增可选 `rolling_vol_bps`、`adaptive_spread_enabled`、`adaptive_spread_tier`、`effective_spread_bps`、`effective_refresh_bps`、`size_skew_enabled`、`size_skew_active`、`size_skew_add_side`、`size_skew_inventory_ratio`、`size_skew_add_qty` 与 `performance` 对象。`vol_bps` 仍只在 halted 时出现，旧语义不变。performance 包含 passive/exit 数量与现金流、数量加权 capture、净 PnL 归因、1s/5s/30s markout、时间加权双边 uptime、合格深度时间积分和库存持有时间。启用公共 WS 时，`cycle_summary.ws_snapshot` 以观察字段记录 mark/book 的 seq、统一/原始 envelope/payload 时间、本地 age，以及 server/local skew；这些字段不参与策略、风控或行情源选择。停机时另有 `performance_summary`、逐请求 `order_latency`、place/cancel 分位数 `order_latency_summary`；账户 typed event 产生 `account_event_lag`。逐请求延迟保留 `generation/cycle/symbol/side/level/market_source/recovery`，自动恢复完成后的首个成功周期标为 `recovery=true`；socket write、venue ack 与 account effective 始终分开，超时请求另有 `timeout_phase` 和从 intent 起算的 `timeout_ms`。旧消费者可以忽略这些新 action/可选字段。`funding_available=false` 或 `execution_costs_unavailable>0` 时，`net_pnl_complete=false`，数值字段仍可用于已知部分但不能被解释为完整净收益。`pnl` 和 `fills_total` 只属于当前 maker session：已有仓位按启动 mark 自动接管并把 session PnL 归零，历史交易所盈亏仍看 `account.upnl`。live session PnL 使用 current-run ledger 的权威仓位；每个去重后的增量成交会原子更新现金流与统计仓位。live fill 还包含 `trade_id`、`order_id`、`trade_ts`、`origin`、`role`、成交时 mark/事件时间，以及可换算时的 `fee_quote` / `rebate_quote`。
+- **JSON（`--output json` 或 `--openclaw`）**：每个动作一行 JSON；每轮末尾一条 `cycle_summary`，保留原字段并新增可选 `rolling_vol_bps`、`adaptive_spread_enabled`、`adaptive_spread_tier`、`effective_spread_bps`、`effective_refresh_bps`、`size_skew_enabled`、`size_skew_active`、`size_skew_add_side`、`size_skew_inventory_ratio`、`size_skew_add_qty`、`exit_kind`、`exit_submitted`、`exit_suppressed` 与 `performance`
+对象。阶段 5-b 的三个 exit 字段始终存在（无退出时为 `null` / `false`），因此"本轮没有
+退出"与"旧 run 缺字段"可以区分：`exit_kind` 是 `inventory_trim`（阈值 trim）或
+`wind_down`（监督者收尾），`exit_suppressed` 是 `volatility_halt` 或
+`market_data_inactive`——波动熔断期间两种退出都被抑制（不存在"熔断期紧急退出"策略，
+见 [docs/26](26-maker-stage5b-design.md) D1），抑制不再是静默的。
+`inventory_exit_submitted` 事件行也带上了 `exit_kind`。`vol_bps` 仍只在 halted 时出现，旧语义不变。performance 包含 passive/exit 数量与现金流、数量加权 capture、净 PnL 归因、1s/5s/30s markout、时间加权双边 uptime、合格深度时间积分和库存持有时间。启用公共 WS 时，`cycle_summary.ws_snapshot` 以观察字段记录 mark/book 的 seq、统一/原始 envelope/payload 时间、本地 age，以及 server/local skew；这些字段不参与策略、风控或行情源选择。停机时另有 `performance_summary`、逐请求 `order_latency`、place/cancel 分位数 `order_latency_summary`；账户 typed event 产生 `account_event_lag`。逐请求延迟保留 `generation/cycle/symbol/side/level/market_source/recovery`，自动恢复完成后的首个成功周期标为 `recovery=true`；socket write、venue ack 与 account effective 始终分开，超时请求另有 `timeout_phase` 和从 intent 起算的 `timeout_ms`。旧消费者可以忽略这些新 action/可选字段。`funding_available=false` 或 `execution_costs_unavailable>0` 时，`net_pnl_complete=false`，数值字段仍可用于已知部分但不能被解释为完整净收益。`pnl` 和 `fills_total` 只属于当前 maker session：已有仓位按启动 mark 自动接管并把 session PnL 归零，历史交易所盈亏仍看 `account.upnl`。live session PnL 使用 current-run ledger 的权威仓位；每个去重后的增量成交会原子更新现金流与统计仓位。live fill 还包含 `trade_id`、`order_id`、`trade_ts`、`origin`、`role`、成交时 mark/事件时间，以及可换算时的 `fee_quote` / `rebate_quote`。
 
 live 启动时会先清理旧 `sxmk-` 订单并同步账本，再认证 `order + position + trade + balance` account stream 和 Order Response Stream。绝对仓位不超过 `max_position` 时自动接管，输出 `ledger_sync` / `inventory_adopted`；超过上限（允许半个数量 tick 误差）则输出 `startup_rejected` 并退出。带稳定 `trade_id`/`order_id` 的 account-stream trade 与 REST backfill trade 走同一账本入口并按 `trade_id` exactly-once 去重；order 回调只确认订单归属与生命周期，不能单独记账。健康运行时订单、pending 命令、仓位和原始余额由本地 typed-event 投影维护，普通 maker cycle 不读取账户 REST；每 30 秒并发读取 open orders、positions、order history 和 trades 做完整审计，derived balance 默认按 30 秒 REST 快照刷新。WS `balance` 只包含钱包级 `free/total/locked/occupied`，不能冒充统一余额的 `equity/cross_available`；配置账户风险 floor 后，该事件会合并触发下一轮立即读取权威 REST balance，并复用同一 edge-triggered 告警状态机。account stream 断开、投影审计不一致或仓位不一致时立即冻结 placements、撤净 maker 订单，并在约 0.5s、1.5s、3.0s 结合 WS 与 REST 核对；恢复后从空 maker book 继续，3 秒仍不一致则 fail-safe 停机。
 
@@ -292,6 +300,50 @@ trace，不连接交易所。
 `--stop-loss` 不是告警阈值，也不是止盈/自动平仓：它在会话 PnL 触线后执行 fail-safe
 停机，撤销 maker 自有挂单并交接残余仓位。`--inventory-exit-pct/qty` 才是正常运行中的
 reduce-only 主动库存退出，而且只在 live 生效；两者不能互相替代。
+
+**账户硬熔断（`--stop-equity-below` / `--stop-margin-below`，阶段 5-b）**与上面的
+`--alert-equity-below` / `--alert-margin-below` 是两件事，配置名和 typed 结果都不同：
+
+| | 告警 (`alert_*`) | 硬熔断 (`stop_*`) |
+|---|---|---|
+| 作用 | 通知，边沿触发，运行不变 | fail-safe 停机（撤 maker 单 + 残余仓位交接） |
+| typed 结果 | `action:"alert"` | `action:"account_floor"` + `RuntimeStopReason::AccountFloor` |
+| 与 `--stop-loss` 的关系 | 无 | 同为停机，但 `stop_loss` 判"策略在亏"，account floor 判"账户还能不能交易" |
+| 默认 | 0（关） | 0（关） |
+
+判定时点与失败语义（都在**下单之前**）：
+
+- 硬熔断在 cycle 内拿到权威余额、账本同步完成之后、**任何报价/退出下单之前**判定。
+  破线那一轮因此一张单都不会发，只剩收尾撤单。
+- equity 先判、margin 后判；恰好等于阈值不算触发。
+- **余额读不出来或过期时 fail-closed 停机**（`event:"unevaluable"`，
+  `metric:"balance_unreadable"` / `"balance_stale"`）：武装了硬熔断却拿旧快照当"未破线"
+  等于没有熔断。过期线为 35s（一次 30s 刷新周期 + 一次 5s 重试），比告警侧复用缓存的
+  60s 上限更严。只有**该熔断真正读的字段**需要可解析——只武装 equity floor 时，
+  margin 字段坏掉不会牵连停机。
+- 武装任一硬熔断即视为"观察账户风险"，余额事件会照常唤醒刷新（不再只看 `alert_*`）。
+- 熔断未武装（默认 0）时以上全部短路：过期或坏字段都不会停机。
+
+两者都**不会自动平仓**——见下节。
+
+### 残余仓位交接（阶段 5-b）
+
+maker 在任何路径上都不自动平仓，所以每条退出路径都要给运维人员一个**唯一权威**的数字。
+
+交接**在撤单收尾之后**判定，并以场馆 REST 仓位为准：正在被撤的挂单可能在撤单过程中成交，
+而那时账户流已经断开，所以会话账本不能算最终答案。三种结果（JSON `action:"residual_position"`）：
+
+| `event` | 含义 | 输出 |
+|---|---|---|
+| `flat` | 场馆与账本一致确认空仓 | `ending position flat (venue-confirmed)` |
+| `handoff` | 场馆确认持仓，需人工平 | `⚠️ residual position handoff: ...` + critical webhook |
+| `unknown` | 场馆快照拿不到/读不出，或与账本不一致 | `🛑 residual position UNKNOWN ...` + critical webhook |
+
+**"无法确认空仓"不等于"空仓"**：REST 失败、场馆或账本数值非有限、两者差异超过数量容差
+（例如场馆报空但账本记 0.2），全部归为 `unknown` 并要求人工去场馆核对。JSON 里另有
+`venue_position` / `ledger_position` / `unknown_reason` / `needs_operator` 字段；
+`🔴 maker stopped` 生命周期消息和 critical webhook 同样带上仓位或 UNKNOWN 提示——
+离开终端的运维人员只能从 webhook 得知这件事。paper 模式没有场馆，模拟仓位即权威。
 
 `--alert-webhook-format` 按目标平台组织报文:
 

@@ -1,9 +1,28 @@
 use super::output::{
-    emit_live_fill, emit_reconciliation_snapshot_error, emit_reconciliation_state,
-    emit_stop_loss_triggered,
+    emit_account_floor_triggered, emit_live_fill, emit_reconciliation_snapshot_error,
+    emit_reconciliation_state, emit_stop_loss_triggered, AccountFloorStop,
 };
 use super::*;
 use standx_sdk::order_response::OrderResponse;
+
+/// Whether the session watches account-level risk at all: an alert threshold
+/// (`alert_equity_below` / `alert_margin_below`) or a stage 5-b hard floor
+/// (`stop_equity_below` / `stop_margin_below`).
+///
+/// Balance-event wakeups and refresh scheduling key off this rather than off
+/// the alert thresholds alone: an armed hard floor left on the 30-second cache
+/// cadence would be a solvency brake in name only.
+pub(super) fn account_risk_watch_enabled(
+    args: &MakerRunArgs,
+    alerts: &maker::AlertMonitor,
+) -> bool {
+    alerts.account_enabled() || account_floors_armed(args)
+}
+
+/// Whether either stage 5-b account hard floor is armed.
+pub(super) fn account_floors_armed(args: &MakerRunArgs) -> bool {
+    args.stop_equity_below > 0.0 || args.stop_margin_below > 0.0
+}
 
 mod cycle_flow;
 mod events;

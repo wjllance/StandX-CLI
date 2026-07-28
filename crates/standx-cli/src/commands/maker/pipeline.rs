@@ -19,6 +19,13 @@ const REST_POSITION_RECHECK_DELAY: Duration = Duration::from_secs(3);
 const BALANCE_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const BALANCE_MAX_STALE: Duration = Duration::from_secs(60);
 const BALANCE_REFRESH_RETRY: Duration = Duration::from_secs(5);
+/// Stage 5-b: how old the authoritative balance may be while an account hard
+/// floor is armed — one whole refresh interval (30s) plus one retry window
+/// (5s), i.e. a single missed refresh that then succeeded. Beyond that the
+/// snapshot is no longer evidence of solvency and the cycle fails closed.
+/// Deliberately tighter than [`BALANCE_MAX_STALE`], which only bounds how long
+/// a *cached* balance may keep feeding telemetry and alerts.
+pub(super) const BALANCE_FLOOR_MAX_AGE: Duration = Duration::from_secs(35);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OrderRequestKind {
@@ -132,6 +139,11 @@ pub(super) struct CycleRequest<'a> {
     pub(super) max_divergence_bps: f64,
     pub(super) inventory_exit_pct: f64,
     pub(super) inventory_exit_qty: f64,
+    /// Stage 5-b account hard floors (quote units, 0 = disarmed). Evaluated
+    /// inside the cycle, before any order work, so a breached balance cannot
+    /// add exposure in the very cycle that observed it.
+    pub(super) stop_equity_below: f64,
+    pub(super) stop_margin_below: f64,
     /// Latched supervisor wind-down request (SIGUSR1 from the A/B
     /// orchestrator): stop quoting and flatten via reduce-only exits.
     pub(super) wind_down: bool,
@@ -260,6 +272,11 @@ impl LiveAccountPollState {
 
     pub(super) fn balance_is_within_stale_limit(&self, now: Instant) -> bool {
         now.duration_since(self.balance_updated_at) <= BALANCE_MAX_STALE
+    }
+
+    /// How old the cached authoritative balance is.
+    pub(super) fn balance_age(&self, now: Instant) -> Duration {
+        now.duration_since(self.balance_updated_at)
     }
 
     pub(super) fn record_balance_refresh(&mut self, balance: Balance, now: Instant) {

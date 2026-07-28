@@ -76,6 +76,9 @@ pub enum RuntimeStopReason {
     MarketData(String),
     ConsecutiveCycleErrors(String),
     StopLoss(String),
+    /// An account-level hard floor (equity / available margin) was breached.
+    /// Distinct from `StopLoss`: solvency, not strategy performance.
+    AccountFloor(String),
     AccountingInvariant(String),
     CleanupFailure {
         target: RecoveryTarget,
@@ -92,6 +95,7 @@ impl RuntimeStopReason {
             | Self::MarketData(reason)
             | Self::ConsecutiveCycleErrors(reason)
             | Self::StopLoss(reason)
+            | Self::AccountFloor(reason)
             | Self::AccountingInvariant(reason) => reason.clone(),
             Self::CleanupFailure { reason, .. } => reason.clone(),
         }

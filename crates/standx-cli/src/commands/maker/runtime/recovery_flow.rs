@@ -1543,7 +1543,7 @@ impl MakerRuntime {
             }
             schedule_account_balance_refresh(
                 &mut self.loop_state.account_balance_refresh_requested,
-                self.loop_state.alerts.account_enabled(),
+                account_risk_watch_enabled(args, &self.loop_state.alerts),
                 &mut session.account_poll,
                 std::time::Instant::now(),
             );

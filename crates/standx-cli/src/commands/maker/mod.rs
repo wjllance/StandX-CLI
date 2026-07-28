@@ -45,7 +45,10 @@ use market_data::{
     AcquiredMarketHealth, ClassifiedMarketHealth, MarketDataDegradedError,
     MARKET_DATA_STANDBY_HEARTBEAT,
 };
-use model::{is_maker_order, position_for_symbol, MakerExit};
+use model::{
+    is_maker_order, position_for_symbol, residual_handoff, AccountFloorError, MakerExit,
+    ResidualHandoff,
+};
 pub use model::{FailSafeShutdown, FAIL_SAFE_EXIT_CODE};
 #[cfg(test)]
 use notify::webhook_body;
@@ -150,6 +153,8 @@ pub async fn handle_maker(
             alert_uptime,
             alert_equity_below,
             alert_margin_below,
+            stop_equity_below,
+            stop_margin_below,
             alert_webhook,
             alert_webhook_format,
             no_ws,
@@ -249,6 +254,8 @@ pub async fn handle_maker(
                     alert_uptime: choose(alert_uptime, file.alert_uptime, 0.0),
                     alert_equity_below: choose(alert_equity_below, file.alert_equity_below, 0.0),
                     alert_margin_below: choose(alert_margin_below, file.alert_margin_below, 0.0),
+                    stop_equity_below: choose(stop_equity_below, file.stop_equity_below, 0.0),
+                    stop_margin_below: choose(stop_margin_below, file.stop_margin_below, 0.0),
                     alert_webhook,
                     alert_webhook_format,
                     no_ws: choose(no_ws, file.no_ws, false),
@@ -335,6 +342,10 @@ struct MakerRunArgs {
     alert_uptime: f64,
     alert_equity_below: f64,
     alert_margin_below: f64,
+    /// Account-level hard floors (stage 5-b): breaching either stops the
+    /// session through `MakerExit::AccountFloor`. 0 = off, the default.
+    stop_equity_below: f64,
+    stop_margin_below: f64,
     alert_webhook: Option<String>,
     alert_webhook_format: AlertWebhookFormat,
     no_ws: bool,

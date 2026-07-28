@@ -184,7 +184,7 @@ impl MakerRuntime {
         };
         let alerts =
             AlertMonitor::new(args.alert_loss, args.alert_inventory_pct, args.alert_uptime)
-                .with_account_floors(args.alert_equity_below, args.alert_margin_below);
+                .with_account_alerts(args.alert_equity_below, args.alert_margin_below);
         let market_health_started = std::time::Instant::now();
         let mut runtime_state = MakerState::starting();
         runtime_state.handle(MakerEvent::StartupReady);

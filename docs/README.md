@@ -28,8 +28,13 @@ docs/
 ├── 17-ws-command-canary-quickstart.md # WS 生产 Canary 快速启动
 ├── 18-maker-strategy-roadmap.md # Maker 策略迭代路线与验收标准
 ├── 19-maker-stage2-live-ab-runbook.md # Stage 2 canary/A-B 操作手册
-├── 20-maker-short-term-roadmap-2026-07.md # Maker 短期迭代路线图快照（2026-07）
-└── 21-maker-stage3-live-ab-runbook.md # Stage 3 canary/A-B 操作手册
+├── 20-maker-short-term-roadmap-2026-07.md # Maker 短期迭代路线图快照（2026-07，已被 25 取代）
+├── 21-maker-stage3-live-ab-runbook.md # Stage 3 canary/A-B 操作手册
+├── 22-maker-stage3v1-guard-design.md # 阶段 3 v1 组合候选设计（非线性 skew + 防御门）
+├── 23-maker-stage3v1-live-ab-runbook.md # Stage 3 v1 canary/A-B 操作手册
+├── 24-maker-guard-spinoff-design.md # 阶段 3-guard 独立立项设计与判据
+├── 25-maker-short-term-roadmap-2026-07-27.md # Maker 短期迭代路线图快照（2026-07-27，当前）
+└── 26-maker-stage5b-design.md # 阶段 5-b 安全轨二级设计与实现记录
 ```
 
 ---
@@ -57,8 +62,13 @@ docs/
 | [17-ws-command-canary-quickstart.md](17-ws-command-canary-quickstart.md) | WS 生产 Canary 配置、执行与成功判据 | 操作手册 |
 | [18-maker-strategy-roadmap.md](18-maker-strategy-roadmap.md) | Maker 策略分阶段目标、量化验收标准与晋级门槛 | 开发参考 |
 | [19-maker-stage2-live-ab-runbook.md](19-maker-stage2-live-ab-runbook.md) | Stage 2 小额 canary、应急处置与 2 小时 A/B | 操作手册 |
-| [20-maker-short-term-roadmap-2026-07.md](20-maker-short-term-roadmap-2026-07.md) | Maker 短期迭代路线图快照（主线阶段 3 A/B） | 开发参考 |
+| [20-maker-short-term-roadmap-2026-07.md](20-maker-short-term-roadmap-2026-07.md) | Maker 短期迭代路线图快照（主线阶段 3 A/B，已失效并被 25 取代） | 历史记录 |
 | [21-maker-stage3-live-ab-runbook.md](21-maker-stage3-live-ab-runbook.md) | Stage 3 canary、应急处置与 4 小时 A/B | 操作手册 |
+| [22-maker-stage3v1-guard-design.md](22-maker-stage3v1-guard-design.md) | 阶段 3 v1 组合候选设计（非线性 price skew + 外部价防御门） | 开发参考 |
+| [23-maker-stage3v1-live-ab-runbook.md](23-maker-stage3v1-live-ab-runbook.md) | Stage 3 v1 canary、前置检查与 4 小时 A/B | 操作手册 |
+| [24-maker-guard-spinoff-design.md](24-maker-guard-spinoff-design.md) | 阶段 3-guard 独立立项设计与预注册判据（accepted） | 开发参考 |
+| [25-maker-short-term-roadmap-2026-07-27.md](25-maker-short-term-roadmap-2026-07-27.md) | Maker 短期迭代路线图快照（阶段 3 关闭后的当前快照） | 开发参考 |
+| [26-maker-stage5b-design.md](26-maker-stage5b-design.md) | 阶段 5-b（安全轨二级）退出政策 typed 分离、残余仓位交接与账户硬熔断 | 开发参考 |
 
 ---
 

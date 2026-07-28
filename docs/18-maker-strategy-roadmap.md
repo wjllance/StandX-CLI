@@ -80,7 +80,7 @@ chunk。在此边界内，实盘数据采集不再需要逐阶段的 paper 长�
 | 2 | alpha | 波动驱动 spread / refresh（v0 阶梯） | spread 控制器、时间窗波动 | 时间片 A/B 风险改善，收益/uptime 不越过退化线 |
 | 4 | 已终止（07-20） | 漂移感知报价 | 加宽 A/B 判负记录 | 恒宽 live 显著为负，条件化 credit 坍塌，回设计储备 |
 | 3 | accepted（07-25，v1 拆单 nonlinear_skew） | 库存控制器（非线性 price skew） | 加仓侧中心非线性前移（更陡但不停） | p95 尾部 -29%、mo30 4/4 对改善 ~25%、uptime/撤单无污染；PnL 未判项保留 |
-| 5-b | 安全轨二级 | 分级异常与退出政策（剩余范围） | trim/emergency typed 分离、flatten（默认关）、配置拆名 | 扩大规模的前置 |
+| 5-b | 安全轨二级（本轮范围 `implemented`，07-27） | 分级异常与退出政策（剩余范围） | trim/wind-down typed 分离、halt 退出语义定稿（D1）、残余仓位 handoff、flatten 保持默认关、equity/margin alert 与 hard floor 拆名 | 扩大规模的前置；立项与实现记录见 [26-maker-stage5b-design.md](26-maker-stage5b-design.md) |
 
 ## 统一验收口径
 
@@ -522,8 +522,14 @@ mark 动量驱动的非对称报价，比原 microprice 设计更薄：不需要
 二级（扩大规模的代码级前置）：
 
 - 正常 inventory trim 与 emergency risk exit 使用不同 typed policy/effect。
-- 明确 volatility halt 期间是否允许紧急退出；默认不得自动继承正常退出行为。该决定
-  须在阶段 3 v1（非线性控制器）前定稿；v0 size skew 不触碰退出语义，不受此阻塞。
+  （2026-07-27 落地为 `ExitKind{InventoryTrim, WindDown}` + 残余仓位 typed handoff：
+  emergency risk exit 作为"会下单的策略"在证据出现前不实现，停机路径只交接不平仓。）
+- 明确 volatility halt 期间是否允许紧急退出；默认不得自动继承正常退出行为。原定「须在
+  阶段 3 v1（非线性控制器）前定稿」的时点已过：阶段 3 v1（nonlinear_skew）于 2026-07-25
+  accepted 上线，但按
+  [仲裁记录](evidence/maker-stage3-arbitration-2026-07-20.md)其范围不触碰退出语义，
+  因此未被此项阻塞。定稿时点统一以本文阶段 3「范围」小节的口径为准——**扩大规模前**，
+  即本级（5-b）范围内定稿。
 - stop-loss 后残余仓位输出明确 handoff；自动 flatten 必须是默认关闭、单独授权的 live policy。
 - equity/margin 的 alert 与 hard floor 使用不同配置名和不同 typed outcome。
 - 背离恢复迟滞、熔断豁免等剩余硬化项按需纳入。
@@ -535,9 +541,17 @@ mark 动量驱动的非对称报价，比原 microprice 设计更薄：不需要
 - [ ] 短暂背离在配置宽限期内保留当前兼容行为，不盲目 cancel/re-place。
 - [ ] 背离超过持续时间或严重度阈值后，generation 失效、placement 冻结、queued action 清空并安排 maker cleanup。
 - [ ] cleanup 未确认空簿、required stream 不健康或仓位未与 ledger 对齐时绝不恢复报价。
-- [ ] 正常 trim、emergency exit、hard stop 和 residual-position handoff 在类型、日志和 JSON action 上可区分。
-- [ ] vol halt + 高库存、stop-loss + 残余仓位、退出部分成交、退出未确认、退出拒单和 cleanup residual 均有确定性测试。
-- [ ] emergency flatten 默认关闭；未显式授权时，测试和运行路径只能告警、清理 maker 单并交接残余仓位。
+- [x] 正常 trim、emergency exit、hard stop 和 residual-position handoff 在类型、日志和 JSON action 上可区分。
+      （2026-07-27：`ExitKind{InventoryTrim,WindDown}`、`RuntimeStopReason::AccountFloor`
+      与 `action:"residual_position"` 落地；emergency exit 作为策略**不存在**且经 D1 定稿，
+      见 [26-maker-stage5b-design.md](26-maker-stage5b-design.md)。）
+- [~] vol halt + 高库存、stop-loss + 残余仓位、退出部分成交、退出未确认、退出拒单和 cleanup residual 均有确定性测试。
+      （2026-07-27：halt+高库存两种 exit kind、行情非 Active、account floor、残余 handoff
+      谓词已新增确定性测试；退出部分成交/未确认/拒单与 cleanup residual 沿用既有测试，
+      未按 kind 维度参数化——见 docs/26「遗留」。）
+- [x] emergency flatten 默认关闭；未显式授权时，测试和运行路径只能告警、清理 maker 单并交接残余仓位。
+      （2026-07-27：flatten 仍不存在；残余仓位在每条退出路径上显式交接，
+      `auto_flatten:false` 写入 JSON 事件。）
 - [ ] live canary 使用一个 symbol、最小有效数量、一个 level 和明确的 emergency cancel 操作人。
 - [ ] canary 证据包含 create/cancel/exit request correlation、trade IDs、空 maker book、最终仓位和 webhook 送达结果。
 - [ ] 只有 release owner 审核证据后才能解锁；一次 canary 不授权连续 live maker 或其他退出 tuple。
