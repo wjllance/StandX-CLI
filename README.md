@@ -70,6 +70,11 @@ You have an AI Agent (Claude, Cursor, OpenClaw, AutoGPT, …). You want it to tr
 curl -sSL https://raw.githubusercontent.com/wjllance/standx-cli/main/install.sh | sh
 ```
 
+Optional environment variables:
+
+- `STANDX_VERSION` — install a specific tag instead of the latest release (e.g. `STANDX_VERSION=v1.2.0`).
+- `INSTALL_DIR` — install somewhere other than `/usr/local/bin`.
+
 #### Option 2: Homebrew (macOS)
 
 ```bash
