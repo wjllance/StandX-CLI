@@ -5,6 +5,7 @@
 
 use super::model::position_for_symbol;
 use super::notify::MakerNotifier;
+use super::output::ts_now_millis;
 use super::{FailSafeShutdown, LIVE_MAKER_ENV};
 use crate::cli::{AlertWebhookFormat, OutputFormat};
 use anyhow::Result;
@@ -98,7 +99,7 @@ impl CanaryEvidence<'_> {
         order_id: Option<&str>,
         response: Option<&OrderResponse>,
     ) {
-        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let timestamp = ts_now_millis();
         println!(
             "{}",
             self.value_at(&timestamp, stage, request_id, order_id, response, None)
@@ -106,7 +107,7 @@ impl CanaryEvidence<'_> {
     }
 
     fn emit_position(&self, stage: CanaryStage, order_id: Option<&str>, position: f64) {
-        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let timestamp = ts_now_millis();
         println!(
             "{}",
             self.value_at(&timestamp, stage, None, order_id, None, Some(position))

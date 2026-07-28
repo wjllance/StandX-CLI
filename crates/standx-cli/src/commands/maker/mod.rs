@@ -18,6 +18,7 @@ use std::time::Duration;
 
 mod canary;
 mod config;
+use config::MakerRunArgs;
 mod cycle;
 mod external_feed;
 mod feed;
@@ -130,162 +131,10 @@ pub async fn handle_maker(
         MakerCommands::Run {
             symbol,
             maker_config,
-            spread_bps,
-            band_bps,
-            size,
-            levels,
-            level_step_bps,
-            refresh_bps,
-            interval,
-            max_position,
-            skew_bps,
-            inventory_exit_pct,
-            inventory_exit_qty,
-            max_divergence_bps,
-            vol_pause_bps,
-            vol_window,
-            adaptive_spread,
-            size_skew,
-            stop_loss,
-            alert_loss,
-            alert_inventory_pct,
-            alert_position_change_pct,
-            alert_uptime,
-            alert_equity_below,
-            alert_margin_below,
-            stop_equity_below,
-            stop_margin_below,
-            alert_webhook,
-            alert_webhook_format,
-            no_ws,
-            live,
-            order_response_reconnect_attempts,
-            order_response_reconnect_backoff,
-            account_stream_reconnect_attempts,
-            account_stream_reconnect_backoff,
-            recovery_incidents_per_window,
-            recovery_window_secs,
-            controlled_disconnect_after,
+            flags,
         } => {
-            let file = config::load(maker_config.as_deref())?;
-            let selected_vol_window = vol_window.or(file.vol_window);
-            let selected_vol_window_secs = file.vol_window_secs;
-            if selected_vol_window.is_some() && selected_vol_window_secs.is_some() {
-                return Err(anyhow::anyhow!(
-                    "--vol-window conflicts with vol_window_secs in TOML; choose samples or seconds"
-                ));
-            }
-            let adaptive_spread = match file.adaptive_spread {
-                Some(config) => config.into_domain(adaptive_spread),
-                None if adaptive_spread.unwrap_or(false) => {
-                    return Err(anyhow::anyhow!(
-                        "--adaptive-spread requires an [adaptive_spread] TOML section"
-                    ));
-                }
-                None => maker::AdaptiveSpreadConfig::default(),
-            };
-            if adaptive_spread.enabled && selected_vol_window_secs.is_none() {
-                return Err(anyhow::anyhow!(
-                    "adaptive spread requires vol_window_secs in TOML"
-                ));
-            }
-            let size_skew = match file.size_skew {
-                Some(config) => config.into_domain(size_skew),
-                None if size_skew.is_some() => {
-                    return Err(anyhow::anyhow!(
-                        "--size-skew requires a [size_skew] TOML section"
-                    ));
-                }
-                None => maker::SizeSkewConfig::default(),
-            };
-            // Stage 3 v1 combined candidate: TOML-only switches (no CLI
-            // overrides) so frozen A/B configs stay the single source of truth.
-            let nonlinear_skew = file
-                .nonlinear_skew
-                .map(|config| config.into_domain())
-                .unwrap_or_default();
-            let external_guard_basis_half_life_secs = file
-                .external_guard
-                .as_ref()
-                .and_then(|config| config.basis_half_life_secs)
-                .unwrap_or(config::DEFAULT_GUARD_BASIS_HALF_LIFE_SECS);
-            let external_guard = file
-                .external_guard
-                .map(|config| config.into_domain())
-                .unwrap_or_default();
-            // Keep accepting the removed rolling-circuit knobs for one
-            // compatibility window so existing production commands/configs do
-            // not fail to parse. They deliberately do not enter MakerRunArgs.
-            let _legacy_recovery_circuit = (
-                recovery_incidents_per_window.or(file.recovery_incidents_per_window),
-                recovery_window_secs.or(file.recovery_window_secs),
-            );
-            runtime::run_maker(
-                symbol,
-                MakerRunArgs {
-                    spread_bps: choose(spread_bps, file.spread_bps, 5.0),
-                    band_bps: choose(band_bps, file.band_bps, 20.0),
-                    size: choose(size, file.size, 0.01),
-                    levels: choose(levels, file.levels, 1),
-                    level_step_bps: choose(level_step_bps, file.level_step_bps, 2.0),
-                    refresh_bps: choose(refresh_bps, file.refresh_bps, 3.0),
-                    interval: choose(interval, file.interval, 5),
-                    max_position: choose(max_position, file.max_position, 0.05),
-                    skew_bps: choose(skew_bps, file.skew_bps, 0.0),
-                    inventory_exit_pct: choose(inventory_exit_pct, file.inventory_exit_pct, 0.0),
-                    inventory_exit_qty: choose(inventory_exit_qty, file.inventory_exit_qty, 0.0),
-                    max_divergence_bps: choose(max_divergence_bps, file.max_divergence_bps, 25.0),
-                    vol_pause_bps: choose(vol_pause_bps, file.vol_pause_bps, 0.0),
-                    vol_window: selected_vol_window.unwrap_or(12),
-                    vol_window_secs: selected_vol_window_secs,
-                    adaptive_spread,
-                    size_skew,
-                    nonlinear_skew,
-                    external_guard,
-                    external_guard_basis_half_life_secs,
-                    stop_loss: choose(stop_loss, file.stop_loss, 0.0),
-                    alert_loss: choose(alert_loss, file.alert_loss, 0.0),
-                    alert_inventory_pct: choose(alert_inventory_pct, file.alert_inventory_pct, 0.0),
-                    alert_position_change_pct: choose(
-                        alert_position_change_pct,
-                        file.alert_position_change_pct,
-                        0.0,
-                    ),
-                    alert_uptime: choose(alert_uptime, file.alert_uptime, 0.0),
-                    alert_equity_below: choose(alert_equity_below, file.alert_equity_below, 0.0),
-                    alert_margin_below: choose(alert_margin_below, file.alert_margin_below, 0.0),
-                    stop_equity_below: choose(stop_equity_below, file.stop_equity_below, 0.0),
-                    stop_margin_below: choose(stop_margin_below, file.stop_margin_below, 0.0),
-                    alert_webhook,
-                    alert_webhook_format,
-                    no_ws: choose(no_ws, file.no_ws, false),
-                    live,
-                    order_response_reconnect_attempts: choose(
-                        order_response_reconnect_attempts,
-                        file.order_response_reconnect_attempts,
-                        3,
-                    ),
-                    order_response_reconnect_backoff: choose(
-                        order_response_reconnect_backoff,
-                        file.order_response_reconnect_backoff,
-                        2,
-                    ),
-                    account_stream_reconnect_attempts: choose(
-                        account_stream_reconnect_attempts,
-                        file.account_stream_reconnect_attempts,
-                        3,
-                    ),
-                    account_stream_reconnect_backoff: choose(
-                        account_stream_reconnect_backoff,
-                        file.account_stream_reconnect_backoff,
-                        2,
-                    ),
-                    controlled_disconnect_after,
-                    verbose,
-                },
-                output_format,
-            )
-            .await
+            let args = config::merge(flags, config::load(maker_config.as_deref())?, verbose)?;
+            runtime::run_maker(symbol, args, output_format).await
         }
         MakerCommands::WsCommandCanary {
             symbol,
@@ -308,54 +157,6 @@ pub async fn handle_maker(
         }
         MakerCommands::Replay { trace } => replay::run(&trace, output_format),
     }
-}
-
-fn choose<T: Copy>(cli: Option<T>, file: Option<T>, default: T) -> T {
-    cli.or(file).unwrap_or(default)
-}
-
-struct MakerRunArgs {
-    spread_bps: f64,
-    band_bps: f64,
-    size: f64,
-    levels: u32,
-    level_step_bps: f64,
-    refresh_bps: f64,
-    interval: u64,
-    max_position: f64,
-    skew_bps: f64,
-    inventory_exit_pct: f64,
-    inventory_exit_qty: f64,
-    max_divergence_bps: f64,
-    vol_pause_bps: f64,
-    vol_window: u32,
-    vol_window_secs: Option<u64>,
-    adaptive_spread: maker::AdaptiveSpreadConfig,
-    size_skew: maker::SizeSkewConfig,
-    nonlinear_skew: maker::NonlinearSkewConfig,
-    external_guard: maker::GuardConfig,
-    external_guard_basis_half_life_secs: u64,
-    stop_loss: f64,
-    alert_loss: f64,
-    alert_inventory_pct: f64,
-    alert_position_change_pct: f64,
-    alert_uptime: f64,
-    alert_equity_below: f64,
-    alert_margin_below: f64,
-    /// Account-level hard floors (stage 5-b): breaching either stops the
-    /// session through `MakerExit::AccountFloor`. 0 = off, the default.
-    stop_equity_below: f64,
-    stop_margin_below: f64,
-    alert_webhook: Option<String>,
-    alert_webhook_format: AlertWebhookFormat,
-    no_ws: bool,
-    live: bool,
-    order_response_reconnect_attempts: u32,
-    order_response_reconnect_backoff: u64,
-    account_stream_reconnect_attempts: u32,
-    account_stream_reconnect_backoff: u64,
-    controlled_disconnect_after: Option<u64>,
-    verbose: bool,
 }
 
 #[cfg(test)]
@@ -716,13 +517,6 @@ mod tests {
             OrderSide::Sell,
             0,
         ));
-    }
-
-    #[test]
-    fn cli_value_overrides_maker_file_then_default() {
-        assert_eq!(choose(Some(3_u32), Some(2), 1), 3);
-        assert_eq!(choose(None, Some(2_u32), 1), 2);
-        assert_eq!(choose(None::<u32>, None, 1), 1);
     }
 
     #[test]
