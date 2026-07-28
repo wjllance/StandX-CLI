@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-28
+
+Maker safety-track tier 2 (stage 5-b), complete net-PnL attribution, and the
+observability an unattended multi-day run needs. No default live behavior
+changes: every new capability is either telemetry or off by default.
+
+### Added
+- **Maker stage 5-b (safety track, tier 2): graded exit policy and residual handoff** — the code-level prerequisite for scaling up. See `docs/26-maker-stage5b-design.md`
+  - Typed exit policies: `ExitKind::{InventoryTrim, WindDown}` distinguishes a threshold-driven inventory trim from a supervisor wind-down all the way through plan → execution → telemetry, so evidence no longer has to infer an exit's origin. `inventory_exit_submitted` carries `exit_kind`
+  - Exit suppression is observable: `CyclePlan::exit_suppression` reports `volatility_halt` / `market_data_inactive` as a typed value, surfaced as the additive `cycle_summary` fields `exit_kind` / `exit_submitted` / `exit_suppressed`. A volatility halt suppresses **both** exit kinds and there is deliberately no emergency-exit-during-halt policy (design decision D1)
+  - Residual position handoff on every exit path, decided **after** cleanup against a venue REST snapshot (an order can fill while it is being cancelled, and the account stream is gone by then): `action:"residual_position"` with `event: flat | handoff | unknown`, plus `venue_position` / `ledger_position` / `unknown_reason` / `needs_operator`. A missing snapshot, a non-finite position, or a venue/ledger disagreement is reported as `unknown` (critical) — "cannot confirm flat" is never rendered as flat. Also a critical `kind:"residual_position"` webhook and the residual in the `🔴 maker stopped` lifecycle message. The maker never auto-flattens
+  - Account-level hard floors, default off: `--stop-equity-below` / `--stop-margin-below` (also TOML `stop_equity_below` / `stop_margin_below`) stop the session through the separate `RuntimeStopReason::AccountFloor` / `action:"account_floor"`, distinct from the strategy's `--stop-loss`. Evaluated inside the cycle **before any order work**, so a breached snapshot cannot add exposure in the cycle that observed it. Equity is checked before margin. With a floor armed, a balance older than 35s or an unparseable field the floor actually reads fails closed (`event:"unevaluable"`) instead of reading as "no breach", and an armed floor now counts as watching account risk for balance-refresh purposes; disarmed floors (the default) can never stop a run
+  - Flat is only believed after two venue snapshots separated by a settlement delay: one snapshot can read zero simply because a cancel-race fill has not propagated, and a false `flat` is the one outcome that notifies nobody
+  - Hard-floor balance freshness is timestamped after the audit/balance join completes, not before it: dating a refresh by when its request was issued under-reports the age, which is the direction that would let an armed floor accept a too-old snapshot
+  - `AlertMonitor::with_account_floors` renamed to `with_account_alerts` (with `equity_alert_below` / `margin_alert_below` fields): "floor" now means only the hard brake, never an alert threshold
+- **Funding cashflow in maker net-PnL attribution** — `StandXClient::get_funding_history` wraps the authenticated `GET /api/query_funding_history`, and the maker folds it into the performance ledger on the 30s REST audit, so `funding_quote` / `funding_available` / `net_pnl_complete` finally carry real values instead of always reporting an incomplete attribution
+  - Authoritative, not derived: the venue's signed `qty` is the cashflow (negative paid / positive received), matching the ledger's existing convention. The public `query_funding_rates` history returns empty on this venue, so a rate-based reconstruction was never an option
+  - Dedup is by row id, not by request cursor: `last_id` pages *backward* into history, so every audit re-reads the same recent page and `record_funding` (which only accumulates) would otherwise double-count
+  - Rows that exist but cannot be folded in — a settlement asset that is neither the quote nor its D-prefixed form, or an out-of-order arrival — are counted in the new `funding_unattributed` and clear `net_pnl_complete` rather than being silently dropped. An out-of-order row never stops the maker: funding is attribution, not position accounting
+  - A funding fetch failure or a page returned at the request limit sets `funding_coverage_gap`, which also clears `net_pnl_complete`. The funding request shares the account audit for concurrency but its failure is **not** propagated: that same audit backs position reconciliation and recovery, so letting a telemetry endpoint fail it would be a severity inversion
+  - Measured scale on HYPE (why it matters): hourly settlement, 91 rows over 137h summing to -0.006252 DUSD (-0.0011/24h) against a ~36h baseline net PnL of +0.006 — roughly 10–30% of the reading, in the same direction
+- **Unattended observability**
+  - Second OpenObserve alert rule, `standx_maker_critical_risk`: fires on any `severity='critical'` row (stop-loss, account floor, accounting invariant, cleanup residual orders, residual-position handoff). The pre-existing deadman only covers "the process died"; until now, "the process is alive and something went wrong" reached an operator solely through the maker's own webhook POST, which is not retried. `scripts/openobserve_alerts.py` provisions both
+  - New `action:"market_data_standby"` event carrying `fault_class` / `paused_secs` / `quoteable_streak` / `snapshots_required` / `divergence_bps` / `threshold_bps` / `maker_book_empty`. The same facts were previously only inside a risk notification's human `message`, so standby duration could not be counted without parsing a sentence
+- New frozen maker baseline configs: `examples/maker-guard-hype-{baseline,candidate}.toml` (nonlinear skew + external-price guard, the accepted stage 3 production baseline) and `examples/maker-stage3v1-hype-skewonly.toml`
+
+### Changed
+- Maker docker deployment forces env-only auth (`STANDX_JWT` / `STANDX_PRIVATE_KEY`); the `credentials.enc` mount is gone. Refresh a token by editing the env file and recreating the container
+- `version.json` and `crates/standx-cli/Cargo.toml` are realigned with the released version. Both still read `0.8.0` through the v1.0.0 release because the release pipeline takes its version from the git tag, so the shipped v1.0.0 binary reported `standx 0.8.0`
+
+### Fixed
+- `standx auth status` reported expired tokens incorrectly; `auth login` now validates its inputs and shows credential source and trading availability
+
+## [1.0.0] - 2026-07-23
+
+First release carrying the maker bot and the extracted SDK crate. Released from
+tag `v1.0.0` (commit `45311e7`) without a changelog section at the time; the
+entries below are that release's content, recorded retroactively.
+
 ### Added
 - **Maker bot: `standx maker run <SYMBOL>`** (alias `mk`) — two-sided quoting loop targeting SIP-5A community maker yield
   - Anti-flicker reconcile: quotes rest inside the eligibility band and only re-quote when mark drifts past `--refresh-bps`
@@ -28,23 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Error classification: post-only (ALO) would-cross rejections and cancels of already-gone orders are treated as normal events (logged, re-quoted next cycle) instead of counting toward the 3-consecutive-error fail-safe — only transient failures (network, 5xx) trip it
   - Bounded order-response recovery: on an authenticated response-stream disconnect, live quoting pauses, maker-owned orders are cancelled and verified, a fresh session is authenticated, and open orders/position/filled orders/session trades are reconciled before quoting resumes. `--order-response-reconnect-attempts` (default 3, 0 disables) and `--order-response-reconnect-backoff` bound recovery; cleanup, authentication, reconciliation, or budget failure remains fail-closed and emits structured `order_response_reconnect` events
   - Partial-fill tolerance: a partially-filled resting order keeps its identity (adopted by side + price, qty ≤ placed) and holds its remainder instead of being cancelled as an unknown order
-- **Funding cashflow in maker net-PnL attribution** — `StandXClient::get_funding_history` wraps the authenticated `GET /api/query_funding_history`, and the maker folds it into the performance ledger on the 30s REST audit, so `funding_quote` / `funding_available` / `net_pnl_complete` finally carry real values instead of always reporting an incomplete attribution
-  - Authoritative, not derived: the venue's signed `qty` is the cashflow (negative paid / positive received), matching the ledger's existing convention. The public `query_funding_rates` history returns empty on this venue, so a rate-based reconstruction was never an option
-  - Dedup is by row id, not by request cursor: `last_id` pages *backward* into history, so every audit re-reads the same recent page and `record_funding` (which only accumulates) would otherwise double-count
-  - Rows that exist but cannot be folded in — a settlement asset that is neither the quote nor its D-prefixed form, or an out-of-order arrival — are counted in the new `funding_unattributed` and clear `net_pnl_complete` rather than being silently dropped. An out-of-order row never stops the maker: funding is attribution, not position accounting
-  - A funding fetch failure or a page returned at the request limit sets `funding_coverage_gap`, which also clears `net_pnl_complete`. The funding request shares the account audit for concurrency but its failure is **not** propagated: that same audit backs position reconciliation and recovery, so letting a telemetry endpoint fail it would be a severity inversion
-  - Shutdown's residual-position handoff confirms flat with two venue snapshots separated by a settlement delay. One snapshot can read zero simply because a cancel-race fill has not propagated, and a false `flat` is the one outcome that notifies nobody
-  - Hard-floor balance freshness is timestamped after the audit/balance join completes, not before it: dating a refresh by when the request was issued under-reports the age, which is the direction that lets an armed floor accept a too-old snapshot
-  - Measured scale on HYPE (why it matters): hourly settlement, 91 rows over 137h summing to -0.006252 DUSD (-0.0011/24h) against a ~36h baseline net PnL of +0.006 — roughly 10–30% of the reading, in the same direction
 - `TimeInForce::Alo` (post-only / add-liquidity-only), matching the backend enum; `standx order create --tif ALO` now supported
 - Block trade commands: `standx block list` / `standx block watch`
-- **Maker stage 5-b (safety track, tier 2): graded exit policy and residual handoff** — the code-level prerequisite for scaling up. No default live behavior changes; everything new is either telemetry or off by default. See `docs/26-maker-stage5b-design.md`
-  - Typed exit policies: `ExitKind::{InventoryTrim, WindDown}` distinguishes a threshold-driven inventory trim from a supervisor wind-down all the way through plan → execution → telemetry, so evidence no longer has to infer an exit's origin. `inventory_exit_submitted` carries `exit_kind`
-  - Exit suppression is observable: `CyclePlan::exit_suppression` reports `volatility_halt` / `market_data_inactive` as a typed value, surfaced as the additive `cycle_summary` fields `exit_kind` / `exit_submitted` / `exit_suppressed`. A volatility halt suppresses **both** exit kinds and there is deliberately no emergency-exit-during-halt policy (design decision D1)
-  - Residual position handoff on every exit path, decided **after** cleanup against a venue REST snapshot (an order can fill while it is being cancelled, and the account stream is gone by then): `action:"residual_position"` with `event: flat | handoff | unknown`, plus `venue_position` / `ledger_position` / `unknown_reason` / `needs_operator`. A missing snapshot, a non-finite position, or a venue/ledger disagreement is reported as `unknown` (critical) — "cannot confirm flat" is never rendered as flat. Also a critical `kind:"residual_position"` webhook and the residual in the `🔴 maker stopped` lifecycle message. The maker never auto-flattens
-  - Account-level hard floors, default off: `--stop-equity-below` / `--stop-margin-below` (also TOML `stop_equity_below` / `stop_margin_below`) stop the session through the separate `RuntimeStopReason::AccountFloor` / `action:"account_floor"`, distinct from the strategy's `--stop-loss`. Evaluated inside the cycle **before any order work**, so a breached snapshot cannot add exposure in the cycle that observed it. Equity is checked before margin. With a floor armed, a balance older than 35s or an unparseable field the floor actually reads fails closed (`event:"unevaluable"`) instead of reading as "no breach", and an armed floor now counts as watching account risk for balance-refresh purposes; disarmed floors (the default) can never stop a run
-  - `AlertMonitor::with_account_floors` renamed to `with_account_alerts` (with `equity_alert_below` / `margin_alert_below` fields): "floor" now means only the hard brake, never an alert threshold
-
 ### Changed
 - **Workspace split: `standx-sdk` extracted as an independent crate**
   - `crates/standx-sdk` (v0.1.0): REST client, WebSocket streams, models, auth/signing, errors — reusable by any Rust agent/bot; zero presentation dependencies by default (table rendering behind the optional `tabled` feature)

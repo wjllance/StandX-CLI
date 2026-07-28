@@ -8,8 +8,14 @@
 
 | 文件 | 位置 | 更新内容 | 示例 |
 |------|------|----------|------|
-| `Cargo.toml` | 项目根目录 | `version = "x.y.z"` | `version = "0.6.0"` |
-| `version.json` | 项目根目录 | `{"version": "x.y.z"}` | `{"version": "0.6.0"}` |
+| `crates/standx-cli/Cargo.toml` | workspace 成员 | `version = "x.y.z"` | `version = "1.1.0"` |
+| `version.json` | 项目根目录 | `{"version": "x.y.z"}` | `{"version": "1.1.0"}` |
+
+> **注意（2026-07-28 补）**：根 `Cargo.toml` 自 workspace 拆分后不再带 version，
+> 二进制版本来自 `crates/standx-cli/Cargo.toml`。而 **release 流水线的版本号取自 git
+> tag，不读这两个文件**——v1.0.0 就是在两者仍为 `0.8.0` 的情况下发布的，导致发出去的
+> 二进制自报 `standx 0.8.0`。所以打 tag 前必须先对齐这两个文件，`standx --version`
+> 才不会说谎。
 
 ### 文档文件 (必须更新)
 
@@ -140,5 +146,5 @@ cargo build --release
 
 ---
 
-*最后更新: 2026-03-01*  
-*版本: v0.6.0*
+*最后更新: 2026-07-28*  
+*版本: v1.1.0*
