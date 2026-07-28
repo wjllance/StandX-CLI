@@ -1,5 +1,66 @@
-use standx_sdk::account_stream::OrderUpdate;
+use standx_sdk::account_stream::{AccountStreamHealth, OrderUpdate};
 use standx_sdk::models::{Order, OrderSide, OrderStatus, Position};
+use standx_sdk::order_response::OrderResponseHealth;
+
+/// The health record of one required live stream.
+///
+/// Both SDK health types expose the same pair of accessors, and every caller
+/// asks the same two questions of them: "is this stream still usable?" and
+/// "if not, what do I tell the operator?". Answering those once here keeps the
+/// fallback wording from drifting between the cycle guard and the two recovery
+/// phases.
+pub trait StreamHealth {
+    /// Operator-facing name of the stream, used in fallback detail strings.
+    const LABEL: &'static str;
+
+    fn is_healthy(&self) -> bool;
+
+    fn failure_reason(&self) -> Option<String>;
+
+    /// Why the stream is unusable. A health record that went unhealthy without
+    /// recording a reason still has to produce a detail — silence must never
+    /// read as "nothing is wrong".
+    fn failure_detail(&self) -> String {
+        self.failure_reason().unwrap_or_else(|| {
+            format!("{} became unhealthy without a recorded reason", Self::LABEL)
+        })
+    }
+}
+
+impl StreamHealth for AccountStreamHealth {
+    const LABEL: &'static str = "account stream";
+
+    fn is_healthy(&self) -> bool {
+        AccountStreamHealth::is_healthy(self)
+    }
+
+    fn failure_reason(&self) -> Option<String> {
+        AccountStreamHealth::failure_reason(self)
+    }
+}
+
+impl StreamHealth for OrderResponseHealth {
+    const LABEL: &'static str = "order-response stream";
+
+    fn is_healthy(&self) -> bool {
+        OrderResponseHealth::is_healthy(self)
+    }
+
+    fn failure_reason(&self) -> Option<String> {
+        OrderResponseHealth::failure_reason(self)
+    }
+}
+
+/// Why a required live stream cannot be used right now, or `None` when it is
+/// healthy. A missing health record fails closed: an absent observation is not
+/// evidence of health.
+pub fn unhealthy_stream<H: StreamHealth>(health: Option<&H>) -> Option<String> {
+    match health {
+        Some(health) if health.is_healthy() => None,
+        Some(health) => Some(health.failure_detail()),
+        None => Some(format!("{} health state is unavailable", H::LABEL)),
+    }
+}
 
 /// Process exit code emitted when the maker performs an *intentional*
 /// fail-safe shutdown: order-response or market-data recovery failed, three

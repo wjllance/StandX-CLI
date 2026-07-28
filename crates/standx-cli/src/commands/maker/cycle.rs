@@ -1,7 +1,7 @@
 use super::ledger::{adopt_order, apply_funding_history, apply_rest_trade};
 #[cfg(test)]
 use super::ledger::{apply_account_trade, apply_order_update, maker_trade_fill};
-use super::model::{position_for_symbol, rest_order_observation};
+use super::model::{position_for_symbol, rest_order_observation, unhealthy_stream};
 use super::output::{
     emit_cycle_skip, emit_guard_transition, emit_maker_cycle, log_maker_event, CycleOutput,
     ExitStatus, MakerLogEvent,
@@ -120,41 +120,17 @@ fn collect_current_run_fills(
     Ok(exit_fill_observed)
 }
 
-fn unhealthy_order_response(health: Option<&OrderResponseHealth>) -> Option<String> {
-    match health {
-        Some(health) if health.is_healthy() => None,
-        Some(health) => Some(health.failure_reason().unwrap_or_else(|| {
-            "order-response stream became unhealthy without a recorded reason".to_string()
-        })),
-        None => Some("order-response health state is unavailable".to_string()),
-    }
-}
-
-fn unhealthy_account_stream(health: Option<&AccountStreamHealth>) -> Option<String> {
-    match health {
-        Some(health) if health.is_healthy() => None,
-        Some(health) => Some(health.failure_reason().unwrap_or_else(|| {
-            "account stream became unhealthy without a recorded reason".to_string()
-        })),
-        None => Some("account stream health state is unavailable".to_string()),
-    }
-}
-
 fn ensure_live_streams_healthy(
     account_health: Option<&AccountStreamHealth>,
     order_health: Option<&OrderResponseHealth>,
 ) -> Result<()> {
-    if let Some(reason) = unhealthy_account_stream(account_health) {
-        return Err(anyhow::anyhow!(
+    let unusable = unhealthy_stream(account_health).or_else(|| unhealthy_stream(order_health));
+    match unusable {
+        Some(reason) => Err(anyhow::anyhow!(
             "{reason}; refusing further live order actions"
-        ));
+        )),
+        None => Ok(()),
     }
-    if let Some(reason) = unhealthy_order_response(order_health) {
-        return Err(anyhow::anyhow!(
-            "{reason}; refusing further live order actions"
-        ));
-    }
-    Ok(())
 }
 
 fn apply_request_submission(
@@ -293,7 +269,7 @@ pub(super) async fn maker_cycle(
         mut order_latency,
         latency_started,
     } = state;
-    use maker::{format_decimals, paper_quote_filled, Action, CycleInput, MarketSnapshot};
+    use maker::{format_decimals, quote_crosses_touch, Action, CycleInput, MarketSnapshot};
 
     // 0. Run all market-only guards before any account/order I/O. The pure
     // planner owns breaker observation and data-consistency policy; this
@@ -544,7 +520,7 @@ pub(super) async fn maker_cycle(
         // reconcile below then re-quotes the vacated level.
         let mut i = 0;
         while market_data_mode == maker::MarketDataMode::Active && i < resting.len() {
-            if paper_quote_filled(resting[i].side, resting[i].price, best_bid, best_ask) {
+            if quote_crosses_touch(resting[i].side, resting[i].price, best_bid, best_ask) {
                 let q = resting.remove(i);
                 *sim_position += match q.side {
                     OrderSide::Buy => q.qty,

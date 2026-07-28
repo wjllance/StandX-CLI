@@ -68,12 +68,12 @@ async fn post_webhook(client: reqwest::Client, url: String, body: serde_json::Va
 /// genuine direction flips outside the neutral deadband and max-position
 /// crossings escalate to `critical` so they remain distinguishable from an
 /// ordinary threshold jump.
-fn risk_kind_descriptor(kind: PositionRiskKind) -> (&'static str, &'static str) {
+fn risk_kind_descriptor(kind: PositionRiskKind) -> (&'static str, RiskSeverity) {
     match kind {
-        PositionRiskKind::Jump => ("position_jump", "warning"),
-        PositionRiskKind::DirectionFlip => ("direction_flip", "critical"),
-        PositionRiskKind::MaxPositionCrossed => ("max_position_crossed", "critical"),
-        PositionRiskKind::InventoryExitCrossed => ("inventory_exit_crossed", "warning"),
+        PositionRiskKind::Jump => ("position_jump", RiskSeverity::Warning),
+        PositionRiskKind::DirectionFlip => ("direction_flip", RiskSeverity::Critical),
+        PositionRiskKind::MaxPositionCrossed => ("max_position_crossed", RiskSeverity::Critical),
+        PositionRiskKind::InventoryExitCrossed => ("inventory_exit_crossed", RiskSeverity::Warning),
     }
 }
 
@@ -143,7 +143,7 @@ impl MakerNotifier {
             "cycle": notice.cycle,
             "action": "risk_notification",
             "kind": notice.kind,
-            "severity": notice.severity,
+            "severity": notice.severity.as_str(),
             "event": notice.event,
             "message": notice.message,
             "position_before": notice.position_before,
@@ -207,18 +207,17 @@ impl MakerNotifier {
             "position changed {before:+.8} → {after:+.8} (delta {delta:+.8}, {attribution})"
         );
         self.risk(
-            RiskNotice {
-                kind,
+            RiskNotice::with_severity(
                 severity,
-                event: "detected",
-                message: &message,
-                symbol: change.symbol,
-                cycle: change.cycle,
-                position_before: Some(before),
-                position_after: Some(after),
-                expected: Some(change.expected),
-                observed: Some(change.observed),
-            },
+                kind,
+                "detected",
+                &message,
+                change.symbol,
+                change.cycle,
+            )
+            .position_change(before, after)
+            .expected(change.expected)
+            .observed(change.observed),
             false,
         )
         .await;
@@ -293,9 +292,48 @@ pub(super) fn token_expiry_level(
     }
 }
 
+/// How urgent a [`RiskNotice`] is.
+///
+/// These are the `severity` values of the `risk_notification` JSON contract and
+/// of the `[severity/kind]` prefix operators grep for, so the strings are fixed
+/// even though the type is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RiskSeverity {
+    /// The session stopped, or is in a state only a human can resolve.
+    Critical,
+    /// Degraded but still self-recovering — quoting frozen, threshold tripped.
+    Warning,
+    /// A previously reported condition cleared.
+    Resolved,
+}
+
+impl RiskSeverity {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Critical => "critical",
+            Self::Warning => "warning",
+            Self::Resolved => "resolved",
+        }
+    }
+}
+
+impl std::fmt::Display for RiskSeverity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One operator-facing risk notification.
+///
+/// The five identity fields (severity, kind, event, message, symbol, cycle) are
+/// always present; the four position fields are the optional evidence a given
+/// notice happens to have. Build one through [`RiskNotice::critical`],
+/// [`RiskNotice::warning`] or [`RiskNotice::resolved`] and attach only the
+/// evidence that applies — a notice with no position evidence should not have
+/// to name four fields to say so.
 pub(super) struct RiskNotice<'a> {
     pub(super) kind: &'a str,
-    pub(super) severity: &'a str,
+    pub(super) severity: RiskSeverity,
     pub(super) event: &'a str,
     pub(super) message: &'a str,
     pub(super) symbol: &'a str,
@@ -304,6 +342,94 @@ pub(super) struct RiskNotice<'a> {
     pub(super) position_after: Option<f64>,
     pub(super) expected: Option<f64>,
     pub(super) observed: Option<f64>,
+}
+
+impl<'a> RiskNotice<'a> {
+    /// For the few notices whose severity depends on which band a runtime
+    /// measurement landed in (token expiry, the volatility breaker). Everything
+    /// else states its severity by picking a constructor.
+    pub(super) fn with_severity(
+        severity: RiskSeverity,
+        kind: &'a str,
+        event: &'a str,
+        message: &'a str,
+        symbol: &'a str,
+        cycle: u64,
+    ) -> Self {
+        Self {
+            kind,
+            severity,
+            event,
+            message,
+            symbol,
+            cycle,
+            position_before: None,
+            position_after: None,
+            expected: None,
+            observed: None,
+        }
+    }
+
+    pub(super) fn critical(
+        kind: &'a str,
+        event: &'a str,
+        message: &'a str,
+        symbol: &'a str,
+        cycle: u64,
+    ) -> Self {
+        Self::with_severity(RiskSeverity::Critical, kind, event, message, symbol, cycle)
+    }
+
+    pub(super) fn warning(
+        kind: &'a str,
+        event: &'a str,
+        message: &'a str,
+        symbol: &'a str,
+        cycle: u64,
+    ) -> Self {
+        Self::with_severity(RiskSeverity::Warning, kind, event, message, symbol, cycle)
+    }
+
+    pub(super) fn resolved(
+        kind: &'a str,
+        event: &'a str,
+        message: &'a str,
+        symbol: &'a str,
+        cycle: u64,
+    ) -> Self {
+        Self::with_severity(RiskSeverity::Resolved, kind, event, message, symbol, cycle)
+    }
+
+    // The three evidence setters take `impl Into<Option<f64>>` so a caller with
+    // a known value passes `x` and one holding a reading that may be absent
+    // passes the `Option` straight through, without either having to restate
+    // which case it is in.
+
+    /// The position the maker's own ledger says it should hold.
+    pub(super) fn expected(mut self, expected: impl Into<Option<f64>>) -> Self {
+        self.expected = expected.into();
+        self
+    }
+
+    /// The position actually observed at the venue, when one was read.
+    pub(super) fn observed(mut self, observed: impl Into<Option<f64>>) -> Self {
+        self.observed = observed.into();
+        self
+    }
+
+    /// The position after the reported change, when it is known.
+    pub(super) fn position_after(mut self, position_after: impl Into<Option<f64>>) -> Self {
+        self.position_after = position_after.into();
+        self
+    }
+
+    /// A before/after pair. Only these two produce `position_delta` in the
+    /// JSON payload, so they are set together.
+    pub(super) fn position_change(mut self, before: f64, after: f64) -> Self {
+        self.position_before = Some(before);
+        self.position_after = Some(after);
+        self
+    }
 }
 
 pub(super) struct RequestTimeoutNotice<'a> {
@@ -371,21 +497,21 @@ mod tests {
         // Ordinary jump keeps its historical name and warning severity.
         assert_eq!(
             risk_kind_descriptor(PositionRiskKind::Jump),
-            ("position_jump", "warning")
+            ("position_jump", RiskSeverity::Warning)
         );
         // A reversal and a max-position breach must be distinguishable and
         // escalated so they are not lost among routine jumps.
         assert_eq!(
             risk_kind_descriptor(PositionRiskKind::DirectionFlip),
-            ("direction_flip", "critical")
+            ("direction_flip", RiskSeverity::Critical)
         );
         assert_eq!(
             risk_kind_descriptor(PositionRiskKind::MaxPositionCrossed),
-            ("max_position_crossed", "critical")
+            ("max_position_crossed", RiskSeverity::Critical)
         );
         assert_eq!(
             risk_kind_descriptor(PositionRiskKind::InventoryExitCrossed),
-            ("inventory_exit_crossed", "warning")
+            ("inventory_exit_crossed", RiskSeverity::Warning)
         );
     }
 

@@ -51,18 +51,7 @@ fn resting_quote() -> RestingQuote {
 }
 
 fn warning_notice(kind: &'static str) -> RiskNotice<'static> {
-    RiskNotice {
-        kind,
-        severity: "warning",
-        event: "disconnected_frozen",
-        message: "test freeze",
-        symbol: "BTC-USD",
-        cycle: 7,
-        position_before: None,
-        position_after: None,
-        expected: Some(0.0),
-        observed: None,
-    }
+    RiskNotice::warning(kind, "disconnected_frozen", "test freeze", "BTC-USD", 7).expected(0.0)
 }
 
 fn order_response_freeze_spec() -> FreezeSpec<'static> {
@@ -317,18 +306,15 @@ async fn resume_tail_restores_quoting_state_and_schedules_a_cycle() {
             continuity: OrderResponseContinuity::Preserved,
             clear_resting: true,
             recovered_note: None,
-            notice: RiskNotice {
-                kind: "position_reconciliation",
-                severity: "resolved",
-                event: "recovered",
-                message: "test resume",
-                symbol: "BTC-USD",
-                cycle: 7,
-                position_before: None,
-                position_after: None,
-                expected: Some(0.0),
-                observed: Some(0.0),
-            },
+            notice: RiskNotice::resolved(
+                "position_reconciliation",
+                "recovered",
+                "test resume",
+                "BTC-USD",
+                7,
+            )
+            .expected(0.0)
+            .observed(0.0),
         },
     )
     .await;

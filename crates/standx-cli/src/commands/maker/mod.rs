@@ -54,7 +54,7 @@ pub use model::{FailSafeShutdown, FAIL_SAFE_EXIT_CODE};
 use notify::webhook_body;
 use notify::{
     token_expiry_level, MakerNotifier, PositionChange, RequestTimeoutNotice, RiskNotice,
-    TokenExpiryLevel,
+    RiskSeverity, TokenExpiryLevel,
 };
 use pipeline::{
     CycleRequest, CycleState, LiveAccountPollState, OrderRequestDeadlines, TimedOutOrderRequest,

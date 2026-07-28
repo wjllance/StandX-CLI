@@ -179,18 +179,8 @@ pub(super) async fn shutdown_report(report: ShutdownReport<'_>) -> Result<()> {
         let message = format!("maker cleanup failed or left residual orders: {error}");
         notifier
             .risk(
-                RiskNotice {
-                    kind: "maker_cleanup",
-                    severity: "critical",
-                    event: "residual_orders",
-                    message: &message,
-                    symbol,
-                    cycle,
-                    position_before: None,
-                    position_after: None,
-                    expected: Some(ledger.expected_position),
-                    observed: None,
-                },
+                RiskNotice::critical("maker_cleanup", "residual_orders", &message, symbol, cycle)
+                    .expected(ledger.expected_position),
                 true,
             )
             .await;
@@ -211,18 +201,16 @@ pub(super) async fn shutdown_report(report: ShutdownReport<'_>) -> Result<()> {
         };
         notifier
             .risk(
-                RiskNotice {
-                    kind: "residual_position",
-                    severity: "critical",
-                    event: handoff.event(),
-                    message: &message,
+                RiskNotice::critical(
+                    "residual_position",
+                    handoff.event(),
+                    &message,
                     symbol,
                     cycle,
-                    position_before: None,
-                    position_after: venue_position,
-                    expected: Some(ledger.expected_position),
-                    observed: venue_position,
-                },
+                )
+                .position_after(venue_position)
+                .expected(ledger.expected_position)
+                .observed(venue_position),
                 true,
             )
             .await;
@@ -231,18 +219,8 @@ pub(super) async fn shutdown_report(report: ShutdownReport<'_>) -> Result<()> {
         let fail_safe_message = format!("{reason}{residual_note}");
         notifier
             .risk(
-                RiskNotice {
-                    kind: "fail_safe",
-                    severity: "critical",
-                    event: "stopped",
-                    message: &fail_safe_message,
-                    symbol,
-                    cycle,
-                    position_before: None,
-                    position_after: None,
-                    expected: Some(ledger.expected_position),
-                    observed: None,
-                },
+                RiskNotice::critical("fail_safe", "stopped", &fail_safe_message, symbol, cycle)
+                    .expected(ledger.expected_position),
                 true,
             )
             .await;

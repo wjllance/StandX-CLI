@@ -1,4 +1,5 @@
 use super::*;
+use crate::commands::maker::model::StreamHealth;
 
 pub(super) fn mark_request_timeout_stream_unhealthy(
     account_stream_health: &standx_sdk::account_stream::AccountStreamHealth,
@@ -317,18 +318,10 @@ pub(super) async fn accounting_invariant_exit(
     );
     notifier
         .risk(
-            RiskNotice {
-                kind: "accounting_invariant",
-                severity: "critical",
-                event: "mismatch",
-                message: &detail,
-                symbol,
-                cycle,
-                position_before: None,
-                position_after: Some(expected_position),
-                expected: Some(expected_position),
-                observed: Some(stats_position),
-            },
+            RiskNotice::critical("accounting_invariant", "mismatch", &detail, symbol, cycle)
+                .position_after(expected_position)
+                .expected(expected_position)
+                .observed(stats_position),
             true,
         )
         .await;
@@ -382,8 +375,10 @@ impl MakerRuntime {
                     if level > self.lifecycle.token_expiry_alerted {
                         self.lifecycle.token_expiry_alerted = level;
                         let (severity, event) = match level {
-                            TokenExpiryLevel::Critical => ("critical", "token_expiry_critical"),
-                            _ => ("warning", "token_expiry_warning"),
+                            TokenExpiryLevel::Critical => {
+                                (RiskSeverity::Critical, "token_expiry_critical")
+                            }
+                            _ => (RiskSeverity::Warning, "token_expiry_warning"),
                         };
                         let minutes = remaining / 60;
                         let message = format!(
@@ -392,18 +387,14 @@ impl MakerRuntime {
                         );
                         notifier
                             .risk(
-                                RiskNotice {
-                                    kind: "token_expiry",
+                                RiskNotice::with_severity(
                                     severity,
+                                    "token_expiry",
                                     event,
-                                    message: &message,
+                                    &message,
                                     symbol,
                                     cycle,
-                                    position_before: None,
-                                    position_after: None,
-                                    expected: None,
-                                    observed: None,
-                                },
+                                ),
                                 false,
                             )
                             .await;
@@ -449,18 +440,17 @@ impl MakerRuntime {
                         recovery_effect_stop: EffectFailureStop::MarketData,
                         cleanup_failure_prefix: "market data ".to_string(),
                         cleanup_failed_exit: MakerExit::MarketData,
-                        notice: FreezeNotice::Risk(RiskNotice {
-                            kind: "market_data",
-                            severity: "warning",
-                            event: "degraded_frozen",
-                            message: &frozen_message,
-                            symbol,
-                            cycle,
-                            position_before: None,
-                            position_after: Some(self.loop_state.ledger.expected_position),
-                            expected: Some(self.loop_state.ledger.expected_position),
-                            observed: None,
-                        }),
+                        notice: FreezeNotice::Risk(
+                            RiskNotice::warning(
+                                "market_data",
+                                "degraded_frozen",
+                                &frozen_message,
+                                symbol,
+                                cycle,
+                            )
+                            .position_after(self.loop_state.ledger.expected_position)
+                            .expected(self.loop_state.ledger.expected_position),
+                        ),
                         frozen_note: None,
                         abort_account_stream_handle: false,
                         continuity: OrderResponseContinuity::Preserved,
@@ -566,18 +556,9 @@ impl MakerRuntime {
                 };
                 notifier
                     .risk(
-                        RiskNotice {
-                            kind: "market_data",
-                            severity: "warning",
-                            event,
-                            message: &message,
-                            symbol,
-                            cycle,
-                            position_before: None,
-                            position_after: Some(self.loop_state.ledger.expected_position),
-                            expected: Some(self.loop_state.ledger.expected_position),
-                            observed: None,
-                        },
+                        RiskNotice::warning("market_data", event, &message, symbol, cycle)
+                            .position_after(self.loop_state.ledger.expected_position)
+                            .expected(self.loop_state.ledger.expected_position),
                         false,
                     )
                     .await;
@@ -645,18 +626,7 @@ impl MakerRuntime {
                     self.loop_state.next_cycle_is_recovery = true;
                     notifier
                         .risk(
-                            RiskNotice {
-                                kind: "market_data",
-                                severity: "resolved",
-                                event: "recovered",
-                                message: "market data recovered with consecutive quoteable snapshots and a verified empty maker book; quoting may resume",
-                                symbol,
-                                cycle,
-                                position_before: None,
-                                position_after: Some(observed),
-                                expected: Some(observed),
-                                observed: Some(observed),
-                            },
+                            RiskNotice::resolved("market_data", "recovered", "market data recovered with consecutive quoteable snapshots and a verified empty maker book; quoting may resume", symbol, cycle).position_after(observed).expected(observed).observed(observed),
                             false,
                         )
                         .await;
@@ -682,12 +652,7 @@ impl MakerRuntime {
         let exit = 'phase: {
             if let Some(session) = self.live_session.as_mut() {
                 if !session.account_stream_health.is_healthy() {
-                    let detail = session
-                        .account_stream_health
-                        .failure_reason()
-                        .unwrap_or_else(|| {
-                            "account stream became unhealthy without a recorded reason".to_string()
-                        });
+                    let detail = session.account_stream_health.failure_detail();
                     let message = format!(
                         "account stream unavailable; placements frozen and cleanup starting: {detail}"
                     );
@@ -704,18 +669,16 @@ impl MakerRuntime {
                     };
                     let notice = request_timeout.as_ref().map_or_else(
                         || {
-                            FreezeNotice::Risk(RiskNotice {
-                                kind: "account_stream",
-                                severity: "warning",
-                                event: "disconnected_frozen",
-                                message: &message,
-                                symbol,
-                                cycle,
-                                position_before: None,
-                                position_after: None,
-                                expected: Some(self.loop_state.ledger.expected_position),
-                                observed: None,
-                            })
+                            FreezeNotice::Risk(
+                                RiskNotice::warning(
+                                    "account_stream",
+                                    "disconnected_frozen",
+                                    &message,
+                                    symbol,
+                                    cycle,
+                                )
+                                .expected(self.loop_state.ledger.expected_position),
+                            )
                         },
                         |timeout| {
                             FreezeNotice::RequestTimeout(request_timeout_notice(
@@ -827,20 +790,14 @@ impl MakerRuntime {
                                 );
                                 notifier
                                     .risk(
-                                        RiskNotice {
-                                            kind: "account_stream",
-                                            severity: "warning",
-                                            event: "reconnect_retrying",
-                                            message: &retry_message,
+                                        RiskNotice::warning(
+                                            "account_stream",
+                                            "reconnect_retrying",
+                                            &retry_message,
                                             symbol,
                                             cycle,
-                                            position_before: None,
-                                            position_after: None,
-                                            expected: Some(
-                                                self.loop_state.ledger.expected_position,
-                                            ),
-                                            observed: None,
-                                        },
+                                        )
+                                        .expected(self.loop_state.ledger.expected_position),
                                         false,
                                     )
                                     .await;
@@ -1049,18 +1006,7 @@ impl MakerRuntime {
                             continuity: OrderResponseContinuity::Preserved,
                             clear_resting: false,
                             recovered_note: None,
-                            notice: RiskNotice {
-                                kind: "account_stream",
-                                severity: "resolved",
-                                event: "reconnected",
-                                message: "account stream reauthenticated; buffered events and REST trades reconciled against the venue position",
-                                symbol,
-                                cycle,
-                                position_before: None,
-                                position_after: None,
-                                expected: Some(self.loop_state.ledger.expected_position),
-                                observed: Some(observed),
-                            },
+                            notice: RiskNotice::resolved("account_stream", "reconnected", "account stream reauthenticated; buffered events and REST trades reconciled against the venue position", symbol, cycle).expected(self.loop_state.ledger.expected_position).observed(observed),
                         },
                     )
                     .await;
@@ -1086,13 +1032,7 @@ impl MakerRuntime {
         let exit = 'phase: {
             if let Some(session) = self.live_session.as_mut() {
                 if !session.order_response_health.is_healthy() {
-                    let detail = session
-                        .order_response_health
-                        .failure_reason()
-                        .unwrap_or_else(|| {
-                            "order-response stream became unhealthy without a recorded reason"
-                                .to_string()
-                        });
+                    let detail = session.order_response_health.failure_detail();
                     let controlled_fault = detail.starts_with("controlled fault injection");
                     // Mirror the account-stream path: the order-response stream was
                     // previously silent on the webhook across disconnect/reconnect.
@@ -1111,18 +1051,16 @@ impl MakerRuntime {
                     };
                     let notice = request_timeout.as_ref().map_or_else(
                         || {
-                            FreezeNotice::Risk(RiskNotice {
-                                kind: "order_response",
-                                severity: "warning",
-                                event: "disconnected_frozen",
-                                message: &disconnect_message,
-                                symbol,
-                                cycle,
-                                position_before: None,
-                                position_after: None,
-                                expected: Some(self.loop_state.ledger.expected_position),
-                                observed: None,
-                            })
+                            FreezeNotice::Risk(
+                                RiskNotice::warning(
+                                    "order_response",
+                                    "disconnected_frozen",
+                                    &disconnect_message,
+                                    symbol,
+                                    cycle,
+                                )
+                                .expected(self.loop_state.ledger.expected_position),
+                            )
                         },
                         |timeout| {
                             FreezeNotice::RequestTimeout(request_timeout_notice(
@@ -1237,20 +1175,14 @@ impl MakerRuntime {
                                         );
                                         notifier
                                             .risk(
-                                                RiskNotice {
-                                                    kind: "order_response",
-                                                    severity: "critical",
-                                                    event: "reconnect_failed",
-                                                    message: &reconciliation_message,
+                                                RiskNotice::critical(
+                                                    "order_response",
+                                                    "reconnect_failed",
+                                                    &reconciliation_message,
                                                     symbol,
                                                     cycle,
-                                                    position_before: None,
-                                                    position_after: None,
-                                                    expected: Some(
-                                                        self.loop_state.ledger.expected_position,
-                                                    ),
-                                                    observed: None,
-                                                },
+                                                )
+                                                .expected(self.loop_state.ledger.expected_position),
                                                 true,
                                             )
                                             .await;
@@ -1314,20 +1246,14 @@ impl MakerRuntime {
                                         );
                                         notifier
                                             .risk(
-                                                RiskNotice {
-                                                    kind: "order_response",
-                                                    severity: "warning",
-                                                    event: "reconnect_retrying",
-                                                    message: &retry_message,
+                                                RiskNotice::warning(
+                                                    "order_response",
+                                                    "reconnect_retrying",
+                                                    &retry_message,
                                                     symbol,
                                                     cycle,
-                                                    position_before: None,
-                                                    position_after: None,
-                                                    expected: Some(
-                                                        self.loop_state.ledger.expected_position,
-                                                    ),
-                                                    observed: None,
-                                                },
+                                                )
+                                                .expected(self.loop_state.ledger.expected_position),
                                                 false,
                                             )
                                             .await;
@@ -1351,20 +1277,14 @@ impl MakerRuntime {
                                     );
                                     notifier
                                         .risk(
-                                            RiskNotice {
-                                                kind: "order_response",
-                                                severity: "critical",
-                                                event: "reconnect_failed",
-                                                message: &reconnect_failed_message,
+                                            RiskNotice::critical(
+                                                "order_response",
+                                                "reconnect_failed",
+                                                &reconnect_failed_message,
                                                 symbol,
                                                 cycle,
-                                                position_before: None,
-                                                position_after: None,
-                                                expected: Some(
-                                                    self.loop_state.ledger.expected_position,
-                                                ),
-                                                observed: None,
-                                            },
+                                            )
+                                            .expected(self.loop_state.ledger.expected_position),
                                             true,
                                         )
                                         .await;
@@ -1427,18 +1347,7 @@ impl MakerRuntime {
                                 continuity: OrderResponseContinuity::Replaced,
                                 clear_resting: true,
                                 recovered_note: None,
-                                notice: RiskNotice {
-                                    kind: "order_response",
-                                    severity: "resolved",
-                                    event: "reconnected",
-                                    message: "order-response stream reconnected; maker book verified empty before quoting resumes",
-                                    symbol,
-                                    cycle,
-                                    position_before: None,
-                                    position_after: None,
-                                    expected: Some(self.loop_state.ledger.expected_position),
-                                    observed: Some(reconciled_position),
-                                },
+                                notice: RiskNotice::resolved("order_response", "reconnected", "order-response stream reconnected; maker book verified empty before quoting resumes", symbol, cycle).expected(self.loop_state.ledger.expected_position).observed(reconciled_position),
                             },
                         )
                         .await;
@@ -1450,18 +1359,14 @@ impl MakerRuntime {
                         format!("{detail}; {reconnect_note}; refusing further live orders");
                     notifier
                         .risk(
-                            RiskNotice {
-                                kind: "order_response",
-                                severity: "critical",
-                                event: "reconnect_unavailable",
-                                message: &refuse_message,
+                            RiskNotice::critical(
+                                "order_response",
+                                "reconnect_unavailable",
+                                &refuse_message,
                                 symbol,
                                 cycle,
-                                position_before: None,
-                                position_after: None,
-                                expected: Some(self.loop_state.ledger.expected_position),
-                                observed: None,
-                            },
+                            )
+                            .expected(self.loop_state.ledger.expected_position),
                             true,
                         )
                         .await;

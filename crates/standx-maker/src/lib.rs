@@ -426,16 +426,22 @@ pub(crate) fn skew_center_with(
     mark * (1.0 - shift_bps * inv_ratio.signum() / 1e4)
 }
 
-/// Paper-mode fill model: whether a resting quote would be filled by the
-/// current touch. A resting bid fills when offers reach down to it
-/// (`best_ask <= price`); a resting ask fills when bids reach up to it
-/// (`best_bid >= price`). Returns false when the relevant book side is absent.
-///
-/// This is a discrete-time "crossed → filled" proxy used only to simulate
-/// inventory in paper mode; a real venue matches on the trade stream.
 /// Whether a quote at `price` on `side` crosses the current touch: a buy at or
-/// above the best ask, or a sell at or below the best bid. This single event is
-/// both "a paper quote would fill" and "a resting quote would cross the book".
+/// above the best ask (`price >= best_ask`), or a sell at or below the best bid
+/// (`price <= best_bid`). Returns false when the relevant book side is absent.
+///
+/// This one predicate answers both questions the maker asks about the touch:
+///
+/// - *paper mode*: "would this resting quote have filled?" — a discrete-time
+///   "crossed → filled" proxy used only to simulate inventory. A real venue
+///   matches on the trade stream instead.
+/// - *live mode*: "does this resting quote cross the book?" — see
+///   [`resting_quotes_would_cross`], which drives the `WouldCross` cancel and
+///   the replan trigger.
+///
+/// The two must stay the same event: a paper fill the live path would have
+/// cancelled (or vice versa) would make paper and live inventory diverge for
+/// reasons that have nothing to do with the strategy.
 pub fn quote_crosses_touch(
     side: OrderSide,
     price: f64,
@@ -446,15 +452,6 @@ pub fn quote_crosses_touch(
         OrderSide::Buy => best_ask.is_some_and(|ask| price >= ask),
         OrderSide::Sell => best_bid.is_some_and(|bid| price <= bid),
     }
-}
-
-pub fn paper_quote_filled(
-    side: OrderSide,
-    price: f64,
-    best_bid: Option<f64>,
-    best_ask: Option<f64>,
-) -> bool {
-    quote_crosses_touch(side, price, best_bid, best_ask)
 }
 
 /// Running telemetry for a maker session: fills, mark-to-market PnL, spread
@@ -830,6 +827,48 @@ pub struct Alert {
     pub message: String,
 }
 
+/// Hysteresis: a fired loss alert clears once PnL has recovered past half the
+/// configured limit, so PnL hovering at the limit cannot flap the alert.
+const LOSS_ALERT_CLEAR_FRACTION: f64 = 0.5;
+/// Hysteresis: a fired inventory alert clears once |position| falls back below
+/// 90% of the alert threshold.
+const INVENTORY_ALERT_CLEAR_FRACTION: f64 = 0.9;
+/// Hysteresis: a fired equity/margin alert clears once the account recovers to
+/// 10% above the alert threshold.
+const ACCOUNT_ALERT_CLEAR_MULTIPLE: f64 = 1.1;
+
+/// One edge-triggered alert condition: it reports a transition only when the
+/// breach state actually changes, so a held breach does not re-emit every
+/// cycle.
+///
+/// The caller passes the two evaluated predicates rather than a threshold
+/// pair, because the alerts do not share a polarity or a boundary convention
+/// (PnL and inventory include the threshold value, uptime and the account
+/// alerts exclude it). Keeping each comparison at its call site keeps the
+/// boundary documented next to the threshold it belongs to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct EdgeTrigger {
+    on: bool,
+}
+
+impl EdgeTrigger {
+    /// `Some(true)` when the condition just started breaching, `Some(false)`
+    /// when it just recovered, `None` when the state is unchanged.
+    fn observe(&mut self, breaching: bool, recovered: bool) -> Option<bool> {
+        match (self.on, breaching, recovered) {
+            (false, true, _) => {
+                self.on = true;
+                Some(true)
+            }
+            (true, _, true) => {
+                self.on = false;
+                Some(false)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Threshold-based risk alerting over the running [`MakerStats`]. Each
 /// condition is edge-triggered — it emits once when it starts breaching and
 /// once when it recovers — so a held breach doesn't spam every cycle. Delivery
@@ -849,11 +888,11 @@ pub struct AlertMonitor {
     /// Alert when available cross margin drops below this (quote units).
     /// 0 = off.
     margin_alert_below: f64,
-    loss_on: bool,
-    inv_on: bool,
-    uptime_on: bool,
-    equity_on: bool,
-    margin_on: bool,
+    loss: EdgeTrigger,
+    inventory: EdgeTrigger,
+    uptime: EdgeTrigger,
+    equity: EdgeTrigger,
+    margin: EdgeTrigger,
 }
 
 impl AlertMonitor {
@@ -883,12 +922,17 @@ impl AlertMonitor {
         self
     }
 
-    /// Whether any threshold is configured.
-    pub fn enabled(&self) -> bool {
+    /// Whether any of the session-metric alerts evaluated by
+    /// [`AlertMonitor::evaluate`] (loss / inventory / uptime) is configured.
+    /// The account alerts are gated separately by
+    /// [`AlertMonitor::account_enabled`], because they need an account
+    /// snapshot the paper path does not have.
+    pub fn session_enabled(&self) -> bool {
         self.loss_limit > 0.0 || self.inventory_pct > 0.0 || self.uptime_floor > 0.0
     }
 
-    /// Whether an account equity or available-margin alert is configured.
+    /// Whether an account equity or available-margin alert is configured, i.e.
+    /// whether [`AlertMonitor::evaluate_account`] has anything to evaluate.
     pub fn account_enabled(&self) -> bool {
         self.equity_alert_below > 0.0 || self.margin_alert_below > 0.0
     }
@@ -905,72 +949,71 @@ impl AlertMonitor {
     ) -> Vec<Alert> {
         let mut out = Vec::new();
 
-        // Loss limit: fire at -loss_limit, clear back above -loss_limit/2.
+        // Loss limit: fire at -loss_limit (inclusive), clear back above half.
         if self.loss_limit > 0.0 {
             let pnl = stats.pnl(position, mark);
-            if !self.loss_on && pnl <= -self.loss_limit {
-                self.loss_on = true;
+            if let Some(firing) = self.loss.observe(
+                pnl <= -self.loss_limit,
+                pnl > -self.loss_limit * LOSS_ALERT_CLEAR_FRACTION,
+            ) {
                 out.push(Alert {
                     kind: "loss",
-                    firing: true,
-                    message: format!(
-                        "mark-to-market PnL {:+.2} breached loss limit -{:.2}",
-                        pnl, self.loss_limit
-                    ),
-                });
-            } else if self.loss_on && pnl > -self.loss_limit / 2.0 {
-                self.loss_on = false;
-                out.push(Alert {
-                    kind: "loss",
-                    firing: false,
-                    message: format!("PnL recovered to {:+.2}", pnl),
+                    firing,
+                    message: if firing {
+                        format!(
+                            "mark-to-market PnL {:+.2} breached loss limit -{:.2}",
+                            pnl, self.loss_limit
+                        )
+                    } else {
+                        format!("PnL recovered to {pnl:+.2}")
+                    },
                 });
             }
         }
 
-        // Inventory: fire at pct of max_position, clear below 0.9x that.
+        // Inventory: fire at pct of max_position (inclusive), clear below 0.9x.
         if self.inventory_pct > 0.0 && max_position > 0.0 {
             let threshold = max_position * self.inventory_pct / 100.0;
             let abs_pos = position.abs();
-            if !self.inv_on && abs_pos >= threshold {
-                self.inv_on = true;
+            if let Some(firing) = self.inventory.observe(
+                abs_pos >= threshold,
+                abs_pos < threshold * INVENTORY_ALERT_CLEAR_FRACTION,
+            ) {
                 out.push(Alert {
                     kind: "inventory",
-                    firing: true,
-                    message: format!(
-                        "position {:+.4} reached {:.0}% of max ({:.4})",
-                        position, self.inventory_pct, max_position
-                    ),
-                });
-            } else if self.inv_on && abs_pos < threshold * 0.9 {
-                self.inv_on = false;
-                out.push(Alert {
-                    kind: "inventory",
-                    firing: false,
-                    message: format!("position back to {:+.4}", position),
+                    firing,
+                    message: if firing {
+                        format!(
+                            "position {:+.4} reached {:.0}% of max ({:.4})",
+                            position, self.inventory_pct, max_position
+                        )
+                    } else {
+                        format!("position back to {position:+.4}")
+                    },
                 });
             }
         }
 
-        // Uptime: only after warmup; fire below floor, clear at/above it.
+        // Uptime: only after warmup. Deliberately has no hysteresis band —
+        // it fires below the floor and clears the moment it is back at it,
+        // because uptime is a slow-moving ratio that cannot flap per cycle.
         if self.uptime_floor > 0.0 && cycle >= Self::UPTIME_WARMUP_CYCLES {
             let uptime = stats.uptime_pct();
-            if !self.uptime_on && uptime < self.uptime_floor {
-                self.uptime_on = true;
+            if let Some(firing) = self
+                .uptime
+                .observe(uptime < self.uptime_floor, uptime >= self.uptime_floor)
+            {
                 out.push(Alert {
                     kind: "uptime",
-                    firing: true,
-                    message: format!(
-                        "two-sided uptime {:.0}% below floor {:.0}%",
-                        uptime, self.uptime_floor
-                    ),
-                });
-            } else if self.uptime_on && uptime >= self.uptime_floor {
-                self.uptime_on = false;
-                out.push(Alert {
-                    kind: "uptime",
-                    firing: false,
-                    message: format!("uptime recovered to {:.0}%", uptime),
+                    firing,
+                    message: if firing {
+                        format!(
+                            "two-sided uptime {:.0}% below floor {:.0}%",
+                            uptime, self.uptime_floor
+                        )
+                    } else {
+                        format!("uptime recovered to {uptime:.0}%")
+                    },
                 });
             }
         }
@@ -990,43 +1033,41 @@ impl AlertMonitor {
         let mut out = Vec::new();
 
         if self.equity_alert_below > 0.0 {
-            if !self.equity_on && equity < self.equity_alert_below {
-                self.equity_on = true;
+            if let Some(firing) = self.equity.observe(
+                equity < self.equity_alert_below,
+                equity >= self.equity_alert_below * ACCOUNT_ALERT_CLEAR_MULTIPLE,
+            ) {
                 out.push(Alert {
                     kind: "equity",
-                    firing: true,
-                    message: format!(
-                        "account equity {:.2} below alert threshold {:.2}",
-                        equity, self.equity_alert_below
-                    ),
-                });
-            } else if self.equity_on && equity >= self.equity_alert_below * 1.1 {
-                self.equity_on = false;
-                out.push(Alert {
-                    kind: "equity",
-                    firing: false,
-                    message: format!("account equity recovered to {:.2}", equity),
+                    firing,
+                    message: if firing {
+                        format!(
+                            "account equity {:.2} below alert threshold {:.2}",
+                            equity, self.equity_alert_below
+                        )
+                    } else {
+                        format!("account equity recovered to {equity:.2}")
+                    },
                 });
             }
         }
 
         if self.margin_alert_below > 0.0 {
-            if !self.margin_on && available < self.margin_alert_below {
-                self.margin_on = true;
+            if let Some(firing) = self.margin.observe(
+                available < self.margin_alert_below,
+                available >= self.margin_alert_below * ACCOUNT_ALERT_CLEAR_MULTIPLE,
+            ) {
                 out.push(Alert {
                     kind: "margin",
-                    firing: true,
-                    message: format!(
-                        "available margin {:.2} below alert threshold {:.2}",
-                        available, self.margin_alert_below
-                    ),
-                });
-            } else if self.margin_on && available >= self.margin_alert_below * 1.1 {
-                self.margin_on = false;
-                out.push(Alert {
-                    kind: "margin",
-                    firing: false,
-                    message: format!("available margin recovered to {:.2}", available),
+                    firing,
+                    message: if firing {
+                        format!(
+                            "available margin {:.2} below alert threshold {:.2}",
+                            available, self.margin_alert_below
+                        )
+                    } else {
+                        format!("available margin recovered to {available:.2}")
+                    },
                 });
             }
         }
@@ -1872,40 +1913,40 @@ mod tests {
     #[test]
     fn paper_fills_on_crossed_touch() {
         // Resting buy at 99.90: fills once offers reach down to it.
-        assert!(!paper_quote_filled(
+        assert!(!quote_crosses_touch(
             OrderSide::Buy,
             99.90,
             Some(99.80),
             Some(99.95)
         ));
-        assert!(paper_quote_filled(
+        assert!(quote_crosses_touch(
             OrderSide::Buy,
             99.90,
             Some(99.80),
             Some(99.90)
         ));
-        assert!(paper_quote_filled(
+        assert!(quote_crosses_touch(
             OrderSide::Buy,
             99.90,
             Some(99.80),
             Some(99.85)
         ));
         // Resting sell at 100.10: fills once bids reach up to it.
-        assert!(!paper_quote_filled(
+        assert!(!quote_crosses_touch(
             OrderSide::Sell,
             100.10,
             Some(100.05),
             Some(100.2)
         ));
-        assert!(paper_quote_filled(
+        assert!(quote_crosses_touch(
             OrderSide::Sell,
             100.10,
             Some(100.10),
             Some(100.2)
         ));
         // Absent book side never fills.
-        assert!(!paper_quote_filled(OrderSide::Buy, 99.90, None, None));
-        assert!(!paper_quote_filled(OrderSide::Sell, 100.10, None, None));
+        assert!(!quote_crosses_touch(OrderSide::Buy, 99.90, None, None));
+        assert!(!quote_crosses_touch(OrderSide::Sell, 100.10, None, None));
     }
 
     // 24. Stats: spread capture, mark-to-market PnL, uptime.
@@ -2878,7 +2919,7 @@ mod tests {
     #[test]
     fn alerts_disabled() {
         let mut m = AlertMonitor::new(0.0, 0.0, 0.0);
-        assert!(!m.enabled());
+        assert!(!m.session_enabled());
         let s = MakerStats::default();
         assert!(m.evaluate(&s, 5.0, 100.0, 0.05, 100).is_empty());
     }
