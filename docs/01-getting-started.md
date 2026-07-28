@@ -24,6 +24,7 @@ standx --version
 ```bash
 standx update --check   # 只看版本差异，不改任何东西
 standx update           # 下载、校验 sha256、原子替换当前二进制
+standx --yes update     # 跳过确认（脚本用；等价于 STANDX_AUTO_CONFIRM=true）
 ```
 
 Homebrew 装的用 `brew upgrade standx-cli`——`standx update` 会检测到并拒绝自替换，

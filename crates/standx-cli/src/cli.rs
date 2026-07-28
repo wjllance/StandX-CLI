@@ -204,14 +204,15 @@ pub enum Commands {
     /// sha256, and atomically replaces the running executable. Refuses to touch
     /// a Homebrew-managed install (use `brew upgrade standx-cli`) and never
     /// elevates privileges.
+    ///
+    /// Confirmation is skipped by the global `--yes` (or
+    /// `STANDX_AUTO_CONFIRM=true` — that global flag accepts only `true`/`false`,
+    /// not `1`). There is deliberately no per-command copy of that flag.
     #[command(visible_alias = "self-update")]
     Update {
         /// Only report current vs latest; change nothing
         #[arg(long)]
         check: bool,
-        /// Skip the confirmation prompt (required when stdin is not a TTY)
-        #[arg(short = 'y', long = "yes")]
-        assume_yes: bool,
         /// Consider pre-release versions as update candidates
         #[arg(long)]
         pre: bool,
@@ -798,6 +799,72 @@ mod tests {
         assert!(!should_load_maker_local_env(&args(&[
             "standx", "maker", "run", "XAG-USD",
         ])));
+    }
+
+    /// `--yes` exists exactly once, globally. A second copy on the subcommand
+    /// makes clap panic in debug builds (`Long option names must be unique`) and
+    /// silently splits the confirmation signal in release builds — the update
+    /// command must read the global one.
+    #[test]
+    fn update_confirmation_comes_only_from_the_global_yes() {
+        for argv in [
+            vec!["standx", "update", "--yes"],
+            vec!["standx", "--yes", "update"],
+        ] {
+            let cli = Cli::try_parse_from(&argv)
+                .unwrap_or_else(|error| panic!("{argv:?} should parse: {error}"));
+            assert!(cli.yes, "{argv:?} should set the global confirmation flag");
+            assert!(matches!(cli.command, Commands::Update { .. }));
+        }
+        // The global flag is long-only, so there is no `-y`. Asserting that
+        // keeps a future `-y` from being added on the subcommand alone, which is
+        // how the duplicate crept in the first time.
+        assert!(Cli::try_parse_from(["standx", "update", "-y"]).is_err());
+
+        let cli = Cli::try_parse_from(["standx", "update"]).expect("bare update should parse");
+        assert!(!cli.yes);
+    }
+
+    /// The command's own flags stay on the subcommand and default to off.
+    #[test]
+    fn update_flags_parse_independently() {
+        let cli = Cli::try_parse_from(["standx", "update"]).expect("bare update should parse");
+        let Commands::Update { check, pre, force } = cli.command else {
+            panic!("expected update command");
+        };
+        assert!(!check && !pre && !force);
+
+        let cli = Cli::try_parse_from(["standx", "update", "--check", "--pre", "--force"])
+            .expect("all update flags should parse");
+        let Commands::Update { check, pre, force } = cli.command else {
+            panic!("expected update command");
+        };
+        assert!(check && pre && force);
+
+        // The documented alias must keep working.
+        let cli = Cli::try_parse_from(["standx", "self-update", "--check"])
+            .expect("self-update alias should parse");
+        assert!(matches!(cli.command, Commands::Update { check: true, .. }));
+    }
+
+    /// Clap's duplicate-option assertion only fires in debug builds, so a
+    /// release-only smoke test cannot catch it — that is exactly how the
+    /// duplicate `--yes` shipped through manual testing. This asserts the update
+    /// subtree specifically.
+    ///
+    /// Scoped rather than whole-tree on purpose: `Cli::command().debug_assert()`
+    /// currently fails on a **pre-existing** collision in `block list`, where
+    /// `-s` is claimed by both `--symbol` and `--status` (so `standx block list
+    /// --help` panics in debug builds today). Fixing that changes a published
+    /// short flag and belongs to its own change.
+    #[test]
+    fn update_subcommand_passes_clap_debug_assertions() {
+        use clap::CommandFactory;
+        Cli::command()
+            .find_subcommand("update")
+            .expect("update subcommand exists")
+            .clone()
+            .debug_assert();
     }
 
     #[test]
