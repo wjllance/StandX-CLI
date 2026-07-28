@@ -491,6 +491,34 @@ pub(super) struct PositionChange<'a> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn webhook_body_shapes() {
+        let txt = "🚨 ALERT [BTC-USD] loss — PnL -50 breached";
+        // Structured object a caller would build for the Raw format.
+        let raw_in = serde_json::json!({
+            "text": txt, "symbol": "BTC-USD", "kind": "loss", "firing": true,
+        });
+
+        // Slack / Telegram: bare {"text": ...}
+        let slack = webhook_body(AlertWebhookFormat::Slack, txt, &raw_in);
+        assert_eq!(slack["text"], txt);
+        assert!(slack.get("msg_type").is_none());
+        let tg = webhook_body(AlertWebhookFormat::Telegram, txt, &raw_in);
+        assert_eq!(tg["text"], txt);
+        assert!(tg.get("kind").is_none()); // not the structured object
+
+        // Feishu: {"msg_type":"text","content":{"text":...}}
+        let feishu = webhook_body(AlertWebhookFormat::Feishu, txt, &raw_in);
+        assert_eq!(feishu["msg_type"], "text");
+        assert_eq!(feishu["content"]["text"], txt);
+
+        // Raw: the structured object verbatim.
+        let raw = webhook_body(AlertWebhookFormat::Raw, txt, &raw_in);
+        assert_eq!(raw["kind"], "loss");
+        assert_eq!(raw["firing"], true);
+        assert_eq!(raw["symbol"], "BTC-USD");
+    }
+
     use super::*;
 
     #[test]

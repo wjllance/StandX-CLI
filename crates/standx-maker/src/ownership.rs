@@ -93,17 +93,38 @@ mod tests {
 
     #[test]
     fn applies_position_and_pending_slot_tolerances() {
+        // Half a qty tick of float slop is inside the limit; real excess is not.
         assert!(position_within_limit(0.800_05, 0.8, 3));
         assert!(!position_within_limit(0.800_6, 0.8, 3));
+        // The limit is on the magnitude, so a short at the limit is inside it.
+        assert!(position_within_limit(-0.8, 0.8, 3));
+    }
+
+    #[test]
+    fn open_quantity_adopts_any_unfilled_remainder_but_not_a_stranger() {
+        // Full remainder, a half-filled remainder, and a tiny one all adopt:
+        // the maker placed this order and part of it is still working.
+        assert!(open_qty_adopts(0.01, 0.01));
         assert!(open_qty_adopts(0.005, 0.01));
+        assert!(open_qty_adopts(0.0001, 0.01));
+        // Float slop just over the placed qty is still ours.
+        assert!(open_qty_adopts(0.01 + 1e-9, 0.01));
+        // Nothing open left to match.
+        assert!(!open_qty_adopts(0.0, 0.01));
+        // More than was ever placed belongs to someone else.
         assert!(!open_qty_adopts(0.02, 0.01));
-        assert!(pending_covers_slot(
+    }
+
+    #[test]
+    fn pending_covers_only_its_own_side_and_level() {
+        let pending = || {
             [QuoteSlot {
                 side: OrderSide::Buy,
                 level: 0,
-            }],
-            OrderSide::Buy,
-            0,
-        ));
+            }]
+        };
+        assert!(pending_covers_slot(pending(), OrderSide::Buy, 0));
+        assert!(!pending_covers_slot(pending(), OrderSide::Buy, 1));
+        assert!(!pending_covers_slot(pending(), OrderSide::Sell, 0));
     }
 }

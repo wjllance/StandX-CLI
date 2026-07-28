@@ -501,3 +501,106 @@ fn apply_order_responses_rejected_cancel_fails_closed() {
     ));
     assert_eq!(projection.pending_cancels().len(), 1);
 }
+
+#[test]
+fn async_rejection_removes_only_matching_pending_place() {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+    let pending_place = |request_id: &str| ProjectionPendingPlace {
+        request_id: request_id.to_string(),
+        client_order_id: format!("client-{request_id}"),
+        side: OrderSide::Buy,
+        price: 100.0,
+        qty: 0.01,
+        level: 0,
+        ref_center: 100.0,
+        cycle: 1,
+    };
+    let mut projection = MakerAccountProjection::new(1, "sxmk-test-", 0.0, 0.005, 0.00005);
+    for pending in [pending_place("request-1"), pending_place("request-2")] {
+        projection.apply(1, AccountProjectionEvent::PlaceSubmitted(pending));
+    }
+    let mut runtime_state = MakerState::starting();
+    sender
+        .try_send(OrderResponse {
+            code: 400,
+            message: "alo order rejected".to_string(),
+            request_id: Some("request-1".to_string()),
+        })
+        .unwrap();
+
+    apply_order_responses(
+        &mut receiver,
+        &mut projection,
+        &mut runtime_state,
+        OutputFormat::Quiet,
+        "BTC-USD",
+        2,
+        2,
+    )
+    .unwrap();
+
+    assert_eq!(projection.pending_places().len(), 1);
+    assert_eq!(projection.pending_places()[0].request_id, "request-2");
+}
+
+#[test]
+fn async_acceptance_keeps_pending_until_exchange_order_is_visible() {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+    let pending = ProjectionPendingPlace {
+        request_id: "request-1".to_string(),
+        client_order_id: "client-1".to_string(),
+        side: OrderSide::Sell,
+        price: 101.0,
+        qty: 0.01,
+        level: 0,
+        ref_center: 100.0,
+        cycle: 1,
+    };
+    let mut projection = MakerAccountProjection::new(1, "sxmk-test-", 0.0, 0.005, 0.00005);
+    projection.apply(1, AccountProjectionEvent::PlaceSubmitted(pending));
+    let mut runtime_state = MakerState::starting();
+    sender
+        .try_send(OrderResponse {
+            code: 0,
+            message: "accepted".to_string(),
+            request_id: Some("request-1".to_string()),
+        })
+        .unwrap();
+
+    apply_order_responses(
+        &mut receiver,
+        &mut projection,
+        &mut runtime_state,
+        OutputFormat::Quiet,
+        "BTC-USD",
+        2,
+        2,
+    )
+    .unwrap();
+
+    for cycle in 3..=100 {
+        projection.apply(1, AccountProjectionEvent::AdvanceCycle { cycle });
+    }
+    assert_eq!(projection.pending_places().len(), 1);
+}
+
+#[test]
+fn disconnected_order_response_stream_is_fail_closed() {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    drop(sender);
+    let mut projection = MakerAccountProjection::new(1, "sxmk-test-", 0.0, 0.005, 0.00005);
+    let mut runtime_state = MakerState::starting();
+
+    let error = apply_order_responses(
+        &mut receiver,
+        &mut projection,
+        &mut runtime_state,
+        OutputFormat::Quiet,
+        "BTC-USD",
+        1,
+        2,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("disconnected"));
+}

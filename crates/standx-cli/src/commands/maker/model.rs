@@ -542,6 +542,138 @@ pub(super) fn signed_position_quantity(
 }
 
 #[cfg(test)]
+mod message_tests {
+    use super::*;
+
+    fn test_order(id: &str, cl_ord_id: Option<&str>) -> Order {
+        Order {
+            id: id.to_string(),
+            cl_ord_id: cl_ord_id.map(str::to_string),
+            symbol: "XAG-USD".to_string(),
+            side: OrderSide::Buy,
+            order_type: standx_sdk::models::OrderType::Limit,
+            qty: "0.2".to_string(),
+            fill_qty: "0".to_string(),
+            price: "59.40".to_string(),
+            status: OrderStatus::New,
+            created_at: "now".to_string(),
+            updated_at: "now".to_string(),
+        }
+    }
+
+    fn test_position(side: &str, qty: &str) -> Position {
+        serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "symbol": "XAG-USD",
+            "side": side,
+            "qty": qty,
+            "entry_price": "59.40",
+            "entry_value": "11.88",
+            "holding_margin": "1",
+            "initial_margin": "1",
+            "leverage": "1",
+            "mark_price": "59.40",
+            "margin_asset": "USDT",
+            "margin_mode": "cross",
+            "position_value": "11.88",
+            "realized_pnl": "0",
+            "required_margin": "1",
+            "status": "open",
+            "upnl": "0",
+            "time": "now",
+            "created_at": "now",
+            "updated_at": "now",
+            "user": "test"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn order_response_exit_message_does_not_claim_three_errors() {
+        let exit = MakerExit::OrderResponse(
+            "order-response WebSocket closed: code=1008 reason=\"maintenance\"".to_string(),
+        );
+
+        let lifecycle = exit.lifecycle_reason();
+        let terminal = exit.terminal_error().unwrap();
+        assert!(lifecycle.contains("code=1008"), "{lifecycle}");
+        assert!(terminal.contains("stopped immediately"), "{terminal}");
+        assert!(!terminal.contains("3 consecutive"), "{terminal}");
+    }
+
+    #[test]
+    fn consecutive_cycle_exit_message_names_three_errors() {
+        let exit = MakerExit::ConsecutiveErrors("network timeout".to_string());
+
+        let lifecycle = exit.lifecycle_reason();
+        let terminal = exit.terminal_error().unwrap();
+        assert!(lifecycle.contains("3 consecutive maker cycle errors"));
+        assert!(terminal.contains("3 consecutive maker cycle errors"));
+    }
+
+    #[test]
+    fn position_reconciliation_exit_is_immediate() {
+        let exit = MakerExit::PositionReconciliation(
+            "expected position -0.13000000, venue reported +0.07000000".to_string(),
+        );
+        let terminal = exit.terminal_error().unwrap();
+        assert!(terminal.contains("stopped immediately"));
+        assert!(!terminal.contains("3 consecutive"));
+    }
+
+    #[test]
+    fn accounting_invariant_exit_is_immediate() {
+        let exit = MakerExit::AccountingInvariant(
+            "stats position -0.20000000 differs from ledger expected +0.00000000".to_string(),
+        );
+        let lifecycle = exit.lifecycle_reason();
+        let terminal = exit.terminal_error().unwrap();
+        assert!(lifecycle.contains("accounting invariant failed"));
+        assert!(terminal.contains("stopped immediately"));
+        assert!(terminal.contains("ledger expected"));
+    }
+
+    #[test]
+    fn stop_loss_exit_reports_the_breach_and_is_terminal() {
+        let exit = MakerExit::StopLoss("session PnL -12.50 <= -10.00".to_string());
+        let lifecycle = exit.lifecycle_reason();
+        let terminal = exit.terminal_error().unwrap();
+        assert!(lifecycle.contains("stop-loss breached"), "{lifecycle}");
+        assert!(lifecycle.contains("-12.50"), "{lifecycle}");
+        assert!(terminal.contains("stopped immediately"), "{terminal}");
+        assert!(terminal.contains("stop-loss breached"), "{terminal}");
+    }
+
+    #[test]
+    fn position_uses_side_to_normalize_signed_and_unsigned_quantities() {
+        assert_eq!(
+            position_for_symbol(&[test_position("buy", "0.13")], "XAG-USD").unwrap(),
+            0.13
+        );
+        assert_eq!(
+            position_for_symbol(&[test_position("sell", "0.13")], "XAG-USD").unwrap(),
+            -0.13
+        );
+        assert_eq!(
+            position_for_symbol(&[test_position("sell", "-0.13")], "XAG-USD").unwrap(),
+            -0.13
+        );
+        assert!(position_for_symbol(&[test_position("sell", "NaN")], "XAG-USD").is_err());
+        assert_eq!(signed_position_quantity("-0.13", None).unwrap(), -0.13);
+        assert_eq!(
+            signed_position_quantity("0.13", Some(OrderSide::Sell)).unwrap(),
+            -0.13
+        );
+    }
+    #[test]
+    fn maker_order_ownership_uses_reserved_client_id_prefix() {
+        assert!(is_maker_order(&test_order("123", Some("sxmk-7f2b"))));
+        assert!(!is_maker_order(&test_order("123", Some("manual-7f2b"))));
+        assert!(!is_maker_order(&test_order("123", None)));
+    }
+}
+
+#[cfg(test)]
 mod decimal_tests {
     use super::{optional_decimal, parse_decimal, Decimal};
 

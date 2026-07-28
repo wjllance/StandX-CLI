@@ -1,4 +1,5 @@
 use super::*;
+use crate::commands::maker::startup::new_maker_rest_client;
 
 #[test]
 fn stop_directive_never_becomes_a_cycle_attempt() {
