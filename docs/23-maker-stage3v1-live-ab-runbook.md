@@ -63,6 +63,18 @@ release record contains this exact authorization:
   不要依赖 maker 的 `token_expiry_critical` 预警（提前量仅 ~15 分钟，
   无人值守窗口内不足以响应）。token 失效的连带后果是 cleanup 也无法
   撤单（认证依赖），残余单/仓位只能待重新登录后手动处置。
+- **FLAT 前置（2026-07-27 补充）**：启动任何 canary / A/B 前必须实测账户为空仓空簿，
+  不能只依赖上一轮的收尾记录——阶段 3-guard 轮结束时 baseline#4 留下 -0.1 HYPE 空头
+  （按"不自动平仓"原则由 owner 手动处置，见
+  [guard 判定报告运维记录](evidence/maker-guard-spinoff-ab-judgment-2026-07-27.md)）。
+  复核方式（两条都要看，`positions` 为空但 `orders` 非空同样是阻塞项）：
+
+  ```bash
+  standx -o json account positions
+  standx -o json account orders
+  ```
+
+  非空 → 先手动处置并回填到对应判定报告的运维记录，再启动。
 - 离线证据（2026-07-22，commit 45311e7）：workspace tests 全绿
   （cli 198 / maker 179 / sdk 75 / integration 13+31+2，2 个 credential
   e2e 照旧 ignored）；strict Clippy 干净；`cargo fmt --check` 通过；
