@@ -604,3 +604,97 @@ fn disconnected_order_response_stream_is_fail_closed() {
 
     assert!(error.to_string().contains("disconnected"));
 }
+
+/// Adversarial-review regression, driven through the runtime failure path rather
+/// than only the classifier: the account stream adopts the placed order, then the
+/// command channel rejects that same request. The maker must freeze and mark the
+/// order-response stream unhealthy, and — critically — must *not* apply the
+/// rejection, because that would drop a venue-visible order out of the
+/// projection while the venue still has it.
+#[test]
+fn rejection_after_venue_adoption_freezes_instead_of_dropping_the_live_order() {
+    // The client order ID has to carry the run prefix, or the projection
+    // discards the observation as not-ours before any adoption can happen.
+    let client_order_id = "sxmk-test-q00000001b0".to_string();
+    let mut projection = MakerAccountProjection::new(1, "sxmk-test-", 0.0, 0.005, 0.00005);
+    projection.apply(
+        1,
+        AccountProjectionEvent::PlaceSubmitted(ProjectionPendingPlace {
+            request_id: "req-1".to_string(),
+            client_order_id: client_order_id.clone(),
+            side: OrderSide::Buy,
+            price: 100.0,
+            qty: 1.0,
+            level: 0,
+            ref_center: 100.0,
+            cycle: 1,
+        }),
+    );
+
+    // The account stream lands first and adopts the live order into the book.
+    let adopted = projection.apply(
+        1,
+        AccountProjectionEvent::OrderObserved(OrderObservation {
+            order_id: 4_242,
+            client_order_id: Some(client_order_id),
+            side: OrderSide::Buy,
+            price: 100.0,
+            open_qty: 1.0,
+            terminal: false,
+        }),
+    );
+    assert_eq!(adopted.effective_request_id.as_deref(), Some("req-1"));
+    assert_eq!(projection.resting_quotes().len(), 1);
+
+    let mut runtime_state = MakerState::starting();
+    runtime_state.handle(MakerEvent::StartupReady);
+    let cycle_token = match runtime_state.next_effect() {
+        Some(MakerEffect::RunCycle(token)) => token,
+        effect => panic!("expected cycle effect, got {effect:?}"),
+    };
+
+    // Now the rejection for that same request arrives on the command channel.
+    let generation = projection.generation();
+    let verdict = correlate(&mut projection, Some("req-1"), 400);
+    assert_eq!(verdict.label(), "venue_contradiction");
+    assert!(verdict.fails_closed());
+
+    let health = OrderResponseHealth::default();
+    let reason =
+        order_response_failure(&Ok(verdict), Some("req-1"), generation, &mut runtime_state)
+            .expect("a venue contradiction must produce a fail-closed reason");
+    health.mark_unhealthy(reason.clone());
+    assert!(!health.is_healthy());
+    for expected in [
+        "verdict=venue_contradiction",
+        "request_id=req-1",
+        "operation=place",
+        "lifecycle=awaiting_ack",
+        "rejected the placement",
+    ] {
+        assert!(
+            reason.contains(expected),
+            "{expected} missing from: {reason}"
+        );
+    }
+
+    // The disputed order stays in the book: fail-closed recovery reconciles it,
+    // it is never silently forgotten.
+    assert_eq!(
+        projection.resting_quotes().len(),
+        1,
+        "the venue-visible order must survive the contradiction"
+    );
+    assert_eq!(
+        projection.pending_request_count(),
+        1,
+        "the rejection must not be applied"
+    );
+
+    // The runtime froze for order-response recovery: the queued cleanup targets
+    // the placement channel, and the aborted cycle's late completion is ignored.
+    take_cleanup_effect(&mut runtime_state, RecoveryTarget::OrderResponse)
+        .expect("a venue contradiction must drive an order-response cleanup");
+    runtime_state.handle(MakerEvent::CycleCompleted(cycle_token));
+    assert!(runtime_state.pending_effect().is_none());
+}

@@ -181,6 +181,17 @@ pub enum ResponseCorrelation {
         resolved_in: u64,
         lifecycle: RequestLifecycle,
     },
+    /// The account stream has shown this request's order live at the venue and
+    /// the projection adopted it, but the command channel now says the placement
+    /// was rejected. The two independent channels disagree about whether the
+    /// order exists *right now*, which is distinct from
+    /// [`Self::Contradictory`]: there is no recorded resolution to disagree
+    /// with yet, and the disputed order is still in the maker's book.
+    ///
+    /// Fails closed rather than applying the rejection, so the adopted order is
+    /// neither silently dropped from the projection nor left quoting behind a
+    /// belief that its placement never happened.
+    VenueContradiction { operation: RequestOperation },
     /// The request is resolved but this acknowledgement contradicts the recorded
     /// outcome — the local view and the venue's cannot both be right.
     Contradictory {
@@ -209,6 +220,7 @@ impl ResponseCorrelation {
         match self {
             Self::Matched { .. } => "matched",
             Self::LateKnown { .. } => "late_known",
+            Self::VenueContradiction { .. } => "venue_contradiction",
             Self::Contradictory { .. } => "contradictory",
             Self::Orphan => "orphan_current_run",
             Self::Unverifiable => "unverifiable",
@@ -220,6 +232,7 @@ impl ResponseCorrelation {
         match self {
             Self::Matched { operation, .. }
             | Self::LateKnown { operation, .. }
+            | Self::VenueContradiction { operation }
             | Self::Contradictory { operation, .. } => Some(*operation),
             Self::Orphan | Self::Unverifiable | Self::Unidentified => None,
         }
@@ -230,6 +243,9 @@ impl ResponseCorrelation {
             Self::Matched { lifecycle, .. }
             | Self::LateKnown { lifecycle, .. }
             | Self::Contradictory { lifecycle, .. } => *lifecycle,
+            // The ack is what is still outstanding; the venue side is precisely
+            // the half that has already been observed.
+            Self::VenueContradiction { .. } => RequestLifecycle::AwaitingAck,
             Self::Unverifiable => RequestLifecycle::AwaitingVenue,
             Self::Orphan | Self::Unidentified => RequestLifecycle::Unknown,
         }
@@ -359,6 +375,16 @@ struct PendingEntry {
     request: ProjectionPendingRequest,
     ack_pending: bool,
     slot_open: bool,
+    /// The account stream has shown this request's order live at the venue and
+    /// the projection adopted it into the maker book.
+    ///
+    /// Deliberately *not* the same signal as `!slot_open`. A slot also closes on
+    /// rejection and on cleanup, neither of which is evidence the venue ever had
+    /// the order. Only this flag answers "does the venue currently show it?",
+    /// which is what makes a later *rejection* of the same request a
+    /// contradiction rather than an ordinary outcome. Cleared by cleanup, since
+    /// the exposure it records no longer exists afterwards.
+    venue_observed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -567,6 +593,9 @@ impl MakerAccountProjection {
         self.orders.clear();
         for entry in &mut self.pending {
             entry.slot_open = false;
+            // The venue exposure this recorded has just been cancelled, so a
+            // later rejection no longer contradicts anything live.
+            entry.venue_observed = false;
         }
         self.drop_settled();
     }
@@ -649,6 +678,19 @@ impl MakerAccountProjection {
             .iter()
             .find(|entry| entry.ack_pending && entry.request_id() == request_id)
         {
+            // The account stream already showed this order live and the book
+            // adopted it. A rejection of the same request means the two
+            // independent channels disagree about whether the order exists, and
+            // the maker is already carrying it — so it cannot be applied as an
+            // ordinary rejection. Note the adoption may have matched by the
+            // side/price/qty heuristic rather than by client order ID, in which
+            // case the adopted order is someone else's and the maker would go on
+            // to manage an order it does not own.
+            if entry.venue_observed && !accepted {
+                return ResponseCorrelation::VenueContradiction {
+                    operation: entry.request.operation(),
+                };
+            }
             return ResponseCorrelation::Matched {
                 operation: entry.request.operation(),
                 lifecycle: RequestLifecycle::AwaitingAck,
@@ -901,6 +943,7 @@ impl MakerAccountProjection {
             request,
             ack_pending: true,
             slot_open: true,
+            venue_observed: false,
         });
         Ok(())
     }
@@ -1109,6 +1152,7 @@ impl MakerAccountProjection {
             .clone();
         let request_id = self.pending[index].request_id().to_string();
         self.pending[index].slot_open = false;
+        self.pending[index].venue_observed = true;
         self.drop_settled();
         Some((AdoptedSlot::from_place(&place), request_id))
     }
@@ -1308,6 +1352,18 @@ mod tests {
                 "matched",
             ),
             (
+                "account order then WS *rejection*: the two channels disagree",
+                vec![Step::Submit, resting],
+                false,
+                "venue_contradiction",
+            ),
+            (
+                "cleanup retired the exposure, so a later rejection contradicts nothing live",
+                vec![Step::Submit, resting, Step::ReconnectPreservingAcks],
+                false,
+                "matched",
+            ),
+            (
                 "duplicate ack while the venue has not confirmed yet",
                 vec![Step::Submit, accepted],
                 true,
@@ -1372,6 +1428,36 @@ mod tests {
                 lifecycle: RequestLifecycle::AwaitingAck,
             }
         );
+    }
+
+    /// Reproduction for the adversarial-review finding: the account stream shows
+    /// the order live at the venue, then the command channel rejects the very
+    /// same placement. Two independent channels disagree about whether the order
+    /// exists, and the maker has *already adopted it into its book* — so this
+    /// must fail closed, not be applied as an ordinary rejection.
+    #[test]
+    fn rejection_after_the_venue_showed_the_order_live_is_a_contradiction() {
+        let mut projection = MakerAccountProjection::new(1, PREFIX, 0.0, 0.005, 0.00005);
+        projection.apply(1, AccountProjectionEvent::PlaceSubmitted(pending("req-1")));
+        // Account stream lands first and adopts the live order.
+        let adopted = projection.apply(1, AccountProjectionEvent::OrderObserved(order(0.2, false)));
+        assert_eq!(adopted.effective_request_id.as_deref(), Some("req-1"));
+        assert_eq!(projection.resting_quotes().len(), 1, "order is in the book");
+
+        // An accepted ack for the same request is the normal ordering.
+        assert_eq!(
+            projection.classify_response(Some("req-1"), true).label(),
+            "matched"
+        );
+
+        // A rejection is not: the venue says the order is open, the control
+        // plane says the placement never happened.
+        let verdict = projection.classify_response(Some("req-1"), false);
+        assert!(
+            verdict.fails_closed(),
+            "a rejection contradicting a venue-visible order must fail closed, got {verdict:?}"
+        );
+        assert_eq!(verdict.label(), "venue_contradiction");
     }
 
     /// A missing `request_id` is a protocol violation with its own verdict. It
