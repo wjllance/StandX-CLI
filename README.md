@@ -1,12 +1,11 @@
 # StandX Agent Toolkit
 
-> **OpenClaw First. AI Agent Native. Trading Ecosystem Ready.**
+> **Trade by Intent. Built for Agents, Not Buttons.**
 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
-[![OpenClaw](https://img.shields.io/badge/OpenClaw-First-blue.svg)](https://openclaw.ai)
 
-**StandX Agent Toolkit** is a CLI designed for the AI Trading era—**OpenClaw First**, yet universally adaptable to any AI Agent that can execute commands.
+**StandX Agent Toolkit** is a CLI for the AI trading era: any AI Agent that can execute a shell command can read markets, manage positions, and place orders—structured input in, structured output out.
 
 We believe the future of trading is conversational. Your agent should trade as naturally as it chats. No complex APIs, no boilerplate—just intent to execution.
 
@@ -15,7 +14,7 @@ We believe the future of trading is conversational. Your agent should trade as n
 │                                                                 │
 │   You: "Check my BTC position"                                  │
 │   ↓                                                             │
-│   OpenClaw → StandX CLI → StandX API                            │
+│   Your agent → StandX CLI → StandX API                          │
 │   ↓                                                             │
 │   You: "Long 0.1 BTC, stop loss at $62k"                        │
 │   ↓                                                             │
@@ -26,13 +25,22 @@ We believe the future of trading is conversational. Your agent should trade as n
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+**Status** — v1.2.0. Market data, account, order, leverage/margin, streaming and
+dashboard commands are stable and in daily use. The [Rust SDK](crates/standx-sdk)
+is usable but pre-1.0 (API may change). The [maker bot](docs/13-maker.md) is
+paper-mode by default and its live mode is env-gated; its real-money PnL is still
+being measured.
+
+> ⚠️ This tool places real orders with real money. Nothing here is investment
+> advice — you own the risk of anything your agent executes.
+
 ---
 
 ## 🎯 Why StandX Agent Toolkit?
 
 ### The Problem
 
-You have an AI Agent (OpenClaw, Claude, AutoGPT, etc.). You want it to trade. But:
+You have an AI Agent (Claude, Cursor, OpenClaw, AutoGPT, …). You want it to trade. But:
 - ❌ Traditional trading tools are built for humans clicking buttons
 - ❌ APIs require complex integration and parsing
 - ❌ No bridge between natural language and execution
@@ -44,11 +52,10 @@ You have an AI Agent (OpenClaw, Claude, AutoGPT, etc.). You want it to trade. Bu
 | Feature | Traditional Tools | StandX Agent Toolkit |
 |---------|-------------------|----------------------|
 | **Built For** | Human traders | **AI Agents** |
-| **OpenClaw Integration** | Custom code | **Works out of the box** |
+| **Agent Integration** | Custom wrapper code | **Shell exec, no wrapper** |
 | **Output** | Pretty tables | **Structured JSON** |
 | **Errors** | Text to parse | **Machine-readable** |
 | **Workflow** | Interactive prompts | **100% scriptable** |
-| **Other Agents** | Not supported | **CLI = Universal** |
 
 ---
 
@@ -73,7 +80,8 @@ brew install standx-cli
 #### Option 3: Build from Source
 
 ```bash
-cargo install standx-cli
+git clone https://github.com/wjllance/standx-cli && cd standx-cli
+cargo install --path crates/standx-cli
 ```
 
 #### Keeping it current
@@ -91,60 +99,22 @@ of reaching for `sudo`.
 
 ### 2. Configure
 
-StandX CLI requires authentication for most operations. You need:
+Market data needs no credentials. Everything else needs a **JWT token**, and
+trading additionally needs an **Ed25519 private key** for request signing. Both
+come from https://standx.com/user/session (the JWT is valid for 7 days).
 
-1. **JWT Token** (required) - For reading account data
-2. **Ed25519 Private Key** (optional, but recommended) - For trading operations
-
-#### Get Credentials
-
-Visit https://standx.com/user/session to generate:
-- JWT Token (valid for 7 days)
-- Ed25519 Private Key (Base58 encoded)
-
-#### Login Methods
-
-**Interactive (Recommended for first-time setup):**
-```bash
-standx auth login --interactive
-```
-
-**Command line (for scripts/agents):**
-```bash
-standx auth login \
-  --token "$STANDX_JWT" \
-  --private-key "$STANDX_PRIVATE_KEY"
-```
-
-**From files:**
-```bash
-standx auth login \
-  --token-file ~/.standx_token \
-  --key-file ~/.standx_key
-```
-
-**Environment variables (auto-detected):**
+**Environment variables — the agent-friendly path (auto-detected, no login step):**
 ```bash
 export STANDX_JWT="your_jwt_token"
-export STANDX_PRIVATE_KEY="your_private_key"
+export STANDX_PRIVATE_KEY="your_private_key"   # optional; required for trading
 ```
 
-#### Check Authentication Status
-
+**Or store them once:**
 ```bash
-standx auth status
-```
-
-**Example output:**
-```
-✅ Authenticated
-   Token expires at: 2024-02-02T09:56:07Z
-   Remaining: 167 hours
-```
-
-#### Logout
-
-```bash
+standx auth login --interactive                       # first-time setup
+standx auth login --token "$STANDX_JWT" --private-key "$STANDX_PRIVATE_KEY"
+standx auth login --token-file ~/.standx_token --key-file ~/.standx_key
+standx auth status                                    # expiry + trading availability
 standx auth logout
 ```
 
@@ -165,20 +135,20 @@ For detailed authentication documentation, see [docs/02-authentication.md](docs/
 
 ### 3. Use With Your Agent
 
-#### OpenClaw (Native)
+#### Conversational agents
 
 ```
 You: What's the BTC price?
-OpenClaw: [executes: standx market ticker BTC-USD --output json]
-          BTC is trading at $65,000 (+2.3% today)
+Agent: [executes: standx market ticker BTC-USD --output json]
+       BTC is trading at $65,000 (+2.3% today)
 
 You: Buy 0.1 BTC at market price
-OpenClaw: [executes: standx order create BTC-USD buy market --qty 0.1]
-          ✅ Market order executed
-          Bought 0.1 BTC at $65,001
+Agent: [executes: standx order create BTC-USD buy market --qty 0.1]
+       ✅ Market order executed
+       Bought 0.1 BTC at $65,001
 ```
 
-#### Claude / Cursor / Any CLI-capable Agent
+#### Programmatic (subprocess)
 
 ```python
 # Same commands work everywhere
@@ -195,22 +165,16 @@ data = json.loads(result.stdout)
 
 ## 🛠️ Integration Patterns
 
-### Pattern 1: OpenClaw Native (Recommended)
+### Pattern 1: Shell exec (any agent)
 
-OpenClaw calls StandX CLI directly via `exec`:
+Any agent that can run a shell command is already integrated — there is no
+wrapper to write. The same commands work everywhere:
 
 ```python
-# In OpenClaw
+# Generic agent runtime (OpenClaw, Claude Code, Cursor, …)
 result = await exec("standx market ticker BTC-USD --output json")
 price_data = json.loads(result.stdout)
-# Agent parses and responds naturally
 ```
-
-**Best for**: OpenClaw users who want seamless conversation-to-trading
-
-### Pattern 2: Universal CLI
-
-Any AI Agent that can execute shell commands:
 
 ```python
 # LangChain
@@ -226,18 +190,22 @@ result = tool.run("standx account balances --output json")
 os.system("standx order create BTC-USD buy market --qty 0.1")
 ```
 
-**Best for**: Multi-platform agents, custom workflows
+**Best for**: conversational trading, multi-platform agents, custom workflows
 
-### Pattern 3: Future MCP (Optional)
+### Pattern 2: Embed the Rust SDK
 
-When you need richer tool definitions:
+When a subprocess per call is too coarse — typed models, persistent WebSocket
+streams, order commands over WS:
 
-```bash
-# Coming soon
-standx mcp serve
+```rust
+let client = standx_sdk::client::StandXClient::new()?;
+let ticker = client.get_symbol_market("BTC-USD").await?;
 ```
 
-**Best for**: Complex multi-step workflows across multiple services
+**Best for**: Rust bots and long-running strategies. See [Rust SDK](#-rust-sdk).
+
+> MCP support is on the [roadmap](#️-roadmap), not implemented — there is no
+> `standx mcp` command today.
 
 ---
 
@@ -254,6 +222,9 @@ standx market depth BTC-USD --limit 10 --output json
 
 # Recent trades
 standx market trades BTC-USD --limit 20 --output json
+
+# Candles
+standx market kline BTC-USD --resolution 60 --limit 100 --output json
 
 # Funding rate
 standx market funding BTC-USD --days 7 --output json
@@ -317,9 +288,12 @@ standx margin mode BTC-USD
 
 # Set margin mode
 standx margin mode BTC-USD --set isolated
+
+# Move margin in/out of an isolated position
+standx margin transfer BTC-USD 100 --direction in
 ```
 
-:### Trade History
+### Trade History
 
 ```bash
 # Get recent trades
@@ -371,83 +345,59 @@ standx block list --symbol BTC-USD --status completed
 standx block watch --interval 10
 ```
 
-### Maker Bot (SIP-5A Community Maker Yield)
-
-A simple two-sided quoting loop optimized for
-[SIP-5A](https://docs.standx.com/sip/sip-5a-community-maker-yield): it keeps
-quotes resting inside the eligibility band (uptime is what earns) and only
-re-quotes when mark price drifts past a threshold — no flicker-cancelling.
+### Config
 
 ```bash
-# Paper mode (default): runs the full loop, prints intended actions,
-# places NO orders. Safe to run without credentials. Fills are simulated
-# (a quote crossed by the touch), so position and inventory skew are
-# observable without going live.
+standx config init                    # create the config file
+standx config set default_symbol BTC-USD
+standx config get default_symbol
+standx config show
+```
+
+### Global Flags
+
+Available on every command:
+
+| Flag | Effect |
+|------|--------|
+| `--output <table\|json\|csv\|quiet>` | Output format. Agents want `json`. |
+| `--openclaw` | Machine-oriented defaults for agent execution (env: `STANDX_OPENCLAW_MODE`) |
+| `--dry-run` | Report the command's financial-impact class and exit without touching the network |
+| `--yes` | Skip the `standx update` confirmation (env: `STANDX_AUTO_CONFIRM=true`). Today `update` is the only command that prompts — trading commands are non-interactive and have nothing to skip |
+| `--config <PATH>` | Use a specific config file |
+| `--verbose` / `--quiet` | Log verbosity |
+
+### Maker Bot (SIP-5A Community Maker Yield)
+
+A two-sided quoting loop targeting
+[SIP-5A](https://docs.standx.com/sip/sip-5a-community-maker-yield): quotes rest
+inside the eligibility band (resting uptime is what earns) and only re-quote when
+mark price drifts past a threshold — no flicker-cancelling.
+
+```bash
+# Paper mode (default): runs the full loop, prints intended actions, places NO
+# orders. Safe without credentials; fills are simulated when the touch crosses
+# a quote, so position, skew and PnL telemetry are observable offline.
 standx maker run BTC-USD --size 0.001 --interval 3
 
-# Tune the strategy
-standx maker run BTC-USD \
-  --spread-bps 5      # half-spread from mark price
-  --band-bps 20       # never quote outside mark ± band
-  --refresh-bps 3     # anti-flicker: re-quote only after this much drift
-  --levels 2          # quote levels per side
-  --max-position 0.05 # suppress the side that would exceed this
-  --skew-bps 5        # inventory skew: at full inventory, shift the quote
-                      # center this many bps toward the reducing side
-                      # (0 = off; live only, paper holds no position)
-  --vol-pause-bps 30  # volatility circuit breaker: pull all quotes when the
-                      # mark's range over --vol-window cycles hits this (0 = off)
-
-# Risk alerts (edge-triggered; stderr/JSON always, webhook optional):
-standx maker run BTC-USD \
-  --alert-loss 50            # alert when mark-to-market PnL <= -50
-  --alert-inventory-pct 80   # alert when |position| hits 80% of --max-position
-  --alert-uptime 90          # alert when two-sided uptime drops below 90%
-  --alert-webhook https://hooks.slack.com/services/XXX  # also POST alerts here
-  --alert-webhook-format slack   # slack | feishu | telegram | raw
-
-# Market data comes from a WebSocket feed (REST fallback when stale);
-# the loop also wakes early when mark has already drifted past
-# --refresh-bps, shrinking the reaction window without adding flicker.
-# --no-ws forces plain REST polling; --max-divergence-bps (default 25)
-# skips a cycle when mark price and the book mid disagree.
-
-# Each cycle reports running telemetry — mark-to-market PnL, favorable
-# spread capture (bps/fill), two-sided uptime %, fills, and max inventory —
-# and a stats block on exit, so tuning spread/refresh/skew is a measured
-# loop rather than guesswork.
-
-# Machine-readable JSON lines (one object per action)
+# Machine-readable JSON lines, one object per action
 standx maker run BTC-USD --output json
 
-# Live mode places real post-only (ALO) orders and requires a private key.
-# It is currently locked behind STANDX_ENABLE_LIVE_MAKER=1 until
-# supervised production testing completes.
+# Live mode places real post-only (ALO) orders, requires a private key, and is
+# gated behind STANDX_ENABLE_LIVE_MAKER=1 pending supervised production testing.
 standx maker run BTC-USD --live
 ```
 
-In live mode the bot manages only orders tagged with its `sxmk-` client-order
-ID prefix: manual/API orders are preserved. It cleans up maker-owned orders on
-exit (with retries and verification), stops quoting after 3 consecutive API
-errors, and safely pauses on an asynchronous order-response disconnect. It
-then cleans and verifies the maker book, authenticates a new response session,
-and reconciles orders, position, and fills before quoting can resume. Reconnect
-attempts are bounded per round. If a round exhausts only retryable transport
-errors, the maker re-verifies its empty book, remains frozen, and retries with
-bounded exponential backoff. Cleanup failure, unexplained position mismatch,
-terminal authentication failure, or explicitly disabled reconnect still fails
-closed.
-Live fill telemetry is sourced from authenticated, maker-order-correlated trade
-history rather than inferred from position changes. Paper mode simulates fills
-when the touch crosses a quote, so position, inventory skew, and PnL telemetry
-are observable without going live.
+It is more than a quoting loop — inventory skew, a volatility circuit breaker,
+account-level hard floors, ownership isolation (it only touches its own `sxmk-`
+orders), bounded reconnect with position reconciliation, webhook alerts, and full
+net-PnL attribution including funding. Roughly 11k lines of strategy and risk
+engine live in [`crates/standx-maker`](crates/standx-maker/README.md).
 
-See **[docs/13-maker.md](docs/13-maker.md)** for the full guide — every flag,
-the anti-flicker decision table, inventory skew, telemetry, and live safety
-rails.
-
-For local structured log collection and SQL analysis, see
-**[docs/15-openobserve.md](docs/15-openobserve.md)**.
+Full guide: **[docs/13-maker.md](docs/13-maker.md)** (every flag, the anti-flicker
+decision table, telemetry, live safety rails) · live unlock criteria:
+**[docs/14-maker-live-gate.md](docs/14-maker-live-gate.md)** · structured log
+collection and SQL analysis: **[docs/15-openobserve.md](docs/15-openobserve.md)**.
 
 ### Self-update
 
@@ -475,14 +425,14 @@ diverging from its formula.
 
 ## 💡 Use Cases
 
-### 1. Natural Language Trading (OpenClaw)
+### 1. Natural Language Trading
 
 ```
 You: "I want to long ETH with 0.5 size, entry at 3500"
-OpenClaw: "I'll place a limit buy order for 0.5 ETH at $3,500. 
-           Current price is $3,480. Confirm?"
+Agent: "I'll place a limit buy order for 0.5 ETH at $3,500.
+        Current price is $3,480. Confirm?"
 You: "Yes"
-OpenClaw: "✅ Order placed. Order ID: ord_eth_xxx"
+Agent: "✅ Order placed. Order ID: ord_eth_xxx"
 ```
 
 ### 2. Automated Strategy (Any Agent)
@@ -513,26 +463,26 @@ await exec("standx order create ...")
 
 ## 🗺️ Roadmap
 
-### Phase 1: OpenClaw Excellence ✅ (Completed)
+### Phase 1: Agent-Ready CLI (Done)
 
-**Goal**: Best-in-class OpenClaw integration
+**Goal**: Best-in-class experience for any CLI-capable agent
 
 - [x] Structured JSON output
 - [x] Non-interactive mode
 - [x] Dashboard for real-time monitoring
 - [x] WebSocket streaming
 - [x] Complete trading commands (order, leverage, margin)
-- [ ] `--openclaw` optimized defaults
-- [ ] Session persistence
-- [ ] Batch execution
+- [x] `--openclaw` optimized defaults
+- [x] [OpenClaw skill package](openclaw/) (`standx-cli` skill, brew-installable)
 
 ### Phase 2: Universal Agent Toolkit (Current)
 
 **Goal**: Seamless experience across all AI Agents
 
 - [x] Comprehensive testing framework
-- [x] Reusable `standx-sdk` crate (REST/WS/signing, presentation-free) — see [workspace layout](#project-structure)
-- [x] Maker bot (SIP-5A): anti-flicker quoting, inventory skew, paper fill simulation, and PnL/uptime telemetry — see [docs/13-maker.md](docs/13-maker.md)
+- [x] Reusable `standx-sdk` crate (REST/WS/signing, presentation-free) — see [crates/standx-sdk](crates/standx-sdk)
+- [x] Maker bot (SIP-5A): anti-flicker quoting, inventory skew, risk engine, and net-PnL attribution — see [docs/13-maker.md](docs/13-maker.md)
+- [ ] Session persistence & batch execution
 - [ ] Portfolio PnL analysis
 - [ ] Python SDK - `pip install standx-agent`
 - [ ] More strategy templates (Grid, DCA, TWAP)
@@ -552,54 +502,96 @@ await exec("standx order create ...")
 
 ## 🤝 Comparison
 
-| Tool | OpenClaw | Other Agents | Learning Curve |
-|------|----------|--------------|----------------|
-| **StandX Agent Toolkit** | 🟢 Native | 🟢 CLI = Universal | 🟢 Low |
-| Hummingbot | 🔴 Complex | 🔴 Complex | 🔴 High |
-| CCXT | 🟡 Wrapper needed | 🟡 Wrapper needed | 🟡 Medium |
-| Hyperliquid SDK | 🟡 Integration needed | 🟡 Integration needed | 🟡 Medium |
+| Tool | Agent integration | Scope |
+|------|-------------------|-------|
+| **StandX Agent Toolkit** | 🟢 Shell exec, structured JSON | StandX only |
+| Hummingbot | 🔴 Full framework with its own runtime | Many venues, mature |
+| CCXT | 🟡 Library — needs a wrapper | Many venues, mature |
+| Hyperliquid SDK | 🟡 Library — needs a wrapper | Hyperliquid only |
+
+> These are mature, broader-scope projects — the axis here is agent integration,
+> not feature coverage or exchange support.
 
 ---
 
 ## 🏗️ Project Structure
 
-A Cargo workspace of two crates:
+A Cargo workspace of three crates:
 
 ```
 standx-cli/
-├── crates/standx-sdk/    # lib: REST client, WebSocket streams, models,
-│                         #      Ed25519 signing, maker strategy core.
-│                         #      Reusable by any Rust agent/bot; zero
-│                         #      presentation deps (tables behind a feature).
-└── crates/standx-cli/    # bin `standx`: commands, output formatting,
-                          #      config, telemetry. Depends on standx-sdk.
+├── crates/standx-sdk/     # lib: REST client, WebSocket streams, typed models,
+│                          #      Ed25519 signing. Presentation-free.
+├── crates/standx-maker/   # lib: market-making strategy + risk engine. Pure
+│                          #      decision functions, no I/O. → standx-sdk
+└── crates/standx-cli/     # bin `standx`: commands, output, config, telemetry.
+                           #      → standx-sdk, standx-maker
 ```
 
-The `standx` binary, install scripts, and Homebrew formula are unchanged by
-the split. Strategy logic (quoting, reconcile, skew, stats) lives in
-`standx_sdk::maker` as pure, unit-tested functions — no I/O — so it can be
-embedded or tested without a network.
+Strategy logic (quoting, reconcile, inventory skew, risk gates, PnL accounting)
+lives in `standx-maker` as pure functions over plain values — no network, no
+printing — so it is unit-testable offline and embeddable without the CLI. The
+`standx` binary, install scripts, and Homebrew formula are unaffected by the
+crate split.
+
+---
+
+## 📦 Rust SDK
+
+[`standx-sdk`](crates/standx-sdk) is the library the CLI is built on, published
+as a standalone crate for Rust bots that need typed models, persistent streams,
+and request signing without spawning a subprocess per call.
+
+Not on crates.io yet — depend on it by git:
+
+```toml
+standx-sdk = { git = "https://github.com/wjllance/standx-cli" }
+```
+
+- `client` — REST: market data, account, orders, leverage/margin, funding
+- `websocket` — public streams (`price`, `depth_book`, `public_trade`, `kline`) with venue sequence numbers
+- `account_stream` — authenticated order/position/trade/balance events with gap detection
+- `order_response` — place and cancel over the authenticated WS command channel
+- `auth` — Ed25519 request signing, JWT loading and expiry inspection
+
+Zero presentation dependencies by default; table rendering sits behind the
+optional `tabled` feature that only the CLI enables. Pre-1.0 — the API can still
+change.
+
+Full module tour and examples: **[crates/standx-sdk/README.md](crates/standx-sdk/README.md)**.
 
 ---
 
 ## 🛡️ Safety Features
 
-- **Structured errors** - Agents can handle errors programmatically
-- **Dry-run mode** - Test without execution
-- **Confirmation controls** - `--confirm` / `--no-confirm`
-- **Rate limiting** - Built-in protection
+Safety an agent can check programmatically, not just read about:
+
+- **Structured errors** — with `--output json`, failures print
+  `{error: {error_type, message}, timestamp}` to **stderr** and exit non-zero, so
+  an agent branches on a field rather than a message string.
+- **Dry-run** — `--dry-run` reports the command's financial-impact class and exits
+  without touching the network. It is a category-level check, not an order
+  simulator.
+- **Retryable-error classification** — the SDK marks transport failures and HTTP
+  429 as retryable and surfaces `RateLimitExceeded { retry_after }`, so callers
+  can back off deliberately. There is no client-side throttle — pacing is the
+  caller's job.
+- **Paper by default** — the maker bot runs its full loop and places no orders
+  unless `--live`, which additionally requires `STANDX_ENABLE_LIVE_MAKER=1`.
+- **Ownership isolation** — the maker only cancels orders carrying its own
+  `sxmk-` client-order-id prefix; it never touches orders it didn't place.
 
 ---
 
 ## 📝 Philosophy
 
-**OpenClaw First** — We optimize for the best OpenClaw experience first.
+**Intent to Execution** — an agent should get from a sentence to a resting order without a wrapper layer in between.
 
-**Agent Native** — Every design decision prioritizes machine consumption over human readability.
+**Structured by Default** — machine consumption over human readability: JSON output, typed errors, non-zero exit codes.
 
-**Ecosystem Ready** — CLI is the universal interface. Works with any agent, today.
+**Any Agent, No Privilege** — the CLI is the universal interface. Claude, Cursor, OpenClaw, LangChain all run the same commands.
 
-**Future Proof** — MCP, SDKs, and advanced features come later. The foundation is solid.
+**Layered, Not Monolithic** — the CLI is the agent surface; [`standx-sdk`](#-rust-sdk) is there when a subprocess per call is too coarse; `standx-maker` is strategy with no I/O. MCP and a Python SDK are still roadmap.
 
 ---
 
@@ -609,30 +601,13 @@ MIT OR Apache-2.0
 
 ---
 
-**Built for the AI Trading era.**
+## 💰 Support
 
-*OpenClaw First. Agent Native. Ecosystem Ready.*
+If your agent made some gains, you can sponsor API tokens:
+`0xAb3D58779dFC50BC84caA796003ABE31b5296210` (EVM). Every bit helps. ⛽
 
 ---
 
-## 💰 Buy Me Some Tokens
+**Built for the AI Trading era.**
 
-```
-┌────────────────────────────────────────────────────────────┐
-│                                                            │
-│   🤖 Your AI agent made some gains?                        │
-│                                                            │
-│   💸 Buy it some oil (sponsor API tokens)                  │
-│                                                            │
-│   ┌────────────────────────────────────────────────┐      │
-│   │  0xAb3D58779dFC50BC84caA796003ABE31b5296210   │      │
-│   └────────────────────────────────────────────────┘      │
-│                                                            │
-│   ✨ Support ongoing development & maintenance ✨          │
-│                                                            │
-└────────────────────────────────────────────────────────────┘
-```
-
-**EVM**: `0xAb3D58779dFC50BC84caA796003ABE31b5296210`
-
-*Every token counts. Even a gas fee is appreciated!* ⛽🙏
+*Trade by intent. Built for agents, not buttons.*

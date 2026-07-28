@@ -74,7 +74,7 @@ pub fn should_load_maker_local_env(args: &[String]) -> bool {
 
 #[derive(Parser, Debug)]
 #[command(name = "standx")]
-#[command(about = "OpenClaw-first AI Agent trading toolkit")]
+#[command(about = "AI Agent trading toolkit for StandX")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 pub struct Cli {
     #[command(subcommand)]
