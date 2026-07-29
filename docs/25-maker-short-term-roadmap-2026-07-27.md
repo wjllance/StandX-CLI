@@ -84,6 +84,16 @@ B/C/D 等硬化项）未做。候选 2（基线 PnL 采集）仍是推荐的下�
 填授权文本即可开跑；采集顺带记录 `divergence_standby` 事件，为 Divergence B 是否立项提供
 唯一证据来源。
 
+### 候选 4（草案，2026-07-29，待裁决）：外部领先价连续偏移 `[external_skew]`
+
+基线 PnL 采集的亏因分解（capture +5.0bps vs 30s markout -5.8bps，净 -1.1/19h）
+把靶心定在 markout 上；离线检验（同一 run 日志，只读）显示 excess→30s mark
+移动斜率 ≈ 1 且线性延伸到 ±2bps 桶，成交时点逆向选择系统性存在（买 -3.2 /
+卖 +3.65bps），反事实上限 λ=0.5 → +0.27（回收亏损 25~50%）。设计与预注册判据见
+[28-maker-external-skew-design.md](28-maker-external-skew-design.md)。
+**不占 live 时间片、窗口内不部署**；裁决与 A/B 排在基线 PnL 窗口收尾之后。
+microprice（盘口量失衡）降为第二优先，阻塞在 depth 观测字段（量从未落日志）。
+
 ### 候选 3：挂账清理与质量债
 
 - `maker-recovery-dedup` 分支封存（见现状盘点，已确认可无损删除）；

@@ -88,6 +88,20 @@ emergency cancel 操作人：______
 授权人 / 时间：______
 ```
 
+已填授权（2026-07-28）：
+
+```text
+授权：冻结基线 PnL 绝对读数采集（单臂长跑）
+symbol：HYPE-USD
+配置：examples/maker-guard-hype-candidate.toml（sha256 6314a374…，原样）
+代码：git sha 819f0f097b1b459cd09b541e86362d84d0486ec0（含 5-b 469550a + funding 接入）
+风险边界：单 symbol、一档、最小有效数量、max_position 沿用基线；
+          stop_loss=5.0 生效；账户硬熔断不开启
+窗口：2026-07-28T08:15Z 起，计划 72 小时（3 天），不换臂、不调参
+emergency cancel 操作人：release owner（BossX）
+授权人 / 时间：release owner（BossX），2026-07-28，会话内明确授权（"授权"）
+```
+
 风险预算沿用 canary 口径（[18 号"风险预算"](18-maker-strategy-roadmap.md)）：已知最坏
 路径是趋势市库存满仓后 stop-loss 停机持仓，损失上界约
 `max_position × 不利变动幅度 + 退出成本`。本轮不扩规模，因此不触发安全轨二级的额外前置。
