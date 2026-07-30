@@ -100,6 +100,15 @@ microprice（盘口量失衡）降为第二优先，阻塞在 depth 观测字段
 - Divergence B + C 实现（默认关、replay 等价）——若走候选 1，这两项直接并入 5-b；
 - 质量债 #259（dedup 残余）/ #261（CLI 一致性）/ #277（请求生命周期关联）。
 
+### 候选 5（草案，2026-07-30，待裁决）：cleanup 残余判定硬化
+
+基线 PnL 采集于 07-29T19:09Z 被一次**误报性 fail-safe** 截断（REST 撤单
+19:09:41.928 已成功，open-orders 列表 ≥15s 读-写滞后误判残余）。安全轨硬化项：
+cleanup 撤单/判定改为 WS order-response success 主判据 + 按 order_id 单查兜底 +
+列表宽限，fail-closed 语义不变。纯代码 + 离线验证 + 受监督 canary，不占 live
+时间片。设计见
+[29-maker-cleanup-residual-verification.md](29-maker-cleanup-residual-verification.md)。
+
 ## 明确不做（含理由）
 
 - **基差半衰期评估**（`basis_half_life_secs` 300s → 60–120s 的条件性评估）与
