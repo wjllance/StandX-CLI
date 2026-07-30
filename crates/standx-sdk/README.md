@@ -110,7 +110,7 @@ market/account WebSocket, and order-response WebSocket addresses:
 ```rust
 use standx_sdk::{StandXClient, StandXEndpoints};
 
-let endpoints = StandXEndpoints::new("https://canary-perps.standx.org")?;
+let endpoints = StandXEndpoints::new("https://perps.example.com")?;
 let client = StandXClient::from_endpoints(&endpoints)?;
 ```
 

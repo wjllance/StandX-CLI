@@ -603,13 +603,13 @@ mod tests {
         let selected = temp_dir.path().join("canary.toml");
         let mut config = Config::load_from_path(Some(&selected)).unwrap();
         config
-            .set("base_url", "https://canary-perps.standx.org/")
+            .set("base_url", "https://perps.example.com/")
             .unwrap();
 
         assert!(selected.exists());
         assert!(!temp_dir.path().join("config.toml").exists());
         let loaded = Config::load_from_path(Some(&selected)).unwrap();
-        assert_eq!(loaded.base_url, "https://canary-perps.standx.org");
+        assert_eq!(loaded.base_url, "https://perps.example.com");
         assert_eq!(loaded.config_file(), selected);
     }
 
@@ -620,9 +620,7 @@ mod tests {
         std::fs::create_dir(&selected).unwrap();
 
         let mut config = Config::load_from_path(Some(&selected)).unwrap();
-        config
-            .set("base_url", "https://canary-perps.standx.org")
-            .unwrap();
+        config.set("base_url", "https://perps.example.com").unwrap();
 
         assert_eq!(config.config_file(), selected.join("config.toml"));
         assert!(selected.join("config.toml").is_file());
@@ -633,14 +631,14 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let mut config = Config::load_from_path(Some(temp_dir.path())).unwrap();
         config
-            .set("base_url", "https://canary-perps.standx.org/")
+            .set("base_url", "https://perps.example.com/")
             .unwrap();
-        assert_eq!(config.base_url, "https://canary-perps.standx.org");
+        assert_eq!(config.base_url, "https://perps.example.com");
 
         let error = config
-            .set("base_url", "http://canary-perps.standx.org")
+            .set("base_url", "http://perps.example.com")
             .unwrap_err();
         assert!(error.to_string().contains("plain HTTP"));
-        assert_eq!(config.base_url, "https://canary-perps.standx.org");
+        assert_eq!(config.base_url, "https://perps.example.com");
     }
 }

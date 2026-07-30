@@ -113,7 +113,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn derives_production_and_canary_transport_urls() {
+    fn derives_production_and_custom_transport_urls() {
         let production = StandXEndpoints::default();
         assert_eq!(production.base_url(), "https://perps.standx.com");
         assert_eq!(
@@ -125,15 +125,12 @@ mod tests {
             "wss://perps.standx.com/ws-api/v1"
         );
 
-        let canary = StandXEndpoints::new("https://canary-perps.standx.org/").unwrap();
-        assert_eq!(canary.base_url(), "https://canary-perps.standx.org");
+        let custom = StandXEndpoints::new("https://perps.example.com/").unwrap();
+        assert_eq!(custom.base_url(), "https://perps.example.com");
+        assert_eq!(custom.stream_url(), "wss://perps.example.com/ws-stream/v1");
         assert_eq!(
-            canary.stream_url(),
-            "wss://canary-perps.standx.org/ws-stream/v1"
-        );
-        assert_eq!(
-            canary.order_response_url(),
-            "wss://canary-perps.standx.org/ws-api/v1"
+            custom.order_response_url(),
+            "wss://perps.example.com/ws-api/v1"
         );
     }
 
@@ -155,7 +152,7 @@ mod tests {
     fn rejects_ambiguous_or_credential_bearing_urls() {
         for value in [
             "",
-            "canary-perps.standx.org",
+            "perps.example.com",
             "ftp://example.com",
             "https://user@example.com",
             "https://example.com/api",

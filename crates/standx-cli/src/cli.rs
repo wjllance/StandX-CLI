@@ -798,14 +798,14 @@ mod tests {
         let before = Cli::try_parse_from([
             "standx",
             "--endpoint",
-            "https://canary-perps.standx.org",
+            "https://perps.example.com",
             "market",
             "symbols",
         ])
         .expect("global endpoint before the subcommand should parse");
         assert_eq!(
             before.endpoint.as_deref(),
-            Some("https://canary-perps.standx.org")
+            Some("https://perps.example.com")
         );
 
         let after = Cli::try_parse_from([
@@ -813,12 +813,12 @@ mod tests {
             "account",
             "orders",
             "--endpoint",
-            "https://canary-perps.standx.org/",
+            "https://perps.example.com/",
         ])
         .expect("global endpoint after the subcommand should parse");
         assert_eq!(
             after.endpoint.as_deref(),
-            Some("https://canary-perps.standx.org/")
+            Some("https://perps.example.com/")
         );
     }
 
