@@ -6,6 +6,7 @@ pub(super) struct RuntimeDeps {
     pub(super) args: MakerRunArgs,
     pub(super) output_format: OutputFormat,
     pub(super) client: StandXClient,
+    pub(super) endpoints: standx_sdk::StandXEndpoints,
     pub(super) cfg: MakerConfig,
     pub(super) symbol: String,
     pub(super) notifier: MakerNotifier,
@@ -117,6 +118,7 @@ impl MakerRuntime {
         let MakerStartup {
             live_process_lock,
             client,
+            endpoints,
             cfg,
             symbol,
             notifier,
@@ -131,7 +133,8 @@ impl MakerRuntime {
         let (feed, updates, feed_handle) = if args.no_ws {
             (None, None, None)
         } else {
-            let (state, rx, handle) = spawn_market_feed(symbol.clone(), args.verbose);
+            let (state, rx, handle) =
+                spawn_market_feed(symbol.clone(), args.verbose, endpoints.clone());
             (Some(state), Some(rx), Some(handle))
         };
         let market_watchdog_updates = updates.as_ref().cloned();
@@ -242,6 +245,7 @@ impl MakerRuntime {
                 args,
                 output_format,
                 client,
+                endpoints,
                 cfg,
                 symbol,
                 notifier,

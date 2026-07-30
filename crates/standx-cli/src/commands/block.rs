@@ -2,11 +2,16 @@ use crate::cli::*;
 use anyhow::Result;
 use standx_sdk::client::StandXClient;
 use standx_sdk::models::BlockTrade;
+use standx_sdk::StandXEndpoints;
 use std::time::Duration;
 
 /// Handle block trade commands
-pub async fn handle_block(command: BlockCommands, output_format: OutputFormat) -> Result<()> {
-    let client = StandXClient::new()?;
+pub async fn handle_block(
+    command: BlockCommands,
+    output_format: OutputFormat,
+    endpoints: &StandXEndpoints,
+) -> Result<()> {
+    let client = StandXClient::from_endpoints(endpoints)?;
 
     match command {
         BlockCommands::List {

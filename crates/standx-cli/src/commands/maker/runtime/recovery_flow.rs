@@ -744,6 +744,7 @@ impl MakerRuntime {
                             args.account_stream_reconnect_attempts,
                             args.account_stream_reconnect_backoff,
                             &mut self.ctrl_c_rx,
+                            &self.deps.endpoints,
                         )
                         .await
                         {
@@ -1136,6 +1137,7 @@ impl MakerRuntime {
                                     ),
                                     original_failure: &detail,
                                     ctrl_c: self.ctrl_c_rx.clone(),
+                                    endpoints: &self.deps.endpoints,
                                 },
                                 &mut self.loop_state.ledger,
                                 &mut self.loop_state.stats,

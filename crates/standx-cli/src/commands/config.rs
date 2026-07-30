@@ -3,10 +3,14 @@ use crate::config::Config;
 use anyhow::Result;
 
 /// Handle config commands
-pub async fn handle_config(command: ConfigCommands, output_format: OutputFormat) -> Result<()> {
+pub async fn handle_config(
+    command: ConfigCommands,
+    output_format: OutputFormat,
+    config_path: Option<&str>,
+) -> Result<()> {
     match command {
         ConfigCommands::Init => {
-            let config = Config::default();
+            let config = Config::load_selected(config_path)?;
             config.save()?;
             match output_format {
                 OutputFormat::Json => {
@@ -22,7 +26,7 @@ pub async fn handle_config(command: ConfigCommands, output_format: OutputFormat)
             }
         }
         ConfigCommands::Set { key, value } => {
-            let mut config = Config::load().unwrap_or_default();
+            let mut config = Config::load_selected(config_path)?;
             config.set(&key, &value)?;
             match output_format {
                 OutputFormat::Json => {
@@ -38,7 +42,7 @@ pub async fn handle_config(command: ConfigCommands, output_format: OutputFormat)
             }
         }
         ConfigCommands::Get { key } => {
-            let config = Config::load().unwrap_or_default();
+            let config = Config::load_selected(config_path)?;
             let value = config.get(&key)?;
             match output_format {
                 OutputFormat::Json => {
@@ -53,7 +57,7 @@ pub async fn handle_config(command: ConfigCommands, output_format: OutputFormat)
             }
         }
         ConfigCommands::Show => {
-            let config = Config::load().unwrap_or_default();
+            let config = Config::load_selected(config_path)?;
             match output_format {
                 OutputFormat::Json => {
                     let json = serde_json::json!({

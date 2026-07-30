@@ -785,13 +785,14 @@ pub(super) async fn reconnect_account_stream(
     max_attempts: u32,
     backoff_secs: u64,
     ctrl_c: &mut tokio::sync::watch::Receiver<bool>,
+    endpoints: &standx_sdk::StandXEndpoints,
 ) -> AccountStreamReconnect {
     let mut last_connect_error: Option<String> = None;
     for attempt in 1..=max_attempts {
         *epoch = epoch.saturating_add(1);
         let connect_epoch = *epoch;
         let reconnect = async {
-            let stream = AccountStream::new(connect_epoch)?;
+            let stream = AccountStream::from_endpoints(connect_epoch, endpoints)?;
             stream
                 .connect(&[
                     AccountChannel::Order,
@@ -851,6 +852,7 @@ pub(super) struct ReconnectRequest<'a> {
     pub(super) base_backoff: Duration,
     pub(super) original_failure: &'a str,
     pub(super) ctrl_c: tokio::sync::watch::Receiver<bool>,
+    pub(super) endpoints: &'a standx_sdk::StandXEndpoints,
 }
 
 pub(super) async fn reconnect_order_response(
@@ -871,6 +873,7 @@ pub(super) async fn reconnect_order_response(
         base_backoff,
         original_failure,
         ctrl_c,
+        endpoints,
     } = request;
     let mut ctrl_c = ctrl_c;
     let mut last_error = None;
@@ -914,7 +917,7 @@ pub(super) async fn reconnect_order_response(
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {}
             }
             let session_id = uuid::Uuid::new_v4().to_string();
-            let stream = OrderResponseStream::new(&session_id)?;
+            let stream = OrderResponseStream::from_endpoints(&session_id, endpoints)?;
             let connect_attempt = tokio::select! {
                 biased;
                 _ = ctrl_c_latched(&mut ctrl_c) => {

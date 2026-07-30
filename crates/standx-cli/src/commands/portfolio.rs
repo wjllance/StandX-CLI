@@ -4,6 +4,7 @@ use crate::output;
 use anyhow::Result;
 use standx_sdk::client::StandXClient;
 use standx_sdk::models::PortfolioSnapshot;
+use standx_sdk::StandXEndpoints;
 
 /// Portfolio command for direct execution (without subcommands)
 #[derive(Debug)]
@@ -15,10 +16,11 @@ pub enum PortfolioCommand {
 pub async fn handle_portfolio(
     command: PortfolioCommand,
     output_format: OutputFormat,
+    endpoints: &StandXEndpoints,
 ) -> Result<()> {
     match command {
         PortfolioCommand::Snapshot { _verbose, watch } => {
-            let client = StandXClient::new()?;
+            let client = StandXClient::from_endpoints(endpoints)?;
             run_watch_loop(
                 watch,
                 || build_portfolio_output(&client, _verbose, output_format),

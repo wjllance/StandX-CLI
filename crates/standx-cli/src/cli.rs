@@ -84,6 +84,10 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub config: Option<String>,
 
+    /// Override the StandX REST/WS environment for this invocation
+    #[arg(long, global = true)]
+    pub endpoint: Option<String>,
+
     /// Output format
     #[arg(short, long, global = true, value_enum, default_value = "table")]
     pub output: OutputFormat,
@@ -787,6 +791,35 @@ mod tests {
         };
         assert_eq!(symbol.as_deref(), Some("BTC-USD"));
         assert_eq!(status, "all");
+    }
+
+    #[test]
+    fn endpoint_is_a_global_one_shot_override() {
+        let before = Cli::try_parse_from([
+            "standx",
+            "--endpoint",
+            "https://canary-perps.standx.org",
+            "market",
+            "symbols",
+        ])
+        .expect("global endpoint before the subcommand should parse");
+        assert_eq!(
+            before.endpoint.as_deref(),
+            Some("https://canary-perps.standx.org")
+        );
+
+        let after = Cli::try_parse_from([
+            "standx",
+            "account",
+            "orders",
+            "--endpoint",
+            "https://canary-perps.standx.org/",
+        ])
+        .expect("global endpoint after the subcommand should parse");
+        assert_eq!(
+            after.endpoint.as_deref(),
+            Some("https://canary-perps.standx.org/")
+        );
     }
 
     #[test]

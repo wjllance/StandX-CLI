@@ -59,7 +59,7 @@ pub enum Error {
         retry_after: Option<u64>,
     },
 
-    #[error("Configuration error")]
+    #[error("Configuration error: {message}")]
     #[serde(rename = "CONFIG_ERROR")]
     Config { message: String },
 

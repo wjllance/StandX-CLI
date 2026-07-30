@@ -123,7 +123,16 @@ async fn async_main(args: Vec<String>) {
     };
 
     // Execute command and handle errors
-    match execute_command(cli.command, output, cli.verbose, cli.yes).await {
+    match execute_command(
+        cli.command,
+        output,
+        cli.verbose,
+        cli.yes,
+        cli.endpoint.as_deref(),
+        cli.config.as_deref(),
+    )
+    .await
+    {
         Ok(_) => {
             telemetry.track_command_complete(command_name, true, None);
         }
@@ -235,34 +244,75 @@ async fn execute_command(
     verbose: bool,
     // Global --yes / STANDX_AUTO_CONFIRM: the single confirmation source.
     assume_yes: bool,
+    endpoint_override: Option<&str>,
+    config_path: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let endpoints = command_uses_perps_endpoint(&command)
+        .then(|| standx_cli::config::Config::resolve_endpoints(endpoint_override, config_path))
+        .transpose()?;
+
     match command {
         Commands::Config { command } => {
-            commands::handle_config(command, output).await?;
+            commands::handle_config(command, output, config_path).await?;
         }
         Commands::Auth { command } => {
             commands::handle_auth(command).await?;
         }
         Commands::Market { command } => {
-            commands::handle_market(command, output).await?;
+            commands::handle_market(
+                command,
+                output,
+                endpoints.as_ref().expect("market uses perps endpoint"),
+            )
+            .await?;
         }
         Commands::Account { command } => {
-            commands::handle_account(command, output).await?;
+            commands::handle_account(
+                command,
+                output,
+                endpoints.as_ref().expect("account uses perps endpoint"),
+            )
+            .await?;
         }
         Commands::Order { command } => {
-            commands::handle_order(command, output, verbose).await?;
+            commands::handle_order(
+                command,
+                output,
+                verbose,
+                endpoints.as_ref().expect("order uses perps endpoint"),
+            )
+            .await?;
         }
         Commands::Trade { command } => {
-            commands::handle_trade(command, output).await?;
+            commands::handle_trade(
+                command,
+                output,
+                endpoints.as_ref().expect("trade uses perps endpoint"),
+            )
+            .await?;
         }
         Commands::Leverage { command } => {
-            commands::handle_leverage(command, output).await?;
+            commands::handle_leverage(
+                command,
+                output,
+                endpoints.as_ref().expect("leverage uses perps endpoint"),
+            )
+            .await?;
         }
         Commands::Margin { command } => {
-            commands::handle_margin(command).await?;
+            commands::handle_margin(
+                command,
+                endpoints.as_ref().expect("margin uses perps endpoint"),
+            )
+            .await?;
         }
         Commands::Stream { command } => {
-            commands::handle_stream(command, verbose).await?;
+            commands::handle_stream(
+                command,
+                verbose,
+                endpoints.as_ref().expect("stream uses perps endpoint"),
+            )
+            .await?;
         }
         Commands::Dashboard {
             symbols,
@@ -270,24 +320,49 @@ async fn execute_command(
             watch,
             compact,
         } => {
-            commands::handle_dashboard(symbols, verbose, watch, compact, output).await?;
+            commands::handle_dashboard(
+                symbols,
+                verbose,
+                watch,
+                compact,
+                output,
+                endpoints.as_ref().expect("dashboard uses perps endpoint"),
+            )
+            .await?;
         }
         Commands::Portfolio { verbose, watch } => {
             let command = commands::PortfolioCommand::Snapshot {
                 _verbose: verbose,
                 watch,
             };
-            commands::handle_portfolio(command, output).await?;
+            commands::handle_portfolio(
+                command,
+                output,
+                endpoints.as_ref().expect("portfolio uses perps endpoint"),
+            )
+            .await?;
         }
         Commands::Block { command } => {
-            commands::handle_block(command, output).await?;
+            commands::handle_block(
+                command,
+                output,
+                endpoints.as_ref().expect("block uses perps endpoint"),
+            )
+            .await?;
         }
         Commands::Maker { command } => {
             // anyhow flattens the concrete error type when it is boxed into a
             // `Box<dyn Error>`, so downcast the fail-safe marker here (where the
             // original `anyhow::Error` is still intact) and re-box it concretely
             // so `exit_code_for` can recognise it and pick the fail-safe code.
-            if let Err(err) = commands::handle_maker(*command, output, verbose).await {
+            if let Err(err) = commands::handle_maker(
+                *command,
+                output,
+                verbose,
+                endpoints.as_ref().expect("maker uses perps endpoint"),
+            )
+            .await
+            {
                 return Err(match err.downcast::<FailSafeShutdown>() {
                     Ok(fail_safe) => Box::new(fail_safe) as Box<dyn std::error::Error>,
                     Err(other) => other.into(),
@@ -301,8 +376,18 @@ async fn execute_command(
             flush_secs,
             status_secs,
         } => {
-            commands::handle_lag_recorder(symbol, hl_coin, out, flush_secs, status_secs, verbose)
-                .await?;
+            commands::handle_lag_recorder(
+                symbol,
+                hl_coin,
+                out,
+                flush_secs,
+                status_secs,
+                verbose,
+                endpoints
+                    .as_ref()
+                    .expect("lag-recorder uses perps endpoint"),
+            )
+            .await?;
         }
         Commands::Update { check, pre, force } => {
             // Confirmation comes from the single global --yes / STANDX_AUTO_CONFIRM.
@@ -310,6 +395,13 @@ async fn execute_command(
         }
     }
     Ok(())
+}
+
+fn command_uses_perps_endpoint(command: &Commands) -> bool {
+    !matches!(
+        command,
+        Commands::Config { .. } | Commands::Auth { .. } | Commands::Update { .. }
+    )
 }
 
 /// Handle dry run mode - show what would be executed

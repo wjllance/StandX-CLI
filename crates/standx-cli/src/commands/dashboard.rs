@@ -6,6 +6,7 @@ use futures::future::join_all;
 use standx_sdk::client::StandXClient;
 use standx_sdk::models::{DashboardSnapshot, Trade};
 use standx_sdk::websocket::{StandXWebSocket, WsMessage};
+use standx_sdk::StandXEndpoints;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
@@ -17,6 +18,7 @@ pub async fn handle_dashboard(
     watch: Option<u64>,
     compact: bool,
     output_format: OutputFormat,
+    endpoints: &StandXEndpoints,
 ) -> Result<()> {
     // Build list of symbols to track
     let symbol_list: Vec<String> = if let Some(s) = symbols {
@@ -28,7 +30,7 @@ pub async fn handle_dashboard(
     } else {
         vec![]
     };
-    let client = StandXClient::new()?;
+    let client = StandXClient::from_endpoints(endpoints)?;
     let ws_trades: Arc<RwLock<VecDeque<Trade>>> = Arc::new(RwLock::new(VecDeque::new()));
     let mut ws_trade_updates_rx: Option<watch::Receiver<u64>> = None;
     let mut ws_trades_enabled = false;
@@ -56,7 +58,9 @@ pub async fn handle_dashboard(
                 }
             }
 
-            if let Ok(ws) = StandXWebSocket::without_auth() {
+            if let Ok(ws) =
+                StandXWebSocket::without_auth_from_endpoints_with_verbose(endpoints, false)
+            {
                 if ws
                     .subscribe("public_trade", Some(&first_symbol))
                     .await

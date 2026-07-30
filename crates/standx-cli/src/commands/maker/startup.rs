@@ -1,6 +1,7 @@
 use super::output::{emit_ledger_sync, emit_startup_rejected};
 use super::*;
 use standx_sdk::order_response::{OrderCommandSender, OrderResponse, OrderResponseHealth};
+use standx_sdk::StandXEndpoints;
 
 /// Everything that exists exactly when the maker runs `--live`: the
 /// order-response stream, the authenticated account stream, the projection
@@ -28,8 +29,8 @@ pub(super) struct LiveSession {
     pub(super) latency_started: std::time::Instant,
 }
 
-pub(super) fn new_maker_rest_client() -> Result<StandXClient> {
-    let client = StandXClient::new()?;
+pub(super) fn new_maker_rest_client(endpoints: &StandXEndpoints) -> Result<StandXClient> {
+    let client = StandXClient::from_endpoints(endpoints)?;
     debug_assert!(client.session_id().is_none());
     Ok(client)
 }
@@ -68,6 +69,7 @@ pub(super) fn validate_alert_thresholds(
 pub(super) struct MakerStartup {
     pub(super) live_process_lock: Option<super::process_lock::LiveProcessLock>,
     pub(super) client: StandXClient,
+    pub(super) endpoints: StandXEndpoints,
     pub(super) cfg: MakerConfig,
     pub(super) symbol: String,
     pub(super) notifier: MakerNotifier,
@@ -89,6 +91,7 @@ pub(super) async fn run_startup(
     symbol: String,
     args: &MakerRunArgs,
     output_format: OutputFormat,
+    endpoints: &StandXEndpoints,
 ) -> Result<MakerStartup> {
     let live_process_lock = args
         .live
@@ -141,7 +144,7 @@ pub(super) async fn run_startup(
     // order-response session. Attaching x-session-id to REST cancellation
     // would route its asynchronous response into the command response stream,
     // where it has no projection request entry and would look uncorrelated.
-    let client = new_maker_rest_client()?;
+    let client = new_maker_rest_client(endpoints)?;
 
     // ---- Startup: symbol metadata + invariants (fail fast) ----
     let infos = client.get_symbol_info().await?;
@@ -413,7 +416,7 @@ pub(super) async fn run_startup(
         // snapshot so events buffered during authentication cannot create an
         // unobserved startup gap.
         let account_stream_epoch = 1_u64;
-        let account_stream = AccountStream::new(account_stream_epoch)?;
+        let account_stream = AccountStream::from_endpoints(account_stream_epoch, endpoints)?;
         let (account_events, account_stream_health, account_stream_handle) = account_stream
             .connect(&[
                 AccountChannel::Order,
@@ -445,7 +448,7 @@ pub(super) async fn run_startup(
                 "position changed while account stream was authenticating: baseline {starting_position:+.8}, snapshot {post_auth_position:+.8}"
             ));
         }
-        let stream = OrderResponseStream::new(order_session_id)?;
+        let stream = OrderResponseStream::from_endpoints(order_session_id, endpoints)?;
         let (order_commands, order_responses, order_response_health, order_response_handle) =
             stream.connect().await?;
         if let Some(after) = args.controlled_disconnect_after {
@@ -511,6 +514,7 @@ pub(super) async fn run_startup(
     Ok(MakerStartup {
         live_process_lock,
         client,
+        endpoints: endpoints.clone(),
         cfg,
         symbol,
         notifier,

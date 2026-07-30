@@ -1,6 +1,7 @@
 //! WebSocket client for real-time data
 
 use crate::auth::Credentials;
+use crate::endpoints::StandXEndpoints;
 use crate::error::{Error, Result};
 use crate::models::*;
 use futures::{SinkExt, StreamExt};
@@ -11,7 +12,6 @@ use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-const DEFAULT_WS_URL: &str = "wss://perps.standx.com/ws-stream/v1";
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -128,6 +128,16 @@ impl StandXWebSocket {
 
     /// Create a new WebSocket client with verbose mode
     pub fn new_with_verbose(verbose: bool) -> Result<Self> {
+        Self::from_endpoints_with_verbose(&StandXEndpoints::default(), verbose)
+    }
+
+    /// Create an authenticated client for a validated endpoint set.
+    pub fn from_endpoints(endpoints: &StandXEndpoints) -> Result<Self> {
+        Self::from_endpoints_with_verbose(endpoints, false)
+    }
+
+    /// Create an authenticated client for a validated endpoint set.
+    pub fn from_endpoints_with_verbose(endpoints: &StandXEndpoints, verbose: bool) -> Result<Self> {
         let creds = Credentials::load()?;
 
         if creds.is_expired() {
@@ -141,7 +151,7 @@ impl StandXWebSocket {
         let (message_tx, message_rx) = mpsc::channel(100);
 
         Ok(Self {
-            url: DEFAULT_WS_URL.to_string(),
+            url: endpoints.stream_url().to_string(),
             token: Some(creds.token),
             state: Arc::new(RwLock::new(WsState::Disconnected)),
             subscriptions: Arc::new(RwLock::new(Vec::new())),
@@ -161,10 +171,23 @@ impl StandXWebSocket {
 
     /// Create without authentication with verbose mode
     pub fn without_auth_with_verbose(verbose: bool) -> Result<Self> {
+        Self::without_auth_from_endpoints_with_verbose(&StandXEndpoints::default(), verbose)
+    }
+
+    /// Create an unauthenticated client for a validated endpoint set.
+    pub fn without_auth_from_endpoints(endpoints: &StandXEndpoints) -> Result<Self> {
+        Self::without_auth_from_endpoints_with_verbose(endpoints, false)
+    }
+
+    /// Create an unauthenticated client for a validated endpoint set.
+    pub fn without_auth_from_endpoints_with_verbose(
+        endpoints: &StandXEndpoints,
+        verbose: bool,
+    ) -> Result<Self> {
         let (message_tx, message_rx) = mpsc::channel(100);
 
         Ok(Self {
-            url: DEFAULT_WS_URL.to_string(),
+            url: endpoints.stream_url().to_string(),
             token: None,
             state: Arc::new(RwLock::new(WsState::Disconnected)),
             subscriptions: Arc::new(RwLock::new(Vec::new())),

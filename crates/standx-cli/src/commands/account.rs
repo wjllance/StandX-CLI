@@ -2,10 +2,15 @@ use crate::cli::*;
 use crate::output;
 use anyhow::Result;
 use standx_sdk::client::StandXClient;
+use standx_sdk::StandXEndpoints;
 
 /// Handle account commands
-pub async fn handle_account(command: AccountCommands, output_format: OutputFormat) -> Result<()> {
-    let client = StandXClient::new()?;
+pub async fn handle_account(
+    command: AccountCommands,
+    output_format: OutputFormat,
+    endpoints: &StandXEndpoints,
+) -> Result<()> {
+    let client = StandXClient::from_endpoints(endpoints)?;
 
     match command {
         AccountCommands::Balances => {

@@ -2,6 +2,7 @@
 
 use crate::auth::{Credentials, StandXSigner};
 use crate::client::order::{cancel_order_body, create_order_body, CreateOrderParams};
+use crate::endpoints::StandXEndpoints;
 use crate::error::{Error, Result};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,6 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-const DEFAULT_ORDER_RESPONSE_URL: &str = "wss://perps.standx.com/ws-api/v1";
 const ORDER_RESPONSE_ROTATE_AFTER: Duration = Duration::from_secs(23 * 60 * 60 + 50 * 60);
 const ORDER_RESPONSE_PING_INTERVAL: Duration = Duration::from_secs(30);
 /// A healthy server sends a ping about every 10 seconds; a longer silent
@@ -229,6 +229,14 @@ impl OrderResponseHealth {
 impl OrderResponseStream {
     /// Construct a production stream from the currently-loaded credentials.
     pub fn new(session_id: impl Into<String>) -> Result<Self> {
+        Self::from_endpoints(session_id, &StandXEndpoints::default())
+    }
+
+    /// Construct a stream for a validated endpoint set.
+    pub fn from_endpoints(
+        session_id: impl Into<String>,
+        endpoints: &StandXEndpoints,
+    ) -> Result<Self> {
         let credentials = Credentials::load()?;
         if credentials.is_expired() {
             return Err(Error::AuthRequired {
@@ -239,7 +247,7 @@ impl OrderResponseStream {
         }
 
         Ok(Self {
-            url: DEFAULT_ORDER_RESPONSE_URL.to_string(),
+            url: endpoints.order_response_url().to_string(),
             token: credentials.token,
             signer: (!credentials.private_key.is_empty())
                 .then(|| StandXSigner::from_base58(&credentials.private_key))

@@ -2,13 +2,18 @@ use crate::cli::*;
 use anyhow::Result;
 use standx_sdk::account_stream::{AccountChannel, AccountEvent, AccountStream};
 use standx_sdk::websocket::{StandXWebSocket, WsMessage};
+use standx_sdk::StandXEndpoints;
 
 /// Handle stream commands
-pub async fn handle_stream(command: StreamCommands, verbose: bool) -> Result<()> {
+pub async fn handle_stream(
+    command: StreamCommands,
+    verbose: bool,
+    endpoints: &StandXEndpoints,
+) -> Result<()> {
     match command {
         // Public channels - no auth required
         StreamCommands::Price { symbol } => {
-            let ws = StandXWebSocket::without_auth_with_verbose(verbose)?;
+            let ws = StandXWebSocket::without_auth_from_endpoints_with_verbose(endpoints, verbose)?;
             let _ = ws.subscribe("price", Some(&symbol)).await;
             let mut rx = ws.connect().await?;
 
@@ -28,7 +33,7 @@ pub async fn handle_stream(command: StreamCommands, verbose: bool) -> Result<()>
             }
         }
         StreamCommands::Depth { symbol, levels } => {
-            let ws = StandXWebSocket::without_auth_with_verbose(verbose)?;
+            let ws = StandXWebSocket::without_auth_from_endpoints_with_verbose(endpoints, verbose)?;
             let _ = ws.subscribe("depth_book", Some(&symbol)).await;
             let mut rx = ws.connect().await?;
 
@@ -50,7 +55,7 @@ pub async fn handle_stream(command: StreamCommands, verbose: bool) -> Result<()>
             }
         }
         StreamCommands::Trade { symbol } => {
-            let ws = StandXWebSocket::without_auth_with_verbose(verbose)?;
+            let ws = StandXWebSocket::without_auth_from_endpoints_with_verbose(endpoints, verbose)?;
             let _ = ws.subscribe("public_trade", Some(&symbol)).await;
             let mut rx = ws.connect().await?;
 
@@ -79,7 +84,7 @@ pub async fn handle_stream(command: StreamCommands, verbose: bool) -> Result<()>
             }
         }
         StreamCommands::Kline { symbol, interval } => {
-            let ws = StandXWebSocket::without_auth_with_verbose(verbose)?;
+            let ws = StandXWebSocket::without_auth_from_endpoints_with_verbose(endpoints, verbose)?;
             // Subscribe with interval parameter embedded in topic
             ws.subscribe_with_interval("kline", Some(&symbol), Some(&interval))
                 .await?;
@@ -111,7 +116,7 @@ pub async fn handle_stream(command: StreamCommands, verbose: bool) -> Result<()>
         }
         // User-level authenticated channels
         StreamCommands::Order => {
-            let stream = AccountStream::new(1)?;
+            let stream = AccountStream::from_endpoints(1, endpoints)?;
             let (mut rx, _health, _handle) = stream.connect(&[AccountChannel::Order]).await?;
 
             println!("Streaming order updates");
@@ -124,7 +129,7 @@ pub async fn handle_stream(command: StreamCommands, verbose: bool) -> Result<()>
             }
         }
         StreamCommands::Position => {
-            let stream = AccountStream::new(1)?;
+            let stream = AccountStream::from_endpoints(1, endpoints)?;
             let (mut rx, _health, _handle) = stream.connect(&[AccountChannel::Position]).await?;
 
             println!("Streaming position updates");
@@ -137,7 +142,7 @@ pub async fn handle_stream(command: StreamCommands, verbose: bool) -> Result<()>
             }
         }
         StreamCommands::Balance => {
-            let stream = AccountStream::new(1)?;
+            let stream = AccountStream::from_endpoints(1, endpoints)?;
             let (mut rx, _health, _handle) = stream.connect(&[AccountChannel::Balance]).await?;
 
             println!("Streaming balance updates");
@@ -150,7 +155,7 @@ pub async fn handle_stream(command: StreamCommands, verbose: bool) -> Result<()>
             }
         }
         StreamCommands::Fills => {
-            let stream = AccountStream::new(1)?;
+            let stream = AccountStream::from_endpoints(1, endpoints)?;
             let (mut rx, _health, _handle) = stream.connect(&[AccountChannel::Trade]).await?;
 
             println!("Streaming fill/trade updates");
