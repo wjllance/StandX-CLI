@@ -116,6 +116,20 @@ emergency cancel 操作人：release owner（BossX）
 授权人 / 时间：release owner（BossX），2026-07-30，会话内明确授权（"授权开始"）
 ```
 
+已填授权（2026-07-30，第三次）：
+
+```text
+授权：冻结基线 PnL 绝对读数采集（单臂长跑）
+symbol：HYPE-USD
+配置：examples/maker-guard-hype-candidate.toml（sha256 6314a374…，原样）
+代码：git sha 018908c212ffb8ee93453fc957712bc3aba09fa5f（含两帧 ack 修复）
+风险边界：单 symbol、一档、最小有效数量、max_position 沿用基线；
+          stop_loss=5.0 生效；账户硬熔断不开启
+窗口：2026-07-30T16:35Z 起，计划 72 小时（3 天），不换臂、不调参
+emergency cancel 操作人：release owner（BossX）
+授权人 / 时间：release owner（BossX），2026-07-30，会话内明确授权（"确认授权"）
+```
+
 **第二次 run 于 15:41:31Z 截断（存活 ~2 分钟）**：场馆对单个 `order:cancel`
 回两帧 ack 的新实证行为先后击穿 cancel 决议矛盾判定与 leftover replay 判定，
 两次 fail-closed 均为误报，停机时 FLAT 且挂单簿已清。根因与修复见
