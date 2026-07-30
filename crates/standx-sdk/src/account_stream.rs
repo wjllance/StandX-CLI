@@ -4,7 +4,7 @@ use crate::auth::Credentials;
 use crate::endpoints::StandXEndpoints;
 use crate::error::{Error, Result};
 use crate::models::{deserialize_order_side_optional, OrderSide, OrderStatus};
-use futures::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},

@@ -321,7 +321,7 @@ fn render_ws_result(result: &WsOrderResult, output_format: OutputFormat) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::{SinkExt, StreamExt};
+    use futures_util::{SinkExt, StreamExt};
     use serde_json::json;
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 

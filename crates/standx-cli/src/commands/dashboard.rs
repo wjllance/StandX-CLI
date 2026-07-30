@@ -2,7 +2,7 @@ use super::util::{is_auth_error, run_watch_loop};
 use crate::cli::*;
 use crate::output;
 use anyhow::Result;
-use futures::future::join_all;
+use futures_util::future::join_all;
 use standx_sdk::client::StandXClient;
 use standx_sdk::models::{DashboardSnapshot, Trade};
 use standx_sdk::websocket::{StandXWebSocket, WsMessage};

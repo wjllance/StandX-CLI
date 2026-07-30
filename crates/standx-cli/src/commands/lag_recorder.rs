@@ -358,7 +358,7 @@ async fn hyperliquid_session(
     origin: Instant,
     tx: &mpsc::Sender<LagRecord>,
 ) -> Result<()> {
-    use futures::{SinkExt, StreamExt};
+    use futures_util::{SinkExt, StreamExt};
 
     let (stream, _response) = tokio_tungstenite::connect_async(HYPERLIQUID_WS_URL)
         .await

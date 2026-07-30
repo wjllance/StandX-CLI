@@ -26,25 +26,30 @@ pub fn parse_time_string(time_str: &str, default_now: bool) -> anyhow::Result<i6
     let time_str = time_str.to_lowercase();
     let now = chrono::Utc::now().timestamp();
 
-    if let Some(captures) = regex::Regex::new(r"^(\d+)([smhdw])$")?.captures(&time_str) {
-        let value: i64 = captures[1].parse()?;
-        let unit = &captures[2];
+    if let Some(unit) = time_str.chars().last() {
+        let value_end = time_str.len() - unit.len_utf8();
+        let value = &time_str[..value_end];
+        if !value.is_empty()
+            && value.bytes().all(|byte| byte.is_ascii_digit())
+            && matches!(unit, 's' | 'm' | 'h' | 'd' | 'w')
+        {
+            let value: i64 = value.parse()?;
+            let seconds = match unit {
+                's' => value,
+                'm' => value * 60,
+                'h' => value * 3600,
+                'd' => value * 86400,
+                'w' => value * 604800,
+                _ => unreachable!(),
+            };
 
-        let seconds = match unit {
-            "s" => value,
-            "m" => value * 60,
-            "h" => value * 3600,
-            "d" => value * 86400,
-            "w" => value * 604800,
-            _ => return Err(anyhow::anyhow!("Invalid time unit: {}", unit)),
-        };
-
-        if default_now {
-            // For "to" time, we use now + offset (future) or just now
-            return Ok(now + seconds);
-        } else {
-            // For "from" time, we use now - offset (past)
-            return Ok(now - seconds);
+            if default_now {
+                // For "to" time, we use now + offset (future) or just now
+                return Ok(now + seconds);
+            } else {
+                // For "from" time, we use now - offset (past)
+                return Ok(now - seconds);
+            }
         }
     }
 
@@ -165,6 +170,7 @@ mod tests {
     fn test_parse_invalid_time() {
         assert!(parse_time_string("invalid", true).is_err());
         assert!(parse_time_string("", true).is_err());
+        assert!(parse_time_string("1天", true).is_err());
     }
 
     #[test]
@@ -184,5 +190,20 @@ mod tests {
         let result = parse_time_string("30m", false).unwrap();
         assert!(result < now);
         assert!(result >= now - 1800);
+    }
+
+    #[test]
+    fn relative_time_supports_seconds_weeks_and_uppercase_units() {
+        let now = chrono::Utc::now().timestamp();
+
+        let seconds_ago = parse_time_string("60s", false).unwrap();
+        assert!((now - 61..=now - 59).contains(&seconds_ago));
+
+        let week_ago = parse_time_string("1w", false).unwrap();
+        assert!((now - 604_801..=now - 604_799).contains(&week_ago));
+
+        let lowercase = parse_time_string("1d", false).unwrap();
+        let uppercase = parse_time_string("1D", false).unwrap();
+        assert!((lowercase - uppercase).abs() <= 1);
     }
 }

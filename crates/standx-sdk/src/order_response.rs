@@ -4,7 +4,7 @@ use crate::auth::{Credentials, StandXSigner};
 use crate::client::order::{cancel_order_body, create_order_body, CreateOrderParams};
 use crate::endpoints::StandXEndpoints;
 use crate::error::{Error, Result};
-use futures::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::{
