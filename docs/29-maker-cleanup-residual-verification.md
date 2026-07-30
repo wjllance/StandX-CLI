@@ -1,6 +1,7 @@
 # Cleanup 残余判定硬化立项：WS order-response 主判据 + 按单查询兜底（2026-07-30 草案）
 
-状态：**草案，待 release owner 裁决**。安全轨硬化项（5-b 后续），非 alpha 候选，
+状态：**Phase 1 实施中**（REST `cancel_orders` + 按 `order_id` 单查
+`/api/query_order` 的 `status`）。安全轨硬化项（5-b 后续），非 alpha 候选，
 不占用 live 时间片（纯代码 + 离线验证 + 受监督 canary），可与任何采集/实验并行。
 
 触发事故：[基线 PnL 采集截断报告](evidence/maker-baseline-pnl-2026-07-30.md)
@@ -67,6 +68,19 @@ order-response 并无异常记录），撤单的场馆权威确认本就可用�
 任何一级"判不定"（超时、查询失败、非终态）仍然按残余处理——**本立项只消除
 "已撤成却被误判"的误报，不放松真残余的判定**。真残余（撤单请求本身失败、
 单查显示非终态）的 fail-closed 行为与现状逐字节一致。
+
+## Phase 1 实现范围（当前变更）
+
+- SDK：`OrderResponse::is_success()` 已增加（`code==0 && message==success`）。
+- CLI cleanup：残余判定从“`query_open_orders` 列表为空”改为
+  “对每个 maker order 调用 `/api/query_order` 直到进入终态
+  （`filled`/`canceled`/`rejected`/`expired`）”。
+  - 轮询：首次等待 500ms，之后 1s 间隔，最多 6 次。
+  - 终态视为已处理；仍返回 `new`/`open`/`partially_filled`/`untriggered`
+    则判为真残余，fail-closed 不变。
+  - `maker_cleanup` JSON 遥测事件附带每个单查到的 `status` 与 `updated_at`。
+- 主判据（WS `order:cancel` 等 `is_success()`）与最终列表兜底保留在设计中，
+  尚未实现；Phase 1 只替换原有的列表判定为单查判定。
 
 ## 测试要求（离线确定性）
 

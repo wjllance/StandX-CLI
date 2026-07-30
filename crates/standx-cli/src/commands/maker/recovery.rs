@@ -12,7 +12,7 @@ use standx_sdk::account_stream::{
     AccountChannel, AccountEvent, AccountStream, AccountStreamHealth,
 };
 use standx_sdk::client::StandXClient;
-use standx_sdk::models::{Order, Position, Trade};
+use standx_sdk::models::{Order, OrderStatus, Position, Trade};
 use standx_sdk::order_response::{
     OrderCommandSender, OrderResponse, OrderResponseHealth, OrderResponseStream,
 };
@@ -20,7 +20,9 @@ use std::collections::HashSet;
 use std::fmt;
 use std::time::Duration;
 
-const MAKER_CLEANUP_VERIFY_DELAY: Duration = Duration::from_millis(500);
+const MAKER_CLEANUP_VERIFY_INITIAL_DELAY: Duration = Duration::from_millis(500);
+const MAKER_CLEANUP_VERIFY_INTERVAL: Duration = Duration::from_secs(1);
+const MAKER_CLEANUP_VERIFY_MAX_ATTEMPTS: u32 = 6;
 const MAKER_CLEANUP_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
@@ -354,6 +356,19 @@ pub(super) async fn probe_position_convergence(
     }
 }
 
+fn cleanup_orders_json(snapshots: &[OrderStatusSnapshot]) -> Vec<serde_json::Value> {
+    snapshots
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "order_id": s.order_id,
+                "status": format!("{:?}", s.status).to_lowercase(),
+                "updated_at": s.updated_at,
+            })
+        })
+        .collect()
+}
+
 pub(super) async fn cancel_maker_orders_with_retry(
     client: &StandXClient,
     symbol: &str,
@@ -364,7 +379,7 @@ pub(super) async fn cancel_maker_orders_with_retry(
     for attempt in 1..=attempts {
         let result = cleanup_once(client, symbol).await;
         match result {
-            Ok(()) => {
+            Ok(CleanupVerification::Complete(snapshots)) => {
                 if output_format == OutputFormat::Json {
                     println!(
                         "{}",
@@ -373,7 +388,7 @@ pub(super) async fn cancel_maker_orders_with_retry(
                             "symbol": symbol,
                             "action": "maker_cleanup",
                             "event": "complete",
-                            "remaining_maker_orders": 0,
+                            "orders": cleanup_orders_json(&snapshots),
                         })
                     );
                 } else {
@@ -381,10 +396,47 @@ pub(super) async fn cancel_maker_orders_with_retry(
                 }
                 return Ok(());
             }
-            Err(error) => {
+            Ok(CleanupVerification::Residual(snapshots)) => {
+                let residual_ids: Vec<String> = snapshots
+                    .iter()
+                    .filter(|s| !s.status.is_terminal())
+                    .map(|s| s.order_id.to_string())
+                    .collect();
+                let message = format!(
+                    "RESIDUAL MAKER ORDERS on {} after cancellation: [{}]",
+                    symbol,
+                    residual_ids.join(", ")
+                );
                 // Precursor signal: an incomplete cleanup retry often precedes a
                 // failed shutdown. Emit it on stdout (JSON mode) so the ingest
                 // pipeline uploads it, instead of leaving it only in local stderr.
+                if output_format == OutputFormat::Json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "ts": ts_now(),
+                            "symbol": symbol,
+                            "action": "maker_cleanup",
+                            "event": "retry_incomplete",
+                            "severity": "warning",
+                            "attempt": attempt,
+                            "max_attempts": attempts,
+                            "message": message,
+                            "orders": cleanup_orders_json(&snapshots),
+                        })
+                    );
+                } else {
+                    eprintln!(
+                        "⚠️  maker-order cancellation attempt {}/{} incomplete: {}",
+                        attempt, attempts, message
+                    );
+                }
+                last_err = Some(anyhow::anyhow!(message));
+                if attempt < attempts {
+                    tokio::time::sleep(MAKER_CLEANUP_RETRY_DELAY).await;
+                }
+            }
+            Err(error) => {
                 if output_format == OutputFormat::Json {
                     println!(
                         "{}",
@@ -420,40 +472,94 @@ pub(super) async fn cancel_maker_orders_with_retry(
     }))
 }
 
-async fn cleanup_once(client: &StandXClient, symbol: &str) -> Result<()> {
+/// Per-order status observed through `/api/query_order` during cleanup
+/// verification.
+#[derive(Debug)]
+struct OrderStatusSnapshot {
+    order_id: u64,
+    status: OrderStatus,
+    updated_at: String,
+}
+
+/// Outcome of a single cleanup verification pass.
+#[derive(Debug)]
+enum CleanupVerification {
+    /// Every tracked maker order reached a terminal status.
+    Complete(Vec<OrderStatusSnapshot>),
+    /// At least one tracked maker order is still active after polling.
+    Residual(Vec<OrderStatusSnapshot>),
+}
+
+async fn cleanup_once(client: &StandXClient, symbol: &str) -> Result<CleanupVerification> {
     let orders = client.get_open_orders(Some(symbol)).await?;
-    let order_ids = orders
-        .iter()
-        .filter(|order| is_maker_order(order))
+    let maker_orders = orders
+        .into_iter()
+        .filter(is_maker_order)
         .map(|order| {
-            order.id.parse::<i64>().map_err(|_| {
+            let id = order.id.parse::<i64>().map_err(|_| {
                 anyhow::anyhow!(
                     "maker-owned order has non-integer exchange ID '{}'",
                     order.id
                 )
-            })
+            })?;
+            Ok((order.id, id))
         })
         .collect::<Result<Vec<_>>>()?;
-    if order_ids.is_empty() {
-        return Ok(());
+    if maker_orders.is_empty() {
+        return Ok(CleanupVerification::Complete(Vec::new()));
     }
-    client.cancel_orders(&order_ids).await?;
-    tokio::time::sleep(MAKER_CLEANUP_VERIFY_DELAY).await;
-    let residual_ids = client
-        .get_open_orders(Some(symbol))
-        .await?
-        .iter()
-        .filter(|order| is_maker_order(order))
-        .map(|order| order.id.clone())
-        .collect::<Vec<_>>();
+
+    let order_ids_i64: Vec<i64> = maker_orders.iter().map(|(_, id)| *id).collect();
+    client.cancel_orders(&order_ids_i64).await?;
+
+    tokio::time::sleep(MAKER_CLEANUP_VERIFY_INITIAL_DELAY).await;
+
+    let mut snapshots = Vec::with_capacity(maker_orders.len());
+    let mut residual_ids = Vec::new();
+    for (id_str, id_i64) in maker_orders {
+        let id_u64 = id_i64 as u64;
+        let mut last_status = OrderStatus::New;
+        let mut last_updated_at = String::new();
+        let mut resolved = false;
+
+        for attempt in 1..=MAKER_CLEANUP_VERIFY_MAX_ATTEMPTS {
+            match client.get_order(id_u64).await {
+                Ok(order) => {
+                    last_status = order.status;
+                    last_updated_at = order.updated_at;
+                    if last_status.is_terminal() {
+                        resolved = true;
+                        break;
+                    }
+                    if attempt < MAKER_CLEANUP_VERIFY_MAX_ATTEMPTS {
+                        tokio::time::sleep(MAKER_CLEANUP_VERIFY_INTERVAL).await;
+                    }
+                }
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "order status query failed for {}: {}",
+                        id_str,
+                        error
+                    ));
+                }
+            }
+        }
+
+        snapshots.push(OrderStatusSnapshot {
+            order_id: id_u64,
+            status: last_status,
+            updated_at: last_updated_at,
+        });
+
+        if !resolved {
+            residual_ids.push(id_str);
+        }
+    }
+
     if residual_ids.is_empty() {
-        Ok(())
+        Ok(CleanupVerification::Complete(snapshots))
     } else {
-        Err(anyhow::anyhow!(
-            "RESIDUAL MAKER ORDERS on {} after cancellation: [{}]",
-            symbol,
-            residual_ids.join(", ")
-        ))
+        Ok(CleanupVerification::Residual(snapshots))
     }
 }
 
@@ -1544,15 +1650,13 @@ mod live_gate_tests {
             .expect(1)
             .create_async()
             .await;
-        let open_after = server
-            .mock("GET", "/api/query_open_orders")
-            .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+        let query_after = server
+            .mock("GET", "/api/query_order")
+            .match_query(Matcher::UrlEncoded("order_id".into(), "42".into()))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
-                r#"{"code":0,"message":"ok","result":[
-                    {"id":"99","cl_ord_id":"manual-order","symbol":"BTC-USD","side":"sell","order_type":"limit","qty":"0.001","fill_qty":"0","price":"65000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:00Z"}
-                ]}"#,
+                r#"{"id":"42","cl_ord_id":"sxmk-controlled-buy","symbol":"BTC-USD","side":"buy","order_type":"limit","qty":"0.001","fill_qty":"0","price":"63000","status":"canceled","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:01Z"}"#,
             )
             .expect(1)
             .create_async()
@@ -1565,7 +1669,7 @@ mod live_gate_tests {
 
         open_before.assert_async().await;
         cancel.assert_async().await;
-        open_after.assert_async().await;
+        query_after.assert_async().await;
     }
 
     #[tokio::test]
@@ -1574,9 +1678,6 @@ mod live_gate_tests {
         let mut server = Server::new_async().await;
         let maker_and_manual = r#"{"code":0,"message":"ok","result":[
             {"id":"42","cl_ord_id":"sxmk-controlled-buy","symbol":"BTC-USD","side":"buy","order_type":"limit","qty":"0.001","fill_qty":"0","price":"63000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:00Z"},
-            {"id":"99","cl_ord_id":"manual-order","symbol":"BTC-USD","side":"sell","order_type":"limit","qty":"0.001","fill_qty":"0","price":"65000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:00Z"}
-        ]}"#;
-        let manual_only = r#"{"code":0,"message":"ok","result":[
             {"id":"99","cl_ord_id":"manual-order","symbol":"BTC-USD","side":"sell","order_type":"limit","qty":"0.001","fill_qty":"0","price":"65000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:00Z"}
         ]}"#;
         let open_before = server
@@ -1597,13 +1698,15 @@ mod live_gate_tests {
             .expect(1)
             .create_async()
             .await;
-        let stale_verify = server
-            .mock("GET", "/api/query_open_orders")
-            .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+        let stale_query = server
+            .mock("GET", "/api/query_order")
+            .match_query(Matcher::UrlEncoded("order_id".into(), "42".into()))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(maker_and_manual)
-            .expect(1)
+            .with_body(
+                r#"{"id":"42","cl_ord_id":"sxmk-controlled-buy","symbol":"BTC-USD","side":"buy","order_type":"limit","qty":"0.001","fill_qty":"0","price":"63000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:01Z"}"#,
+            )
+            .expect(6)
             .create_async()
             .await;
         let open_retry = server
@@ -1624,12 +1727,14 @@ mod live_gate_tests {
             .expect(1)
             .create_async()
             .await;
-        let cleared_verify = server
-            .mock("GET", "/api/query_open_orders")
-            .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+        let cleared_query = server
+            .mock("GET", "/api/query_order")
+            .match_query(Matcher::UrlEncoded("order_id".into(), "42".into()))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(manual_only)
+            .with_body(
+                r#"{"id":"42","cl_ord_id":"sxmk-controlled-buy","symbol":"BTC-USD","side":"buy","order_type":"limit","qty":"0.001","fill_qty":"0","price":"63000","status":"canceled","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:02Z"}"#,
+            )
             .expect(1)
             .create_async()
             .await;
@@ -1641,10 +1746,61 @@ mod live_gate_tests {
 
         open_before.assert_async().await;
         cancel_first.assert_async().await;
-        stale_verify.assert_async().await;
+        stale_query.assert_async().await;
         open_retry.assert_async().await;
         cancel_retry.assert_async().await;
-        cleared_verify.assert_async().await;
+        cleared_query.assert_async().await;
+    }
+
+    /// Regression: a stale `/api/query_open_orders` snapshot that still lists
+    /// a maker order must not be treated as residual. The authoritative source
+    /// is `/api/query_order`; if it reports `canceled`, cleanup succeeds.
+    #[tokio::test]
+    async fn maker_cleanup_succeeds_when_query_order_shows_canceled() {
+        let _jwt = EnvGuard::set("STANDX_JWT", "controlled-test-jwt");
+        let mut server = Server::new_async().await;
+        let open_before = server
+            .mock("GET", "/api/query_open_orders")
+            .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"code":0,"message":"ok","result":[
+                    {"id":"42","cl_ord_id":"sxmk-controlled-buy","symbol":"BTC-USD","side":"buy","order_type":"limit","qty":"0.001","fill_qty":"0","price":"63000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:00Z"}
+                ]}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let cancel = server
+            .mock("POST", "/api/cancel_orders")
+            .match_body(Matcher::Json(serde_json::json!({ "order_id_list": [42] })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"code":0,"message":"accepted"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let query_order = server
+            .mock("GET", "/api/query_order")
+            .match_query(Matcher::UrlEncoded("order_id".into(), "42".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"id":"42","cl_ord_id":"sxmk-controlled-buy","symbol":"BTC-USD","side":"buy","order_type":"limit","qty":"0.001","fill_qty":"0","price":"63000","status":"canceled","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:01Z"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = StandXClient::with_base_url(server.url()).unwrap();
+        cancel_maker_orders_with_retry(&client, "BTC-USD", 3, OutputFormat::Quiet)
+            .await
+            .unwrap();
+
+        open_before.assert_async().await;
+        cancel.assert_async().await;
+        query_order.assert_async().await;
     }
 
     #[tokio::test]
