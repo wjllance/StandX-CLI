@@ -74,9 +74,12 @@ notify() {
     # Escape backslashes and double quotes so the message is valid JSON.
     local escaped="${message//\\/\\\\}"
     escaped="${escaped//\"/\\\"}"
+    # Feishu custom bot only. The Slack shape gets `{"code":19002,"msg":
+    # "params error, msg_type need"}` at HTTP 200, which curl -f cannot see —
+    # the notice would vanish silently.
     curl -fsS -m 5 -X POST \
       -H 'Content-Type: application/json' \
-      --data "{\"text\":\"$escaped\"}" \
+      --data "{\"msg_type\":\"text\",\"content\":{\"text\":\"$escaped\"}}" \
       "$STANDX_SUPERVISOR_WEBHOOK" >/dev/null 2>&1 ||
       printf 'supervisor webhook post failed (message logged above)\n' >&2
   fi
