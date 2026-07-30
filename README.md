@@ -261,8 +261,8 @@ standx order create BTC-USD buy limit --qty 0.1 --price 64000
 standx --output json --verbose order create BTC-USD buy limit \
   --qty 0.1 --price 64000 --transport ws
 
-# Route every StandX REST/WS connection in this invocation to canary
-standx --endpoint https://canary-perps.standx.org \
+# Route every StandX REST/WS connection to a custom environment
+standx --endpoint https://perps.example.com \
   --output json --verbose order create BTC-USD buy limit \
   --qty 0.0001 --price 60000 --transport ws
 
@@ -391,7 +391,7 @@ Available on every command:
 
 Endpoint selection uses `--endpoint`, then `STANDX_BASE_URL`, then
 `config.base_url`, then `https://perps.standx.com`. A base such as
-`https://canary-perps.standx.org` derives REST from the base itself, public and
+`https://perps.example.com` derives REST from the base itself, public and
 account streams from `/ws-stream/v1`, and order responses from `/ws-api/v1`.
 Only root-level HTTPS URLs are accepted; plaintext HTTP is limited to local
 loopback testing. Invalid endpoint configuration fails closed and never falls

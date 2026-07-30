@@ -153,7 +153,7 @@ Configuration:
 standx config set default_symbol ETH-USD
 
 # 持久化 StandX API endpoint（写入前会校验并规范化）
-standx config set base_url https://canary-perps.standx.org
+standx config set base_url https://perps.example.com
 
 # 验证
 standx config get default_symbol
