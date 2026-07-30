@@ -65,11 +65,23 @@ contradictory/orphan 事件；本次 90 秒内两次。两帧行为可能是场�
 
 ## 仍开放的问题
 
+- **Fix A 的残余窗口（对抗复审 finding）**：Fix A 丢弃的终态 rejection 帧，
+  在已观测语义（"已成交/已撤销"，订单必为终态）下确实无信息；但若场馆存在
+  未观测的"撤销被拒但订单仍活"的 rejection 语义，maker 会在 CancelSubmitted
+  已把该档从账上释放的前提下继续报价，可能在同一档重复挂单（敞口最高 2×），
+  直到 30 秒 REST audit 的 `unexpected_rest_open_order_ids` 发现并以
+  position_reconciliation freeze 兜底。即安全边际从"立即 freeze"收窄为
+  "最长一个 audit 周期的重复敞口"。当前无证据表明该语义存在；一旦出现
+  该类 freeze，应用本遥测（`ws_request_id` + 撤单原因）对照确认。
 - 若未来目击到**既非 cleanup mint、也非本 run 登记**的响应帧（真·跨 session
   陈旧帧），当前仍会 fail-closed。这是保留的安全姿态；出现时用
   `ws_request_id` 遥测对照确认来源后再议。
 - 事件 1 的 freeze 本身是"撤单与成交竞态"的日常化触发——Fix A 后该类不再
   freeze。两帧行为若为场馆新变更，值得向场馆确认协议语义。
+- 两帧行为下 WS cleanup 的 `confirmed_by=ws_success` 路径实际上很少命中：
+  drain 在网关 `accepted` 帧即释放 request_id 并降级 REST 单查，终态
+  `success` 帧作为 tombstoned 帧丢弃。行为正确但 `ws_success` 将近乎不出现，
+  且每次 freeze cleanup 会对 WS 已撤成的单多发一次幂等的 REST `cancel_orders`。
 
 ## 处置记录
 

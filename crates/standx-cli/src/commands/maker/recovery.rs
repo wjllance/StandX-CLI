@@ -597,7 +597,10 @@ enum CleanupVerification {
 /// Result of draining the order-response stream for cleanup-minted cancel acks.
 #[derive(Debug)]
 struct WsCancelDrain {
-    /// Orders whose cancel ack carried the venue's terminal `success`.
+    /// Orders whose cancel ack carried the venue's terminal `success`. Under
+    /// the venue's observed two-frame behavior (gateway `accepted` first) the
+    /// drain usually releases the ID on that first frame, so in practice this
+    /// list stays empty and the REST point query is the common verdict path.
     confirmed: Vec<(String, i64)>,
     /// Orders that still need the REST verdict: the ack was not `success`
     /// (gateway-level `accepted` or a rejection), or never arrived in time.
