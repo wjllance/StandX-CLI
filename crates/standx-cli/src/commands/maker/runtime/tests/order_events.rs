@@ -465,8 +465,8 @@ fn cleanup_minted_late_ack_is_dropped_without_failing_closed() {
         runtime_state.next_effect(),
         Some(MakerEffect::RunCycle(_))
     ));
-    let mut cleanup_minted: std::collections::HashSet<String> =
-        ["cleanup-req".to_string()].into_iter().collect();
+    let mut cleanup_minted = CleanupTombstones::default();
+    cleanup_minted.remember("cleanup-req".to_string());
 
     // The late WS ack for a cleanup-minted cancel must be dropped, not judged:
     // cleanup already established the venue state through `/api/query_order`,
@@ -485,12 +485,60 @@ fn cleanup_minted_late_ack_is_dropped_without_failing_closed() {
             latency: None,
             latency_started: None,
         },
-        &mut cleanup_minted,
+        &cleanup_minted,
     )
     .expect("cleanup-minted late ack must not fail closed");
 
-    assert!(cleanup_minted.is_empty(), "one-shot tombstone is consumed");
+    assert!(
+        cleanup_minted.covers("cleanup-req"),
+        "the tombstone is retained, not consumed by the first frame"
+    );
     assert!(runtime_state.pending_effect().is_none());
+}
+
+/// Regression: the venue answers one `order:cancel` with a gateway `accepted`
+/// frame and then the terminal `success` frame, both carrying the same request
+/// ID. Cleanup-minted IDs are never in the projection's request registry, so a
+/// tombstone that was consumed by the first frame let the second classify as
+/// `Orphan` and stopped the maker on a request it minted itself.
+#[test]
+fn cleanup_minted_two_frame_ack_never_fails_closed() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let mut projection = projection_with_pending(&[]);
+    let mut runtime_state = MakerState::starting();
+    runtime_state.handle(MakerEvent::StartupReady);
+    assert!(matches!(
+        runtime_state.next_effect(),
+        Some(MakerEffect::RunCycle(_))
+    ));
+    let mut cleanup_minted = CleanupTombstones::default();
+    cleanup_minted.remember("cleanup-req".to_string());
+
+    // Gateway ack, then the terminal ack — same request ID, both after the
+    // cleanup drain window closed.
+    tx.try_send(order_response(Some("cleanup-req"), 0)).unwrap();
+    tx.try_send(order_response(Some("cleanup-req"), 0)).unwrap();
+
+    apply_order_responses_observed(
+        &mut rx,
+        &mut projection,
+        &mut runtime_state,
+        OrderResponseObservation {
+            output_format: OutputFormat::Quiet,
+            symbol: "BTC-USD",
+            cycle: 1,
+            price_decimals: 2,
+            latency: None,
+            latency_started: None,
+        },
+        &cleanup_minted,
+    )
+    .expect("neither frame of a two-frame cleanup ack may fail closed");
+
+    assert!(
+        runtime_state.pending_effect().is_none(),
+        "no freeze/recovery effect may be queued for a cleanup-minted ack"
+    );
 }
 
 #[test]

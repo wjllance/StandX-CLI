@@ -56,8 +56,8 @@ use pipeline::{
 };
 use recovery::{
     cancel_maker_orders_with_retry, ctrl_c_latched, probe_position_convergence,
-    reconnect_account_stream, reconnect_order_response, AccountStreamReconnect, ConvergenceProbe,
-    PositionReconciliationCause, PositionReconciliationError, ReconcileRequest,
+    reconnect_account_stream, reconnect_order_response, AccountStreamReconnect, CleanupTombstones,
+    ConvergenceProbe, PositionReconciliationCause, PositionReconciliationError, ReconcileRequest,
     ReconnectCleanupFailed, ReconnectInterrupted, ReconnectRequest, TransportReconnectExhausted,
     WsCleanupContext,
 };

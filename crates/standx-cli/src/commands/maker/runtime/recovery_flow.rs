@@ -214,6 +214,11 @@ pub(super) async fn freeze_and_cleanup_for_recovery(
         FreezeNotice::Risk(notice) => io.notifier.risk(notice, false).await,
         FreezeNotice::RequestTimeout(notice) => io.notifier.request_timeout(notice, false).await,
     }
+    // Acks the cleanup drain captures for pre-freeze cycle requests. Owned out
+    // here, and handed to the cleanup as a borrow, so that a frame the drain has
+    // already taken off the channel survives a cleanup attempt that later fails
+    // — dropping it would leave its pending request unresolvable.
+    let mut leftover_responses: Vec<OrderResponse> = Vec::new();
     let cleanup: Result<()> = if spec.cancel_venue_orders {
         // Primary verdict path: while the order-response stream is healthy, the
         // cleanup cancels over WS and trusts the correlated `success` ack. The
@@ -225,53 +230,47 @@ pub(super) async fn freeze_and_cleanup_for_recovery(
                 responses: &mut session.order_responses,
                 health: &session.order_response_health,
                 minted: &mut session.cleanup_minted_request_ids,
+                leftover: &mut leftover_responses,
             }),
             _ => None,
         };
-        let result = cancel_maker_orders_with_retry(
+        cancel_maker_orders_with_retry(
             io.client,
             io.symbol,
             3,
             io.output_format,
             ws_cleanup.as_mut(),
         )
-        .await;
-        match result {
-            Ok(leftover_responses) => {
-                // Frames the cleanup drain captured for pre-freeze requests are
-                // re-applied through the canonical response path so the
-                // pending-request lifecycle stays correlated across the cleanup
-                // (`finish_verified_cleanup` below preserves those acks).
-                if let Some(session) = io.session.as_deref_mut() {
-                    for response in leftover_responses {
-                        let request_id = response.request_id.clone();
-                        let generation = session.projection.generation();
-                        let outcome = apply_order_response(
-                            response,
-                            &mut session.projection,
-                            io.output_format,
-                            io.symbol,
-                            io.cycle,
-                            spec.price_decimals,
-                        );
-                        if let Some(reason) = order_response_failure(
-                            &outcome,
-                            request_id.as_deref(),
-                            generation,
-                            io.runtime_state,
-                        ) {
-                            session.order_response_health.mark_unhealthy(reason);
-                            break;
-                        }
-                    }
-                }
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
+        .await
     } else {
         Ok(())
     };
+    // Re-applied through the canonical response path whatever the cleanup
+    // verdict was, so the pending-request lifecycle stays correlated across the
+    // cleanup (`finish_verified_cleanup` below preserves those acks).
+    if let Some(session) = io.session.as_deref_mut() {
+        for response in leftover_responses {
+            let request_id = response.request_id.clone();
+            let generation = session.projection.generation();
+            let outcome = apply_order_response(
+                response,
+                &mut session.projection,
+                io.output_format,
+                io.symbol,
+                io.cycle,
+                spec.price_decimals,
+            );
+            if let Some(reason) = order_response_failure(
+                &outcome,
+                request_id.as_deref(),
+                generation,
+                io.runtime_state,
+            ) {
+                session.order_response_health.mark_unhealthy(reason);
+                break;
+            }
+        }
+    }
     if let Err(error) = cleanup {
         io.runtime_state.handle(MakerEvent::CleanupFailed {
             token: cleanup_token,
@@ -1479,7 +1478,7 @@ impl MakerRuntime {
                     latency: Some(&mut session.order_latency),
                     latency_started: Some(session.latency_started),
                 },
-                &mut session.cleanup_minted_request_ids,
+                &session.cleanup_minted_request_ids,
             ) {
                 session
                     .order_response_health
