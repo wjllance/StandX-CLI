@@ -163,6 +163,46 @@ fn correlation_verdict_is_pinned_for_every_observation_ordering() {
     }
 }
 
+/// The venue's ws-api answers one `order:cancel` with two frames: a gateway
+/// `accepted` followed by a terminal result. When the cancel races a fill,
+/// the terminal frame is a *rejection* (observed live 2026-07-30, run
+/// `baseline-pnl-20260730T153920Z`: cancel accepted, order already filled,
+/// second frame rejected). That second frame carries no new information —
+/// the cancel is already resolved and the fill arrives over the account
+/// stream — so it must be idempotent, not a channel-integrity failure.
+#[test]
+fn post_resolution_cancel_ack_is_idempotent_even_when_rejected() {
+    let mut projection = MakerAccountProjection::new(1, PREFIX, 0.0, 0.005, 0.00005);
+    projection.apply(
+        1,
+        AccountProjectionEvent::CancelSubmitted(ProjectionPendingCancel {
+            request_id: "cancel-1".to_owned(),
+            order_id: 7,
+            side: OrderSide::Sell,
+            level: 0,
+            price: 54.349,
+            cycle: 1,
+        }),
+    );
+    projection.apply(
+        1,
+        AccountProjectionEvent::CancelResolved {
+            request_id: "cancel-1".to_owned(),
+        },
+    );
+
+    // Terminal frame shaped as success: the pre-existing idempotent path.
+    let success = projection.classify_response(Some("cancel-1"), true);
+    assert_eq!(success.label(), "late_known");
+    assert!(!success.fails_closed());
+
+    // Terminal frame shaped as rejection (cancel lost the race to a fill):
+    // also idempotent. This is the case that froze the 07-30 run.
+    let rejected = projection.classify_response(Some("cancel-1"), false);
+    assert_eq!(rejected.label(), "late_known");
+    assert!(!rejected.fails_closed());
+}
+
 /// A reconnect that preserves pending acks must keep the *pending* ack
 /// matched, not demote it to a tombstone verdict — that is the whole point of
 /// preserving it across the generation bump.

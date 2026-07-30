@@ -736,6 +736,26 @@ impl MakerAccountProjection {
                 resolved_in,
                 lifecycle,
             }
+        } else if resolution == ProjectionRequestResolution::CancelResolved {
+            // The venue's ws-api answers one `order:cancel` with TWO frames: a
+            // gateway `accepted` followed by a terminal result (observed live on
+            // 2026-07-30, run `baseline-pnl-20260730T153920Z`: the cancel
+            // resolved, the order then turned out to have already filled, and
+            // the terminal frame arrived as a *rejection*). For a cancel the
+            // recorded resolution plus the independent venue-state channels
+            // (account stream, `/api/query_order`) already establish everything
+            // the maker needs — the second frame carries no new information.
+            // Judging it as a channel-integrity contradiction converted a
+            // routine cancel/fill race into a spurious fail-closed freeze, so a
+            // post-resolution cancel ack is idempotent regardless of its code.
+            // Place resolutions keep the strict check: an accepted-then-rejected
+            // place contradicts a possibly-live quote slot.
+            ResponseCorrelation::LateKnown {
+                operation,
+                resolution,
+                resolved_in,
+                lifecycle,
+            }
         } else {
             ResponseCorrelation::Contradictory {
                 operation,
