@@ -36,6 +36,15 @@ impl OrderResponse {
     pub fn accepted(&self) -> bool {
         self.code == 0
     }
+
+    /// The venue has finished processing the request and reports success.
+    ///
+    /// The exchange sends a gateway-ack with `"message": "accepted"` for some
+    /// commands (see `accepted()`); this predicate requires the stronger
+    /// `"message": "success"` response that indicates the action is complete.
+    pub fn is_success(&self) -> bool {
+        self.code == 0 && self.message == "success"
+    }
 }
 
 /// WebSocket stream paired with the `x-session-id` used by HTTP order calls.
@@ -520,6 +529,16 @@ mod tests {
         }))
         .unwrap();
         assert!(accepted.accepted());
+        assert!(accepted.is_success());
+
+        let gateway_ack: OrderResponse = serde_json::from_value(serde_json::json!({
+            "code": 0,
+            "message": "accepted",
+            "request_id": "request-1a"
+        }))
+        .unwrap();
+        assert!(gateway_ack.accepted());
+        assert!(!gateway_ack.is_success());
 
         let rejected: OrderResponse = serde_json::from_value(serde_json::json!({
             "code": 400,
@@ -528,6 +547,7 @@ mod tests {
         }))
         .unwrap();
         assert!(!rejected.accepted());
+        assert!(!rejected.is_success());
     }
 
     #[test]

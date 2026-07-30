@@ -444,6 +444,30 @@ pub enum OrderStatus {
     Untriggered,
 }
 
+impl OrderStatus {
+    /// True once the venue will no longer match the order.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            OrderStatus::Filled
+                | OrderStatus::Canceled
+                | OrderStatus::Rejected
+                | OrderStatus::Expired
+        )
+    }
+
+    /// True if the order is still live on the book and may fill.
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self,
+            OrderStatus::New
+                | OrderStatus::Open
+                | OrderStatus::PartiallyFilled
+                | OrderStatus::Untriggered
+        )
+    }
+}
+
 /// Position side
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
