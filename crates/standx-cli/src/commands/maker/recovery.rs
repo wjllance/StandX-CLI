@@ -396,12 +396,10 @@ pub(super) async fn cancel_maker_orders_with_retry(
                 }
                 return Ok(());
             }
-            Ok(CleanupVerification::Residual(snapshots)) => {
-                let residual_ids: Vec<String> = snapshots
-                    .iter()
-                    .filter(|s| !s.status.is_terminal())
-                    .map(|s| s.order_id.to_string())
-                    .collect();
+            Ok(CleanupVerification::Residual {
+                snapshots,
+                residual_ids,
+            }) => {
                 let message = format!(
                     "RESIDUAL MAKER ORDERS on {} after cancellation: [{}]",
                     symbol,
@@ -484,10 +482,36 @@ struct OrderStatusSnapshot {
 /// Outcome of a single cleanup verification pass.
 #[derive(Debug)]
 enum CleanupVerification {
-    /// Every tracked maker order reached a terminal status.
+    /// Every tracked maker order reached a terminal status and the venue
+    /// reported no further maker order afterwards.
     Complete(Vec<OrderStatusSnapshot>),
-    /// At least one tracked maker order is still active after polling.
-    Residual(Vec<OrderStatusSnapshot>),
+    /// At least one maker order is still live: either a cancelled order that
+    /// never reached a terminal status, or an order that only became visible
+    /// after the cancel request was sent and was therefore never cancelled.
+    Residual {
+        snapshots: Vec<OrderStatusSnapshot>,
+        residual_ids: Vec<String>,
+    },
+}
+
+/// Ask the venue for one order's current status.
+///
+/// `/api/query_order` is the authoritative source for whether a cancel landed:
+/// the open-orders list can lag ~15s behind a successful cancel (see
+/// `docs/evidence/maker-baseline-pnl-2026-07-30.md`), this endpoint does not.
+async fn query_order_status(client: &StandXClient, id: &str) -> Result<OrderStatusSnapshot> {
+    let order_id = id
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("maker-owned order has non-integer exchange ID '{}'", id))?;
+    let order = client
+        .get_order(order_id)
+        .await
+        .map_err(|error| anyhow::anyhow!("order status query failed for {}: {}", id, error))?;
+    Ok(OrderStatusSnapshot {
+        order_id,
+        status: order.status,
+        updated_at: order.updated_at,
+    })
 }
 
 async fn cleanup_once(client: &StandXClient, symbol: &str) -> Result<CleanupVerification> {
@@ -516,51 +540,80 @@ async fn cleanup_once(client: &StandXClient, symbol: &str) -> Result<CleanupVeri
 
     let mut snapshots = Vec::with_capacity(maker_orders.len());
     let mut residual_ids = Vec::new();
-    for (id_str, id_i64) in maker_orders {
-        let id_u64 = id_i64 as u64;
-        let mut last_status = OrderStatus::New;
-        let mut last_updated_at = String::new();
-        let mut resolved = false;
-
-        for attempt in 1..=MAKER_CLEANUP_VERIFY_MAX_ATTEMPTS {
-            match client.get_order(id_u64).await {
-                Ok(order) => {
-                    last_status = order.status;
-                    last_updated_at = order.updated_at;
-                    if last_status.is_terminal() {
-                        resolved = true;
-                        break;
-                    }
-                    if attempt < MAKER_CLEANUP_VERIFY_MAX_ATTEMPTS {
-                        tokio::time::sleep(MAKER_CLEANUP_VERIFY_INTERVAL).await;
-                    }
-                }
-                Err(error) => {
-                    return Err(anyhow::anyhow!(
-                        "order status query failed for {}: {}",
-                        id_str,
-                        error
-                    ));
-                }
-            }
+    for (id_str, _) in &maker_orders {
+        let mut observed = query_order_status(client, id_str).await?;
+        let mut polls = 1;
+        while !observed.status.is_terminal() && polls < MAKER_CLEANUP_VERIFY_MAX_ATTEMPTS {
+            tokio::time::sleep(MAKER_CLEANUP_VERIFY_INTERVAL).await;
+            observed = query_order_status(client, id_str).await?;
+            polls += 1;
         }
-
-        snapshots.push(OrderStatusSnapshot {
-            order_id: id_u64,
-            status: last_status,
-            updated_at: last_updated_at,
-        });
-
-        if !resolved {
-            residual_ids.push(id_str);
+        if !observed.status.is_terminal() {
+            residual_ids.push(id_str.clone());
         }
+        snapshots.push(observed);
     }
 
-    if residual_ids.is_empty() {
+    if !residual_ids.is_empty() {
+        return Ok(CleanupVerification::Residual {
+            snapshots,
+            residual_ids,
+        });
+    }
+
+    // Every cancelled order is confirmed terminal. One case is still open: a
+    // request the venue accepted just before cleanup can become visible only
+    // after the initial snapshot was taken, so it was never in the cancel batch
+    // and must not be reported as cleaned. Re-read the book and fail closed on
+    // any maker order outside the tracked set — this is the guarantee
+    // `runtime::cycle_flow` relies on when it re-verifies the book at the end of
+    // the recovery window. Tracked ids are deliberately ignored here: the list is
+    // allowed to lag behind their confirmed cancel, which is exactly what the
+    // per-order status query above absorbs.
+    let tracked: HashSet<&str> = maker_orders.iter().map(|(id, _)| id.as_str()).collect();
+    let late_ids = client
+        .get_open_orders(Some(symbol))
+        .await?
+        .into_iter()
+        .filter(is_maker_order)
+        .map(|order| order.id)
+        .filter(|id| !tracked.contains(id.as_str()))
+        .collect::<Vec<_>>();
+
+    if late_ids.is_empty() {
         Ok(CleanupVerification::Complete(snapshots))
     } else {
-        Ok(CleanupVerification::Residual(snapshots))
+        Ok(CleanupVerification::Residual {
+            snapshots,
+            residual_ids: late_ids,
+        })
     }
+}
+
+/// Confirm which maker orders in a post-cleanup snapshot are genuinely still
+/// live.
+///
+/// A maker order listed by `/api/query_open_orders` after cleanup is only a
+/// *candidate*: that list can still name an order whose cancel already landed.
+/// Deciding residual from the list alone is what truncated the 07-28 baseline
+/// run, so each candidate is confirmed through `/api/query_order` and only a
+/// non-terminal status counts as residual. A failed query stays fail-closed:
+/// the error propagates and the caller aborts the attempt.
+async fn confirm_residual_maker_orders(
+    client: &StandXClient,
+    open_orders: &[Order],
+) -> Result<Vec<String>> {
+    let mut residual_ids = Vec::new();
+    for order in open_orders.iter().filter(|order| is_maker_order(order)) {
+        if !query_order_status(client, &order.id)
+            .await?
+            .status
+            .is_terminal()
+        {
+            residual_ids.push(order.id.clone());
+        }
+    }
+    Ok(residual_ids)
 }
 
 #[derive(Debug, PartialEq)]
@@ -607,23 +660,24 @@ fn emit_order_response_reconnect(
     }
 }
 
+/// Validate a post-cleanup account snapshot.
+///
+/// `residual_maker_ids` must already be venue-confirmed still-live maker orders
+/// (see [`confirm_residual_maker_orders`]) — never the raw open-orders list,
+/// whose read-write lag would fail the reconnect on orders that are in fact
+/// already cancelled.
 pub(super) fn validate_reconnect_snapshot(
     symbol: &str,
     run_order_prefix: &str,
-    open_orders: &[Order],
+    residual_maker_ids: &[String],
     positions: &[Position],
     filled_orders: &[Order],
     trades: &[Trade],
 ) -> Result<ReconnectSnapshot> {
-    let residual_ids = open_orders
-        .iter()
-        .filter(|order| is_maker_order(order))
-        .map(|order| order.id.as_str())
-        .collect::<Vec<_>>();
-    if !residual_ids.is_empty() {
+    if !residual_maker_ids.is_empty() {
         return Err(anyhow::anyhow!(
             "maker orders appeared after cleanup on {symbol}: [{}]",
-            residual_ids.join(", ")
+            residual_maker_ids.join(", ")
         ));
     }
 
@@ -689,10 +743,11 @@ async fn reconcile_reconnect_audit(
     ledger: &mut MakerLedger,
     stats: &mut MakerStats,
 ) -> Result<(ReconnectSnapshot, Vec<MakerFill>)> {
+    let residual_maker_ids = confirm_residual_maker_orders(client, &audit.open_orders).await?;
     let snapshot = validate_reconnect_snapshot(
         request.symbol,
         request.run_order_prefix,
-        &audit.open_orders,
+        &residual_maker_ids,
         &audit.positions,
         &audit.filled_orders,
         &audit.trades,
@@ -1105,12 +1160,11 @@ mod tests {
 
     #[test]
     fn reconnect_snapshot_requires_empty_maker_book_and_valid_ledger() {
-        let manual = snapshot_order("99", Some("manual-order"));
         let filled = snapshot_order("42", Some("sxmk-filled"));
         let snapshot = validate_reconnect_snapshot(
             SYMBOL,
             "sxmk-",
-            &[manual],
+            &[],
             &[snapshot_position("sell", "0.2")],
             &[filled],
             &[snapshot_trade(7, 42)],
@@ -1124,15 +1178,9 @@ mod tests {
 
     #[test]
     fn reconnect_snapshot_rejects_residual_maker_order() {
-        let error = validate_reconnect_snapshot(
-            SYMBOL,
-            "sxmk-",
-            &[snapshot_order("42", Some("sxmk-still-open"))],
-            &[],
-            &[],
-            &[],
-        )
-        .unwrap_err();
+        let error =
+            validate_reconnect_snapshot(SYMBOL, "sxmk-", &["42".to_string()], &[], &[], &[])
+                .unwrap_err();
 
         assert!(error.to_string().contains("appeared after cleanup"));
     }
@@ -1661,6 +1709,22 @@ mod live_gate_tests {
             .expect(1)
             .create_async()
             .await;
+        // Final book re-read: a stale entry for the tracked order 42 must not
+        // count, and the manual order 99 is not maker-owned.
+        let open_final = server
+            .mock("GET", "/api/query_open_orders")
+            .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"code":0,"message":"ok","result":[
+                    {"id":"42","cl_ord_id":"sxmk-controlled-buy","symbol":"BTC-USD","side":"buy","order_type":"limit","qty":"0.001","fill_qty":"0","price":"63000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:00Z"},
+                    {"id":"99","cl_ord_id":"manual-order","symbol":"BTC-USD","side":"sell","order_type":"limit","qty":"0.001","fill_qty":"0","price":"65000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:00Z"}
+                ]}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
 
         let client = StandXClient::with_base_url(server.url()).unwrap();
         cancel_maker_orders_with_retry(&client, "BTC-USD", 3, OutputFormat::Quiet)
@@ -1670,6 +1734,7 @@ mod live_gate_tests {
         open_before.assert_async().await;
         cancel.assert_async().await;
         query_after.assert_async().await;
+        open_final.assert_async().await;
     }
 
     #[tokio::test]
@@ -1733,8 +1798,19 @@ mod live_gate_tests {
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
-                r#"{"id":"42","cl_ord_id":"sxmk-controlled-buy","symbol":"BTC-USD","side":"buy","order_type":"limit","qty":"0.001","fill_qty":"0","price":"63000","status":"canceled","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:02Z"}"#,
+                r#"{"id":"42","cl_ord_id":"sxmk-controlled-buy","symbol":"BTC-USD","side":"buy","order_type":"limit","qty":"0.001","fill_qty":"0","price":"63000","status":"canceled","created_at":"2026-07-10T00:00:02Z","updated_at":"2026-07-10T00:00:02Z"}"#,
             )
+            .expect(1)
+            .create_async()
+            .await;
+        // The first pass fails closed before the final book re-read, so only the
+        // second (successful) pass performs one.
+        let open_final = server
+            .mock("GET", "/api/query_open_orders")
+            .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(maker_and_manual)
             .expect(1)
             .create_async()
             .await;
@@ -1750,6 +1826,7 @@ mod live_gate_tests {
         open_retry.assert_async().await;
         cancel_retry.assert_async().await;
         cleared_query.assert_async().await;
+        open_final.assert_async().await;
     }
 
     /// Regression: a stale `/api/query_open_orders` snapshot that still lists
@@ -1792,6 +1869,21 @@ mod live_gate_tests {
             .expect(1)
             .create_async()
             .await;
+        // The final book re-read still returns the stale entry for 42; a tracked
+        // order confirmed canceled must not be re-read as residual.
+        let open_final = server
+            .mock("GET", "/api/query_open_orders")
+            .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"code":0,"message":"ok","result":[
+                    {"id":"42","cl_ord_id":"sxmk-controlled-buy","symbol":"BTC-USD","side":"buy","order_type":"limit","qty":"0.001","fill_qty":"0","price":"63000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:00Z"}
+                ]}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
 
         let client = StandXClient::with_base_url(server.url()).unwrap();
         cancel_maker_orders_with_retry(&client, "BTC-USD", 3, OutputFormat::Quiet)
@@ -1801,6 +1893,191 @@ mod live_gate_tests {
         open_before.assert_async().await;
         cancel.assert_async().await;
         query_order.assert_async().await;
+        open_final.assert_async().await;
+    }
+
+    /// Regression: an order the venue accepted just before cleanup can surface
+    /// only after the initial snapshot. It was never in the cancel batch, so the
+    /// pass must fail closed and the retry must cancel it — the guarantee the
+    /// post-recovery book re-verification depends on.
+    #[tokio::test]
+    async fn maker_cleanup_fails_closed_on_order_that_surfaces_after_cancel() {
+        let _jwt = EnvGuard::set("STANDX_JWT", "controlled-test-jwt");
+        let mut server = Server::new_async().await;
+        let open_before = server
+            .mock("GET", "/api/query_open_orders")
+            .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"code":0,"message":"ok","result":[
+                    {"id":"42","cl_ord_id":"sxmk-controlled-buy","symbol":"BTC-USD","side":"buy","order_type":"limit","qty":"0.001","fill_qty":"0","price":"63000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:00Z"}
+                ]}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let cancel_tracked = server
+            .mock("POST", "/api/cancel_orders")
+            .match_body(Matcher::Json(serde_json::json!({ "order_id_list": [42] })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"code":0,"message":"accepted"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let query_tracked = server
+            .mock("GET", "/api/query_order")
+            .match_query(Matcher::UrlEncoded("order_id".into(), "42".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"id":"42","cl_ord_id":"sxmk-controlled-buy","symbol":"BTC-USD","side":"buy","order_type":"limit","qty":"0.001","fill_qty":"0","price":"63000","status":"canceled","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:01Z"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        // Order 77 was accepted before cleanup but only becomes visible now.
+        let open_final = server
+            .mock("GET", "/api/query_open_orders")
+            .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"code":0,"message":"ok","result":[
+                    {"id":"77","cl_ord_id":"sxmk-controlled-sell","symbol":"BTC-USD","side":"sell","order_type":"limit","qty":"0.001","fill_qty":"0","price":"67000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:01Z"}
+                ]}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let open_retry = server
+            .mock("GET", "/api/query_open_orders")
+            .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"code":0,"message":"ok","result":[
+                    {"id":"77","cl_ord_id":"sxmk-controlled-sell","symbol":"BTC-USD","side":"sell","order_type":"limit","qty":"0.001","fill_qty":"0","price":"67000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:01Z"}
+                ]}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let cancel_late = server
+            .mock("POST", "/api/cancel_orders")
+            .match_body(Matcher::Json(serde_json::json!({ "order_id_list": [77] })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"code":0,"message":"accepted"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let query_late = server
+            .mock("GET", "/api/query_order")
+            .match_query(Matcher::UrlEncoded("order_id".into(), "77".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"id":"77","cl_ord_id":"sxmk-controlled-sell","symbol":"BTC-USD","side":"sell","order_type":"limit","qty":"0.001","fill_qty":"0","price":"67000","status":"canceled","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:03Z"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let open_settled = server
+            .mock("GET", "/api/query_open_orders")
+            .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"code":0,"message":"ok","result":[]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = StandXClient::with_base_url(server.url()).unwrap();
+        cancel_maker_orders_with_retry(&client, "BTC-USD", 3, OutputFormat::Quiet)
+            .await
+            .unwrap();
+
+        open_before.assert_async().await;
+        cancel_tracked.assert_async().await;
+        query_tracked.assert_async().await;
+        open_final.assert_async().await;
+        open_retry.assert_async().await;
+        cancel_late.assert_async().await;
+        query_late.assert_async().await;
+        open_settled.assert_async().await;
+    }
+
+    /// Regression: the reconnect snapshot must not fail closed on a stale
+    /// open-orders list. `/api/query_order` is the authority — a maker order the
+    /// list still shows as open, but whose cancel already landed, is not residual.
+    #[tokio::test]
+    async fn reconnect_residual_confirmation_ignores_stale_but_cancelled_order() {
+        let _jwt = EnvGuard::set("STANDX_JWT", "controlled-test-jwt");
+        let mut server = Server::new_async().await;
+        let cancelled = server
+            .mock("GET", "/api/query_order")
+            .match_query(Matcher::UrlEncoded("order_id".into(), "42".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"id":"42","cl_ord_id":"sxmk-stale","symbol":"BTC-USD","side":"buy","order_type":"limit","qty":"0.001","fill_qty":"0","price":"63000","status":"canceled","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:01Z"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let still_live = server
+            .mock("GET", "/api/query_order")
+            .match_query(Matcher::UrlEncoded("order_id".into(), "77".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"id":"77","cl_ord_id":"sxmk-live","symbol":"BTC-USD","side":"sell","order_type":"limit","qty":"0.001","fill_qty":"0","price":"67000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:01Z"}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        // The list read is deliberately stale: it reports every order as open.
+        let listed = |id: &str, cl_ord_id: &str| -> Order {
+            serde_json::from_value(serde_json::json!({
+                "id": id,
+                "cl_ord_id": cl_ord_id,
+                "symbol": "BTC-USD",
+                "side": "buy",
+                "order_type": "limit",
+                "qty": "0.001",
+                "fill_qty": "0",
+                "price": "63000",
+                "status": "open",
+                "created_at": "2026-07-10T00:00:00Z",
+                "updated_at": "2026-07-10T00:00:00Z"
+            }))
+            .unwrap()
+        };
+
+        let client = StandXClient::with_base_url(server.url()).unwrap();
+        let open_orders = vec![
+            listed("42", "sxmk-stale"),
+            listed("99", "manual-order"),
+            listed("77", "sxmk-live"),
+        ];
+        let residual = confirm_residual_maker_orders(&client, &open_orders)
+            .await
+            .unwrap();
+
+        // 42 is already cancelled (stale list entry) and 99 is not maker-owned;
+        // only the genuinely live 77 fails the reconnect closed.
+        assert_eq!(residual, vec!["77".to_string()]);
+        assert!(
+            validate_reconnect_snapshot("BTC-USD", "sxmk-", &residual, &[], &[], &[])
+                .unwrap_err()
+                .to_string()
+                .contains("appeared after cleanup")
+        );
+        cancelled.assert_async().await;
+        still_live.assert_async().await;
     }
 
     #[tokio::test]
