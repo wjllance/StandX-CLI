@@ -179,6 +179,75 @@ pub(super) struct FreezeSpec<'a> {
     pub(super) price_decimals: u32,
 }
 
+/// Live halves [`replay_leftover_responses`] needs from the session, bundled
+/// so the function stays under clippy's argument-count lint.
+pub(super) struct LeftoverReplayContext<'a> {
+    pub(super) projection: &'a mut MakerAccountProjection,
+    pub(super) order_latency: &'a mut maker::OrderLatencyTracker,
+    pub(super) latency_started: std::time::Instant,
+    pub(super) order_response_health: &'a standx_sdk::order_response::OrderResponseHealth,
+    pub(super) output_format: OutputFormat,
+    pub(super) symbol: &'a str,
+    pub(super) cycle: u64,
+    pub(super) price_decimals: u32,
+}
+
+/// Re-applies order-response frames the cleanup drain captured for requests it
+/// did not mint (acks for pre-freeze cycle requests) through the canonical
+/// response path, so the pending-request lifecycle stays correlated across the
+/// cleanup. Returns the first fail-closed reason encountered, if any, and marks
+/// the order-response stream unhealthy when it does — but does *not* itself
+/// stop the runtime.
+///
+/// It cannot: `order_response_failure` raises `OrderResponseUnmatched` /
+/// `OrderCancelRejected` through `runtime_state.handle`, and that event is a
+/// no-op once the runtime is already `Frozen` (`MakerState::freeze` returns no
+/// effects in that phase — see `standx_maker::runtime`). The freeze preamble is
+/// always mid-`Frozen` when this runs, so the caller must route a `Some`
+/// return through the same stop path a cleanup failure already uses instead of
+/// trusting the event to have queued one.
+pub(super) fn replay_leftover_responses(
+    leftover_responses: Vec<OrderResponse>,
+    ctx: LeftoverReplayContext<'_>,
+    runtime_state: &mut MakerState,
+) -> Option<String> {
+    let LeftoverReplayContext {
+        projection,
+        order_latency,
+        latency_started,
+        order_response_health,
+        output_format,
+        symbol,
+        cycle,
+        price_decimals,
+    } = ctx;
+    for response in leftover_responses {
+        let request_id = response.request_id.clone();
+        observe_order_ack(
+            Some(order_latency),
+            Some(latency_started),
+            request_id.as_deref(),
+            response.accepted(),
+        );
+        let generation = projection.generation();
+        let outcome = apply_order_response(
+            response,
+            projection,
+            output_format,
+            symbol,
+            cycle,
+            price_decimals,
+        );
+        if let Some(reason) =
+            order_response_failure(&outcome, request_id.as_deref(), generation, runtime_state)
+        {
+            order_response_health.mark_unhealthy(reason.clone());
+            return Some(reason);
+        }
+    }
+    None
+}
+
 /// Freeze/cleanup preamble shared by the incident-recovery flows:
 /// report the fault to the runtime, drain the cleanup effect, notify,
 /// cancel every maker order, reset the local book state, and drain the
@@ -248,29 +317,39 @@ pub(super) async fn freeze_and_cleanup_for_recovery(
     // Re-applied through the canonical response path whatever the cleanup
     // verdict was, so the pending-request lifecycle stays correlated across the
     // cleanup (`finish_verified_cleanup` below preserves those acks).
-    if let Some(session) = io.session.as_deref_mut() {
-        for response in leftover_responses {
-            let request_id = response.request_id.clone();
-            let generation = session.projection.generation();
-            let outcome = apply_order_response(
-                response,
-                &mut session.projection,
-                io.output_format,
-                io.symbol,
-                io.cycle,
-                spec.price_decimals,
-            );
-            if let Some(reason) = order_response_failure(
-                &outcome,
-                request_id.as_deref(),
-                generation,
-                io.runtime_state,
-            ) {
-                session.order_response_health.mark_unhealthy(reason);
-                break;
-            }
-        }
-    }
+    //
+    // A fail-closed correlation discovered here cannot rely on the
+    // `OrderResponseUnmatched` / `OrderCancelRejected` event `order_response_failure`
+    // raises to queue a new recovery: the runtime is already `Frozen` from
+    // `spec.trigger` above, and `MakerState::freeze` is a no-op once already
+    // frozen (see `standx_maker::runtime`), so that event would otherwise be
+    // silently discarded and the preamble would report `CleanupCompleted` over a
+    // contradiction it never actually resolved. Folding the failure into
+    // `cleanup` below routes it through the same `CleanupFailed` stop the
+    // cancellation verdict already uses.
+    let leftover_failure = io.session.as_deref_mut().and_then(|session| {
+        replay_leftover_responses(
+            leftover_responses,
+            LeftoverReplayContext {
+                projection: &mut session.projection,
+                order_latency: &mut session.order_latency,
+                latency_started: session.latency_started,
+                order_response_health: &session.order_response_health,
+                output_format: io.output_format,
+                symbol: io.symbol,
+                cycle: io.cycle,
+                price_decimals: spec.price_decimals,
+            },
+            io.runtime_state,
+        )
+    });
+    let cleanup: Result<()> = match (cleanup, leftover_failure) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Some(reason)) => Err(anyhow::anyhow!(
+            "leftover order-response replay failed closed: {reason}"
+        )),
+        (Ok(()), None) => Ok(()),
+    };
     if let Err(error) = cleanup {
         io.runtime_state.handle(MakerEvent::CleanupFailed {
             token: cleanup_token,
