@@ -23,7 +23,9 @@ standx order create <SYMBOL> <SIDE> <TYPE> \
   [--tif <TIF>] \
   [--reduce-only] \
   [--sl-price <PRICE>] \
-  [--tp-price <PRICE>]
+  [--tp-price <PRICE>] \
+  [--transport <http|ws>] \
+  [--timeout-secs <SECONDS>]
 ```
 
 ### 参数
@@ -39,6 +41,8 @@ standx order create <SYMBOL> <SIDE> <TYPE> \
 | --reduce-only | 仅减仓 | 否 | - |
 | --sl-price | 止损价格 | 否 | 55000 |
 | --tp-price | 止盈价格 | 否 | 70000 |
+| --transport | 下单传输方式，默认 `http` | 否 | ws |
+| --timeout-secs | 等待匹配 WS 回报的秒数，范围 1–30，默认 10 | 否 | 10 |
 
 ### Time in Force 说明
 
@@ -104,6 +108,34 @@ standx order create BTC-USD sell limit \
   --reduce-only
 ```
 
+### WebSocket 下单并查看回报
+
+```bash
+standx --output json --verbose order create BTC-USD buy limit \
+  --qty 0.01 \
+  --price 60000 \
+  --transport ws
+```
+
+标准输出是稳定的结构化结果：
+
+```json
+{
+  "transport": "ws",
+  "operation": "create",
+  "symbol": "BTC-USD",
+  "request_id": "…",
+  "response_code": 0,
+  "response_message": "accepted",
+  "accepted": true
+}
+```
+
+`--verbose` 会把认证完成后的原始入站 WS response 写到 stderr；不会记录 JWT、签名、
+认证载荷或出站订单。CLI 收到首个匹配 `request_id` 的回报即结束，不额外等待 REST
+可见性。若等待超时或连接中断，订单提交状态未知；请先查询账户订单，避免直接重试造成
+重复下单。
+
 ---
 
 ## 5.2 取消订单
@@ -111,7 +143,9 @@ standx order create BTC-USD sell limit \
 ### 命令
 
 ```bash
-standx order cancel <SYMBOL> --order-id <ID>
+standx order cancel <SYMBOL> --order-id <ID> \
+  [--transport <http|ws>] \
+  [--timeout-secs <SECONDS>]
 ```
 
 ### 参数
@@ -120,11 +154,21 @@ standx order cancel <SYMBOL> --order-id <ID>
 |------|------|------|------|
 | SYMBOL | 交易对 | 是 | BTC-USD |
 | --order-id | 订单ID | 是 | 123456 |
+| --transport | 撤单传输方式，默认 `http` | 否 | ws |
+| --timeout-secs | 等待匹配 WS 回报的秒数，范围 1–30，默认 10 | 否 | 10 |
 
 ### 示例
 
 ```bash
 standx order cancel BTC-USD --order-id 123456
+```
+
+WebSocket 撤单：
+
+```bash
+standx --output json order cancel BTC-USD \
+  --order-id 123456 \
+  --transport ws
 ```
 
 **预期输出（成功）：**
@@ -159,6 +203,8 @@ standx order cancel-all <SYMBOL>
 ```bash
 standx order cancel-all BTC-USD
 ```
+
+`cancel-all` 继续使用 REST，不接受 `--transport ws`。
 
 **预期输出（成功）：**
 ```

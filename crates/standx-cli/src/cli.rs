@@ -385,6 +385,12 @@ pub enum OrderCommands {
         sl_price: Option<String>,
         #[arg(long)]
         tp_price: Option<String>,
+        /// Order command transport
+        #[arg(long, value_enum, default_value = "http")]
+        transport: OrderTransport,
+        /// Bound the matching WebSocket response wait (1..=30 seconds)
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=30))]
+        timeout_secs: u64,
     },
     /// Cancel an order by ID
     #[command(visible_alias = "cxl")]
@@ -392,10 +398,23 @@ pub enum OrderCommands {
         symbol: String,
         #[arg(short = 'i', long)]
         order_id: String,
+        /// Order command transport
+        #[arg(long, value_enum, default_value = "http")]
+        transport: OrderTransport,
+        /// Bound the matching WebSocket response wait (1..=30 seconds)
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=30))]
+        timeout_secs: u64,
     },
     /// Cancel all orders for a symbol
     #[command(visible_alias = "cxa")]
     CancelAll { symbol: String },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum OrderTransport {
+    #[default]
+    Http,
+    Ws,
 }
 
 #[derive(Subcommand, Debug)]
@@ -768,6 +787,108 @@ mod tests {
         };
         assert_eq!(symbol.as_deref(), Some("BTC-USD"));
         assert_eq!(status, "all");
+    }
+
+    #[test]
+    fn order_create_defaults_to_http_and_accepts_explicit_ws_transport() {
+        let default = Cli::try_parse_from([
+            "standx", "order", "create", "BTC-USD", "buy", "limit", "--qty", "0.01", "--price",
+            "60000",
+        ])
+        .expect("default order create should parse");
+        let Commands::Order {
+            command:
+                OrderCommands::Create {
+                    transport,
+                    timeout_secs,
+                    ..
+                },
+        } = default.command
+        else {
+            panic!("expected order create command");
+        };
+        assert_eq!(transport, OrderTransport::Http);
+        assert_eq!(timeout_secs, 10);
+
+        let ws = Cli::try_parse_from([
+            "standx",
+            "order",
+            "create",
+            "BTC-USD",
+            "buy",
+            "limit",
+            "--qty",
+            "0.01",
+            "--price",
+            "60000",
+            "--transport",
+            "ws",
+            "--timeout-secs",
+            "7",
+        ])
+        .expect("WebSocket order create should parse");
+        let Commands::Order {
+            command:
+                OrderCommands::Create {
+                    transport,
+                    timeout_secs,
+                    ..
+                },
+        } = ws.command
+        else {
+            panic!("expected order create command");
+        };
+        assert_eq!(transport, OrderTransport::Ws);
+        assert_eq!(timeout_secs, 7);
+    }
+
+    #[test]
+    fn order_cancel_supports_ws_but_cancel_all_does_not() {
+        let ws = Cli::try_parse_from([
+            "standx",
+            "order",
+            "cancel",
+            "BTC-USD",
+            "--order-id",
+            "42",
+            "--transport",
+            "ws",
+        ])
+        .expect("WebSocket order cancel should parse");
+        let Commands::Order {
+            command:
+                OrderCommands::Cancel {
+                    transport,
+                    timeout_secs,
+                    ..
+                },
+        } = ws.command
+        else {
+            panic!("expected order cancel command");
+        };
+        assert_eq!(transport, OrderTransport::Ws);
+        assert_eq!(timeout_secs, 10);
+
+        assert!(Cli::try_parse_from([
+            "standx",
+            "order",
+            "cancel-all",
+            "BTC-USD",
+            "--transport",
+            "ws",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "standx",
+            "order",
+            "cancel",
+            "BTC-USD",
+            "--order-id",
+            "42",
+            "--timeout-secs",
+            "31",
+        ])
+        .is_err());
     }
 
     #[test]

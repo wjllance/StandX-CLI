@@ -53,6 +53,7 @@ pub struct OrderResponseStream {
     token: String,
     signer: Option<Arc<StandXSigner>>,
     session_id: String,
+    verbose: bool,
     ping_interval: Duration,
     idle_timeout: Duration,
     rotate_after: Duration,
@@ -245,6 +246,7 @@ impl OrderResponseStream {
                 .transpose()?
                 .map(Arc::new),
             session_id: session_id.into(),
+            verbose: false,
             ping_interval: ORDER_RESPONSE_PING_INTERVAL,
             idle_timeout: ORDER_RESPONSE_IDLE_TIMEOUT,
             rotate_after: ORDER_RESPONSE_ROTATE_AFTER,
@@ -262,6 +264,7 @@ impl OrderResponseStream {
             token: token.into(),
             signer: None,
             session_id: session_id.into(),
+            verbose: false,
             ping_interval: ORDER_RESPONSE_PING_INTERVAL,
             idle_timeout: ORDER_RESPONSE_IDLE_TIMEOUT,
             rotate_after: ORDER_RESPONSE_ROTATE_AFTER,
@@ -280,6 +283,7 @@ impl OrderResponseStream {
             token: token.into(),
             signer: Some(Arc::new(signer)),
             session_id: session_id.into(),
+            verbose: false,
             ping_interval: ORDER_RESPONSE_PING_INTERVAL,
             idle_timeout: ORDER_RESPONSE_IDLE_TIMEOUT,
             rotate_after: ORDER_RESPONSE_ROTATE_AFTER,
@@ -307,6 +311,14 @@ impl OrderResponseStream {
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Print raw post-authentication order responses to stderr.
+    ///
+    /// Outbound signed commands and authentication payloads are never logged.
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
     }
 
     /// Connect, wait for authentication, and return a command sender,
@@ -373,6 +385,7 @@ impl OrderResponseStream {
         };
         let health = OrderResponseHealth::default();
         let task_health = health.clone();
+        let verbose = self.verbose;
         let ping_interval = self.ping_interval;
         let idle_timeout = self.idle_timeout;
         let rotate_after = self.rotate_after;
@@ -430,6 +443,9 @@ impl OrderResponseStream {
                             .reset(tokio::time::Instant::now() + idle_timeout);
                         match message {
                         Some(Ok(Message::Text(text))) => {
+                            if verbose {
+                                eprintln!("[WebSocket Order Debug] Received: {text}");
+                            }
                             let response = match serde_json::from_str::<OrderResponse>(&text) {
                                 Ok(response) if response.request_id.is_some() => response,
                                 Ok(_) => {
@@ -558,6 +574,8 @@ mod tests {
             "maker-session",
         );
         assert_eq!(stream.session_id(), "maker-session");
+        assert!(!stream.verbose);
+        assert!(stream.with_verbose(true).verbose);
     }
 
     #[tokio::test]
@@ -774,7 +792,8 @@ mod tests {
         let private_key = bs58::encode(signing_key.to_bytes()).into_string();
         let signer = StandXSigner::from_base58(&private_key).unwrap();
         let stream =
-            OrderResponseStream::with_url_token_and_signer(url, "jwt", "maker-session", signer);
+            OrderResponseStream::with_url_token_and_signer(url, "jwt", "maker-session", signer)
+                .with_verbose(true);
         let (commands, mut responses, _health, handle) = stream.connect().await.unwrap();
         let command = commands
             .prepare_create_order(&CreateOrderParams {
