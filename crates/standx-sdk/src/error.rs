@@ -165,3 +165,80 @@ impl From<std::io::Error> for Error {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_and_api_errors_have_stable_display_and_json_shapes() {
+        let http = Error::Http {
+            code: 401,
+            message: "Unauthorized".to_string(),
+            retryable: Some(false),
+        };
+        assert_eq!(http.to_string(), "HTTP request failed: 401 - Unauthorized");
+        let http_json = serde_json::to_value(&http).unwrap();
+        assert_eq!(http_json["error_type"], "HTTP_ERROR");
+        assert_eq!(http_json["code"], 401);
+        assert_eq!(http_json["retryable"], false);
+
+        let api = Error::Api {
+            code: 500,
+            message: "Internal Server Error".to_string(),
+            endpoint: Some("/api/query_positions".to_string()),
+            retryable: true,
+        };
+        assert_eq!(api.to_string(), "API error: 500 - Internal Server Error");
+        let api_json = serde_json::to_value(&api).unwrap();
+        assert_eq!(api_json["error_type"], "API_ERROR");
+        assert_eq!(api_json["endpoint"], "/api/query_positions");
+        assert_eq!(api_json["retryable"], true);
+    }
+
+    #[test]
+    fn retryability_is_derived_from_the_typed_error() {
+        let retryable = [
+            Error::Http {
+                code: 503,
+                message: "unavailable".to_string(),
+                retryable: Some(true),
+            },
+            Error::Api {
+                code: 500,
+                message: "server error".to_string(),
+                endpoint: None,
+                retryable: true,
+            },
+            Error::RateLimitExceeded {
+                message: "slow down".to_string(),
+                retry_after: Some(2),
+            },
+            Error::WebSocket {
+                message: "closed".to_string(),
+            },
+        ];
+        assert!(retryable.iter().all(Error::is_retryable));
+
+        let terminal = Error::Http {
+            code: 400,
+            message: "bad request".to_string(),
+            retryable: Some(false),
+        };
+        assert!(!terminal.is_retryable());
+    }
+
+    #[test]
+    fn authentication_error_exposes_a_recovery_action() {
+        let error = Error::AuthRequired {
+            message: "Token expired".to_string(),
+            resolution: "Run 'standx auth login'".to_string(),
+        };
+
+        assert_eq!(error.to_string(), "Authentication required");
+        assert_eq!(
+            error.suggested_action().as_deref(),
+            Some("Run 'standx auth login' to authenticate")
+        );
+    }
+}
