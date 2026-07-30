@@ -264,6 +264,105 @@ async fn freeze_preamble_fails_closed_when_runtime_cannot_freeze() {
     );
 }
 
+/// Regression: a leftover order-response frame that fails closed during replay
+/// must be reported to the caller, not silently absorbed. The runtime is
+/// already `Frozen` by the time the freeze preamble replays leftovers (mirrored
+/// here via the same `OrderResponseDisconnected` trigger the order-response
+/// flow uses), so the `OrderResponseUnmatched` event `replay_leftover_responses`
+/// raises internally is a no-op — `freeze_and_cleanup_for_recovery` only
+/// notices the failure because it checks this function's return value, not
+/// because a new effect got queued.
+#[test]
+fn replay_leftover_responses_reports_a_fail_closed_correlation() {
+    let mut projection = MakerAccountProjection::new(1, "sxmk-test-", 0.0, 0.005, 0.00005);
+    let mut order_latency = maker::OrderLatencyTracker::default();
+    let latency_started = std::time::Instant::now();
+    let order_response_health = OrderResponseHealth::default();
+    let mut runtime_state = MakerState::starting();
+    runtime_state.handle(MakerEvent::StartupReady);
+    let _ = runtime_state.next_effect();
+    runtime_state.handle(MakerEvent::OrderResponseDisconnected(
+        "stream closed".to_string(),
+    ));
+    assert!(matches!(
+        runtime_state.next_effect(),
+        Some(MakerEffect::AbortInFlight(_))
+    ));
+    assert!(matches!(
+        runtime_state.next_effect(),
+        Some(MakerEffect::Cleanup { .. })
+    ));
+    assert!(
+        runtime_state.pending_effect().is_none(),
+        "no further effect is queued once Frozen"
+    );
+
+    // A leftover frame for a request this run never registered classifies as
+    // Orphan and must fail closed.
+    let leftover = vec![order_response(Some("foreign-req"), 0)];
+
+    let failure = replay_leftover_responses(
+        leftover,
+        LeftoverReplayContext {
+            projection: &mut projection,
+            order_latency: &mut order_latency,
+            latency_started,
+            order_response_health: &order_response_health,
+            output_format: OutputFormat::Quiet,
+            symbol: "BTC-USD",
+            cycle: 7,
+            price_decimals: 2,
+        },
+        &mut runtime_state,
+    );
+
+    assert!(failure.is_some(), "an Orphan correlation must fail closed");
+    assert!(
+        !order_response_health.is_healthy(),
+        "the order-response stream must be marked unhealthy"
+    );
+    // The runtime was already Frozen going in, so the OrderResponseUnmatched
+    // event raised inside `order_response_failure` queues nothing new — the
+    // `Some` return is the only signal the caller has to act on.
+    assert!(
+        runtime_state.pending_effect().is_none(),
+        "the runtime queues no new effect for a fail-closed leftover while already frozen"
+    );
+}
+
+/// Invariant: leftovers that all correlate cleanly produce no failure, and the
+/// runtime is left exactly as it was.
+#[test]
+fn replay_leftover_responses_returns_none_when_every_frame_matches() {
+    let mut projection = projection_with_pending(&["req-1"]);
+    let mut order_latency = maker::OrderLatencyTracker::default();
+    let latency_started = std::time::Instant::now();
+    let order_response_health = OrderResponseHealth::default();
+    let mut runtime_state = MakerState::starting();
+    runtime_state.handle(MakerEvent::StartupReady);
+    let _ = runtime_state.next_effect();
+
+    let leftover = vec![order_response(Some("req-1"), 0)];
+
+    let failure = replay_leftover_responses(
+        leftover,
+        LeftoverReplayContext {
+            projection: &mut projection,
+            order_latency: &mut order_latency,
+            latency_started,
+            order_response_health: &order_response_health,
+            output_format: OutputFormat::Quiet,
+            symbol: "BTC-USD",
+            cycle: 7,
+            price_decimals: 2,
+        },
+        &mut runtime_state,
+    );
+
+    assert!(failure.is_none());
+    assert!(order_response_health.is_healthy());
+}
+
 /// Invariant: the resume tail restores quoting state (flags, error
 /// streak, paper book) and schedules the next cycle via the runtime.
 #[tokio::test]
