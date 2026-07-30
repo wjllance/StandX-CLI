@@ -7,11 +7,48 @@ use std::path::PathBuf;
 
 pub const BASE_URL_ENV: &str = "STANDX_BASE_URL";
 
+/// Must be set to a non-empty value before an authenticated command (anything
+/// but `market`) is allowed to run against a plain-HTTP/WS endpoint.
+pub const ALLOW_INSECURE_ENDPOINT_ENV: &str = "STANDX_ALLOW_INSECURE_ENDPOINT";
+
+/// Refuse to run an authenticated command against a non-TLS endpoint unless the
+/// operator explicitly opts in. `StandXEndpoints::new` already restricts plain
+/// HTTP/WS to loopback addresses, but that alone doesn't stop a normal
+/// invocation — e.g. a mistyped `--endpoint` or a `STANDX_BASE_URL` picked up
+/// from a compromised script — from pointing the JWT and signing key at an
+/// unintended local listener in clear text. This is a second, explicit signal
+/// that the operator means it.
+pub fn ensure_authenticated_endpoint_is_secure(endpoints: &StandXEndpoints) -> Result<()> {
+    if endpoints.is_secure() {
+        return Ok(());
+    }
+    if std::env::var_os(ALLOW_INSECURE_ENDPOINT_ENV).is_some_and(|value| !value.is_empty()) {
+        return Ok(());
+    }
+    Err(Error::Config {
+        message: format!(
+            "refusing to send credentials to insecure endpoint '{}': plain HTTP/WS exposes the \
+             JWT and signing key to anything listening on that address. Set \
+             {ALLOW_INSECURE_ENDPOINT_ENV}=1 to confirm this is a trusted local test endpoint.",
+            endpoints.base_url()
+        ),
+    })
+}
+
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// API base URL
     pub base_url: String,
+
+    /// Whether `base_url` was explicitly confirmed through `config set` (or a fresh
+    /// default config). Config files written before endpoint routing existed have no
+    /// such field and deserialize this as `false`, so a stale custom `base_url` that
+    /// was previously cosmetic-only stays inactive after upgrading until the user
+    /// re-confirms it — an upgrade must never silently turn an old value into live
+    /// routing for financial commands.
+    #[serde(default)]
+    pub base_url_confirmed: bool,
 
     /// Default output format
     pub output_format: String,
@@ -32,6 +69,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             base_url: "https://perps.standx.com".to_string(),
+            base_url_confirmed: true,
             output_format: "table".to_string(),
             default_symbol: "BTC-USD".to_string(),
             config_dir: Self::default_config_dir(),
@@ -145,6 +183,18 @@ impl Config {
                 ),
             });
         }
+        if config.base_url != standx_sdk::endpoints::DEFAULT_BASE_URL && !config.base_url_confirmed
+        {
+            eprintln!(
+                "warning: ignoring unconfirmed base_url '{}' in {} — it predates endpoint \
+                 routing and was never active; run `standx config set base_url {}` to confirm \
+                 and use it, or pass --endpoint. Falling back to the default endpoint.",
+                config.base_url,
+                config.config_file().display(),
+                config.base_url,
+            );
+            return StandXEndpoints::new(standx_sdk::endpoints::DEFAULT_BASE_URL);
+        }
         StandXEndpoints::new(&config.base_url)
     }
 
@@ -170,6 +220,7 @@ impl Config {
         match key {
             "base_url" => {
                 self.base_url = StandXEndpoints::new(value)?.base_url().to_string();
+                self.base_url_confirmed = true;
             }
             "output_format" => self.output_format = value.to_string(),
             "default_symbol" => self.default_symbol = value.to_string(),
@@ -276,6 +327,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = Config {
             base_url: "https://test.standx.com".to_string(),
+            base_url_confirmed: true,
             output_format: "json".to_string(),
             default_symbol: "ETH-USD".to_string(),
             config_dir: temp_dir.path().to_path_buf(),
@@ -340,6 +392,7 @@ mod tests {
         // 由于 Config::load() 使用固定路径，我们测试 save/load 循环
         let config = Config {
             base_url: "https://test.com".to_string(),
+            base_url_confirmed: true,
             output_format: "json".to_string(),
             default_symbol: "ETH-USD".to_string(),
             config_dir: temp_dir.path().to_path_buf(),
@@ -395,6 +448,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = Config {
             base_url: "https://file.standx.com".to_string(),
+            base_url_confirmed: true,
             output_format: "table".to_string(),
             default_symbol: "BTC-USD".to_string(),
             config_dir: temp_dir.path().to_path_buf(),
@@ -453,6 +507,7 @@ mod tests {
 
         let config = Config {
             base_url: "https://specific.test.com".to_string(),
+            base_url_confirmed: true,
             output_format: "json".to_string(),
             default_symbol: "ETH-USD".to_string(),
             config_dir: temp_dir.path().to_path_buf(),
@@ -477,6 +532,7 @@ mod tests {
 
         let config = Config {
             base_url: "https://string.test.com".to_string(),
+            base_url_confirmed: true,
             output_format: "csv".to_string(),
             default_symbol: "DOGE-USD".to_string(),
             config_dir: temp_dir.path().to_path_buf(),
@@ -495,6 +551,7 @@ mod tests {
 
         let config = Config {
             base_url: "https://pathbuf.test.com".to_string(),
+            base_url_confirmed: true,
             output_format: "csv".to_string(),
             default_symbol: "DOGE-USD".to_string(),
             config_dir: temp_dir.path().to_path_buf(),
@@ -519,6 +576,7 @@ mod tests {
 
         let config = Config {
             base_url: "https://backward.compat.com".to_string(),
+            base_url_confirmed: true,
             output_format: "table".to_string(),
             default_symbol: "BTC-USD".to_string(),
             config_dir: temp_dir.path().to_path_buf(),
@@ -573,6 +631,37 @@ mod tests {
         let default = Config::resolve_endpoints(None, None).unwrap();
         assert_eq!(default, StandXEndpoints::default());
         drop(env);
+    }
+
+    #[test]
+    fn pre_existing_unconfirmed_base_url_stays_inactive_after_upgrade() {
+        // Simulates a config.toml written by a version of the CLI that predates
+        // endpoint routing: `base_url` was persisted but had no functional effect
+        // (no `base_url_confirmed` field exists). Upgrading must not silently turn
+        // that stale value into live routing for financial commands.
+        let _env = EnvGuard::unset(BASE_URL_ENV);
+        let temp_dir = TempDir::new().unwrap();
+        let config_file = temp_dir.path().join("config.toml");
+        std::fs::write(
+            &config_file,
+            "base_url = \"https://stale-legacy.example.com\"\n\
+             output_format = \"table\"\n\
+             default_symbol = \"BTC-USD\"\n",
+        )
+        .unwrap();
+        let config_path = temp_dir.path().to_str().unwrap();
+
+        let resolved = Config::resolve_endpoints(None, Some(config_path)).unwrap();
+        assert_eq!(resolved, StandXEndpoints::default());
+
+        // Once the user explicitly re-confirms the same value via `config set`, it
+        // becomes active.
+        let mut config = Config::load_from_path(Some(temp_dir.path())).unwrap();
+        config
+            .set("base_url", "https://stale-legacy.example.com")
+            .unwrap();
+        let resolved = Config::resolve_endpoints(None, Some(config_path)).unwrap();
+        assert_eq!(resolved.base_url(), "https://stale-legacy.example.com");
     }
 
     #[test]
@@ -640,5 +729,25 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("plain HTTP"));
         assert_eq!(config.base_url, "https://perps.example.com");
+    }
+
+    #[test]
+    fn insecure_endpoint_requires_explicit_opt_in() {
+        let insecure = StandXEndpoints::new("http://127.0.0.1:8080").unwrap();
+
+        {
+            let _env = EnvGuard::unset(ALLOW_INSECURE_ENDPOINT_ENV);
+            let error = ensure_authenticated_endpoint_is_secure(&insecure).unwrap_err();
+            assert!(error.to_string().contains(ALLOW_INSECURE_ENDPOINT_ENV));
+        }
+
+        let _opt_in = EnvGuard::set(ALLOW_INSECURE_ENDPOINT_ENV, "1");
+        ensure_authenticated_endpoint_is_secure(&insecure).unwrap();
+    }
+
+    #[test]
+    fn secure_endpoint_never_needs_opt_in() {
+        let _env = EnvGuard::unset(ALLOW_INSECURE_ENDPOINT_ENV);
+        ensure_authenticated_endpoint_is_secure(&StandXEndpoints::default()).unwrap();
     }
 }

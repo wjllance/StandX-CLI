@@ -251,6 +251,15 @@ async fn execute_command(
         .then(|| standx_cli::config::Config::resolve_endpoints(endpoint_override, config_path))
         .transpose()?;
 
+    // `market` is the only perps-endpoint command that never loads credentials;
+    // everything else attaches the JWT (and, for order/maker, the signing key).
+    // Refuse to send those over plain HTTP/WS to an unconfirmed local listener.
+    if let Some(endpoints) = endpoints.as_ref() {
+        if !matches!(command, Commands::Market { .. }) {
+            standx_cli::config::ensure_authenticated_endpoint_is_secure(endpoints)?;
+        }
+    }
+
     match command {
         Commands::Config { command } => {
             commands::handle_config(command, output, config_path).await?;
