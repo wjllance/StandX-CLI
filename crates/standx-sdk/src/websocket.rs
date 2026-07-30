@@ -4,7 +4,7 @@ use crate::auth::Credentials;
 use crate::endpoints::StandXEndpoints;
 use crate::error::{Error, Result};
 use crate::models::*;
-use futures::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
 use std::time::Instant;

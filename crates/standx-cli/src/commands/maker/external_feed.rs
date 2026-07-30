@@ -13,7 +13,7 @@
 //! maker.
 
 use super::model::Decimal;
-use futures::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{watch, RwLock};

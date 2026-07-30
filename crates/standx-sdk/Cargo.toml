@@ -14,7 +14,6 @@ rust-version.workspace = true
 [dependencies]
 # Async
 tokio.workspace = true
-futures.workspace = true
 futures-util.workspace = true
 
 # HTTP
@@ -57,6 +56,5 @@ default = []
 tabled = ["dep:tabled"]
 
 [dev-dependencies]
-tokio-test = "0.4"
 mockito = "1.6"
 tempfile = "3.0"
