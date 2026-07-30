@@ -1,6 +1,7 @@
 //! Authenticated user order, position, and trade notifications.
 
 use crate::auth::Credentials;
+use crate::endpoints::StandXEndpoints;
 use crate::error::{Error, Result};
 use crate::models::{deserialize_order_side_optional, OrderSide, OrderStatus};
 use futures::{SinkExt, StreamExt};
@@ -13,7 +14,6 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-const DEFAULT_ACCOUNT_STREAM_URL: &str = "wss://perps.standx.com/ws-stream/v1";
 const ACCOUNT_STREAM_ROTATE_AFTER: Duration = Duration::from_secs(23 * 60 * 60 + 50 * 60);
 /// How often we send a client-side ping to keep the connection observably
 /// alive and to elicit a pong (which resets the idle deadline).
@@ -260,6 +260,10 @@ pub struct AccountStream {
 
 impl AccountStream {
     pub fn new(epoch: u64) -> Result<Self> {
+        Self::from_endpoints(epoch, &StandXEndpoints::default())
+    }
+
+    pub fn from_endpoints(epoch: u64, endpoints: &StandXEndpoints) -> Result<Self> {
         let credentials = Credentials::load()?;
         if credentials.is_expired() {
             return Err(Error::AuthRequired {
@@ -268,7 +272,7 @@ impl AccountStream {
             });
         }
         Ok(Self {
-            url: DEFAULT_ACCOUNT_STREAM_URL.to_string(),
+            url: endpoints.stream_url().to_string(),
             token: credentials.token,
             epoch,
             ping_interval: ACCOUNT_STREAM_PING_INTERVAL,

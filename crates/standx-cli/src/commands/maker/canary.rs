@@ -222,15 +222,29 @@ async fn cleanup_current_order(
     Ok(None)
 }
 
+pub(super) struct WsCommandCanaryRequest {
+    pub(super) symbol: String,
+    pub(super) size: Option<f64>,
+    pub(super) price_offset_bps: f64,
+    pub(super) timeout_secs: u64,
+    pub(super) alert_webhook: String,
+    pub(super) alert_webhook_format: AlertWebhookFormat,
+    pub(super) output_format: OutputFormat,
+}
+
 pub(super) async fn run_ws_command_canary(
-    symbol: String,
-    size: Option<f64>,
-    price_offset_bps: f64,
-    timeout_secs: u64,
-    alert_webhook: String,
-    alert_webhook_format: AlertWebhookFormat,
-    output_format: OutputFormat,
+    request: WsCommandCanaryRequest,
+    endpoints: &standx_sdk::StandXEndpoints,
 ) -> Result<()> {
+    let WsCommandCanaryRequest {
+        symbol,
+        size,
+        price_offset_bps,
+        timeout_secs,
+        alert_webhook,
+        alert_webhook_format,
+        output_format,
+    } = request;
     // --timeout-secs (1..=30) and the required --alert-webhook are now enforced
     // by clap, so --help documents them and they cannot reach here invalid.
     if std::env::var(LIVE_MAKER_ENV).ok().as_deref() != Some("1") {
@@ -248,7 +262,7 @@ pub(super) async fn run_ws_command_canary(
     }
 
     let session_id = uuid::Uuid::new_v4().to_string();
-    let client = StandXClient::new()?.with_session_id(session_id.clone());
+    let client = StandXClient::from_endpoints(endpoints)?.with_session_id(session_id.clone());
     let notifier = MakerNotifier::new(output_format, Some(alert_webhook), alert_webhook_format);
     let timeout = Duration::from_secs(timeout_secs);
     let infos = client.get_symbol_info().await?;
@@ -298,7 +312,7 @@ pub(super) async fn run_ws_command_canary(
         price: format_decimals(price, info.price_tick_decimals),
     };
     evidence.emit_position(CanaryStage::PreflightVerified, None, 0.0);
-    let stream = OrderResponseStream::new(session_id)?;
+    let stream = OrderResponseStream::from_endpoints(session_id, endpoints)?;
     let (commands, mut responses, _health, handle) = stream.connect().await?;
     notifier
         .lifecycle(

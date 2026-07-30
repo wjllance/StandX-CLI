@@ -338,6 +338,7 @@ async fn reset_feed_state(state: &RwLock<FeedState>, issue: WsSnapshotIssue) {
 pub(super) fn spawn_market_feed(
     symbol: String,
     verbose: bool,
+    endpoints: standx_sdk::StandXEndpoints,
 ) -> (
     Arc<RwLock<FeedState>>,
     watch::Receiver<u64>,
@@ -350,7 +351,9 @@ pub(super) fn spawn_market_feed(
     let handle = tokio::spawn(async move {
         let mut seq = 0u64;
         loop {
-            let ws = match StandXWebSocket::without_auth_with_verbose(verbose) {
+            let ws = match StandXWebSocket::without_auth_from_endpoints_with_verbose(
+                &endpoints, verbose,
+            ) {
                 Ok(ws) => ws,
                 Err(e) => {
                     eprintln!("⚠️  market feed setup failed: {e}; retrying in 10s");

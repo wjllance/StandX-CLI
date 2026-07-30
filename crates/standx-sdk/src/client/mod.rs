@@ -4,6 +4,7 @@ pub mod account;
 pub mod order;
 
 use crate::auth::{Credentials, StandXSigner};
+use crate::endpoints::StandXEndpoints;
 use crate::error::{Error, Result};
 use crate::models::*;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
@@ -12,8 +13,6 @@ use reqwest::{Client, ClientBuilder};
 use std::time::Duration;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-const DEFAULT_BASE_URL: &str = "https://perps.standx.com";
-
 /// StandX API client
 #[derive(Debug, Clone)]
 pub struct StandXClient {
@@ -25,6 +24,11 @@ pub struct StandXClient {
 impl StandXClient {
     /// Create a new client
     pub fn new() -> Result<Self> {
+        Self::from_endpoints(&StandXEndpoints::default())
+    }
+
+    /// Create a new client from a validated StandX endpoint set.
+    pub fn from_endpoints(endpoints: &StandXEndpoints) -> Result<Self> {
         let client = ClientBuilder::new()
             .timeout(DEFAULT_TIMEOUT)
             .connect_timeout(Duration::from_secs(10))
@@ -32,23 +36,14 @@ impl StandXClient {
 
         Ok(Self {
             client,
-            base_url: DEFAULT_BASE_URL.to_string(),
+            base_url: endpoints.base_url().to_string(),
             session_id: None,
         })
     }
 
     /// Create a new client with custom base URL
     pub fn with_base_url(base_url: String) -> Result<Self> {
-        let client = ClientBuilder::new()
-            .timeout(DEFAULT_TIMEOUT)
-            .connect_timeout(Duration::from_secs(10))
-            .build()?;
-
-        Ok(Self {
-            client,
-            base_url,
-            session_id: None,
-        })
+        Self::from_endpoints(&StandXEndpoints::new(base_url)?)
     }
 
     /// Get the base URL

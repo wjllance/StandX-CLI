@@ -52,8 +52,9 @@ pub(super) async fn run_maker(
     symbol: String,
     args: MakerRunArgs,
     output_format: OutputFormat,
+    endpoints: &standx_sdk::StandXEndpoints,
 ) -> Result<()> {
-    let startup = run_startup(symbol, &args, output_format).await?;
+    let startup = run_startup(symbol, &args, output_format, endpoints).await?;
     MakerRuntime::announce_start(&args, output_format, &startup).await;
     let runtime = MakerRuntime::new(args, output_format, startup)?;
     let (runtime, exit) = runtime.drive().await;

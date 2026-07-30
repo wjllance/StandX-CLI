@@ -105,6 +105,8 @@ Commands:
 
 Options:
   -c, --config <CONFIG>    Configuration file path
+      --endpoint <BASE_URL>
+                           StandX REST/WebSocket base URL
   -o, --output <OUTPUT>    Output format [default: table] [possible values: table, json, csv, quiet]
   -v, --verbose            Verbose output
   -q, --quiet              Quiet mode
@@ -150,10 +152,18 @@ Configuration:
 # 设置默认交易对
 standx config set default_symbol ETH-USD
 
+# 持久化 StandX API endpoint（写入前会校验并规范化）
+standx config set base_url https://canary-perps.standx.org
+
 # 验证
 standx config get default_symbol
 # 输出: ETH-USD
 ```
+
+`--config` 可以指向配置文件或配置目录。Endpoint 优先级为：
+`--endpoint` > `STANDX_BASE_URL` > 配置文件中的 `base_url` > 生产默认值。
+根级 HTTPS base 会自动推导 `/ws-stream/v1` 和 `/ws-api/v1`；无效值会直接
+报错，不会回退到生产环境。仅本地 loopback 测试允许明文 HTTP。
 
 ---
 

@@ -22,6 +22,7 @@ use std::io::{BufWriter, Write};
 use std::time::{Duration, Instant};
 
 use standx_sdk::websocket::{StandXWebSocket, WsMessage};
+use standx_sdk::StandXEndpoints;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -118,6 +119,7 @@ pub async fn handle_lag_recorder(
     flush_secs: u64,
     status_secs: u64,
     verbose: bool,
+    endpoints: &StandXEndpoints,
 ) -> Result<()> {
     let hl_coin = hl_coin.unwrap_or_else(|| derive_hl_coin(&symbol));
     let origin = Instant::now();
@@ -135,7 +137,13 @@ pub async fn handle_lag_recorder(
     );
 
     let (tx, mut rx) = mpsc::channel::<LagRecord>(4096);
-    let standx = tokio::spawn(run_standx(symbol.clone(), origin, tx.clone(), verbose));
+    let standx = tokio::spawn(run_standx(
+        symbol.clone(),
+        origin,
+        tx.clone(),
+        verbose,
+        endpoints.clone(),
+    ));
     let hyperliquid = tokio::spawn(run_hyperliquid(hl_coin.clone(), origin, tx));
 
     let flush_secs = flush_secs.max(1);
@@ -258,9 +266,15 @@ async fn shutdown_signal() {
 /// StandX producer: subscribe to the public `price` and `depth_book` channels
 /// (no auth) and forward each update as a `LagRecord`. Rebuilds the connection
 /// when the managed stream ends.
-async fn run_standx(symbol: String, origin: Instant, tx: mpsc::Sender<LagRecord>, verbose: bool) {
+async fn run_standx(
+    symbol: String,
+    origin: Instant,
+    tx: mpsc::Sender<LagRecord>,
+    verbose: bool,
+    endpoints: StandXEndpoints,
+) {
     loop {
-        if let Err(error) = standx_session(&symbol, origin, &tx, verbose).await {
+        if let Err(error) = standx_session(&symbol, origin, &tx, verbose, &endpoints).await {
             eprintln!("lag-recorder: StandX feed error: {error:#}");
         }
         if tx.is_closed() {
@@ -275,8 +289,9 @@ async fn standx_session(
     origin: Instant,
     tx: &mpsc::Sender<LagRecord>,
     verbose: bool,
+    endpoints: &StandXEndpoints,
 ) -> Result<()> {
-    let ws = StandXWebSocket::without_auth_with_verbose(verbose)
+    let ws = StandXWebSocket::without_auth_from_endpoints_with_verbose(endpoints, verbose)
         .context("failed to build StandX websocket client")?;
     let _ = ws.subscribe("price", Some(symbol)).await;
     let _ = ws.subscribe("depth_book", Some(symbol)).await;

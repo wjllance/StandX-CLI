@@ -6,6 +6,7 @@ use standx_sdk::client::order::CreateOrderParams;
 use standx_sdk::client::StandXClient;
 use standx_sdk::models::{OrderSide, OrderType, TimeInForce};
 use standx_sdk::order_response::{OrderResponse, OrderResponseStream};
+use standx_sdk::StandXEndpoints;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -52,6 +53,7 @@ pub async fn handle_order(
     command: OrderCommands,
     output_format: OutputFormat,
     verbose: bool,
+    endpoints: &StandXEndpoints,
 ) -> Result<()> {
     match command {
         OrderCommands::Create {
@@ -102,11 +104,15 @@ pub async fn handle_order(
             };
 
             match transport {
-                OrderTransport::Http => create_order_http(params).await,
+                OrderTransport::Http => create_order_http(params, endpoints).await,
                 OrderTransport::Ws => {
-                    let (request_id, response) =
-                        create_order_ws(&params, Duration::from_secs(timeout_secs), verbose)
-                            .await?;
+                    let (request_id, response) = create_order_ws(
+                        &params,
+                        Duration::from_secs(timeout_secs),
+                        verbose,
+                        endpoints,
+                    )
+                    .await?;
                     finish_ws_result(
                         WsOrderResult::new("create", symbol, None, request_id, response),
                         output_format,
@@ -120,10 +126,15 @@ pub async fn handle_order(
             transport,
             timeout_secs,
         } => match transport {
-            OrderTransport::Http => cancel_order_http(&symbol, &order_id).await,
+            OrderTransport::Http => cancel_order_http(&symbol, &order_id, endpoints).await,
             OrderTransport::Ws => {
-                let (request_id, response) =
-                    cancel_order_ws(&order_id, Duration::from_secs(timeout_secs), verbose).await?;
+                let (request_id, response) = cancel_order_ws(
+                    &order_id,
+                    Duration::from_secs(timeout_secs),
+                    verbose,
+                    endpoints,
+                )
+                .await?;
                 finish_ws_result(
                     WsOrderResult::new("cancel", symbol, Some(order_id), request_id, response),
                     output_format,
@@ -131,7 +142,7 @@ pub async fn handle_order(
             }
         },
         OrderCommands::CancelAll { symbol } => {
-            let client = StandXClient::new()?;
+            let client = StandXClient::from_endpoints(endpoints)?;
             client.cancel_all_orders(&symbol).await?;
             println!("✅ All orders for {} cancelled successfully", symbol);
             Ok(())
@@ -139,8 +150,8 @@ pub async fn handle_order(
     }
 }
 
-async fn create_order_http(params: CreateOrderParams) -> Result<()> {
-    let client = StandXClient::new()?;
+async fn create_order_http(params: CreateOrderParams, endpoints: &StandXEndpoints) -> Result<()> {
+    let client = StandXClient::from_endpoints(endpoints)?;
     let order = client.create_order(params).await?;
     println!("✅ Order created successfully!");
     println!("   Order ID: {}", order.id);
@@ -154,8 +165,12 @@ async fn create_order_http(params: CreateOrderParams) -> Result<()> {
     Ok(())
 }
 
-async fn cancel_order_http(symbol: &str, order_id: &str) -> Result<()> {
-    let client = StandXClient::new()?;
+async fn cancel_order_http(
+    symbol: &str,
+    order_id: &str,
+    endpoints: &StandXEndpoints,
+) -> Result<()> {
+    let client = StandXClient::from_endpoints(endpoints)?;
     client.cancel_order(symbol, order_id).await?;
     println!("✅ Order {} cancelled successfully", order_id);
     Ok(())
@@ -165,16 +180,18 @@ async fn create_order_ws(
     params: &CreateOrderParams,
     timeout: Duration,
     verbose: bool,
+    endpoints: &StandXEndpoints,
 ) -> Result<(String, OrderResponse)> {
-    run_ws_command(WsCommand::Create(params), timeout, verbose).await
+    run_ws_command(WsCommand::Create(params), timeout, verbose, endpoints).await
 }
 
 async fn cancel_order_ws(
     order_id: &str,
     timeout: Duration,
     verbose: bool,
+    endpoints: &StandXEndpoints,
 ) -> Result<(String, OrderResponse)> {
-    run_ws_command(WsCommand::Cancel(order_id), timeout, verbose).await
+    run_ws_command(WsCommand::Cancel(order_id), timeout, verbose, endpoints).await
 }
 
 enum WsCommand<'a> {
@@ -186,9 +203,10 @@ async fn run_ws_command(
     command: WsCommand<'_>,
     timeout: Duration,
     verbose: bool,
+    endpoints: &StandXEndpoints,
 ) -> Result<(String, OrderResponse)> {
     let session_id = uuid::Uuid::new_v4().to_string();
-    let stream = OrderResponseStream::new(session_id)?.with_verbose(verbose);
+    let stream = OrderResponseStream::from_endpoints(session_id, endpoints)?.with_verbose(verbose);
     let (commands, mut responses, _health, handle) = stream.connect().await?;
 
     // Always stop the short-lived connection task, including send/response
@@ -303,7 +321,9 @@ fn render_ws_result(result: &WsOrderResult, output_format: OutputFormat) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::{SinkExt, StreamExt};
     use serde_json::json;
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     fn response(request_id: Option<&str>, code: i64, message: &str) -> OrderResponse {
         OrderResponse {
@@ -311,6 +331,119 @@ mod tests {
             message: message.to_string(),
             request_id: request_id.map(str::to_string),
         }
+    }
+
+    struct EnvironmentRestore {
+        values: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl Drop for EnvironmentRestore {
+        fn drop(&mut self) {
+            for (key, value) in self.values.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    // Environment credentials are process-global, so this test deliberately
+    // holds the crate-wide lock for the full current-thread async exchange.
+    #[allow(clippy::await_holding_lock)]
+    async fn custom_endpoint_drives_authenticated_signed_ws_command_without_fallback() {
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let restore = EnvironmentRestore {
+            values: ["STANDX_JWT", "STANDX_PRIVATE_KEY"]
+                .into_iter()
+                .map(|key| (key, std::env::var(key).ok()))
+                .collect(),
+        };
+        std::env::set_var("STANDX_JWT", "loopback-jwt");
+        // Base58 encoding of a 32-byte all-zero Ed25519 seed.
+        std::env::set_var("STANDX_PRIVATE_KEY", "11111111111111111111111111111111");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoints =
+            StandXEndpoints::new(format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(socket).await.unwrap();
+            let auth: serde_json::Value = serde_json::from_str(
+                &websocket
+                    .next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .into_text()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(auth["method"], "auth:login");
+            websocket
+                .send(Message::Text(
+                    json!({
+                        "code": 0,
+                        "message": "authenticated",
+                        "request_id": auth["request_id"],
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+
+            let command: serde_json::Value = serde_json::from_str(
+                &websocket
+                    .next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .into_text()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(command["method"], "order:new");
+            assert_eq!(command["header"]["x-request-sign-version"], "v1");
+            assert!(command["header"]["x-request-signature"].as_str().is_some());
+            websocket
+                .send(Message::Text(
+                    json!({
+                        "code": 0,
+                        "message": "accepted",
+                        "request_id": command["request_id"],
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        });
+
+        let params = CreateOrderParams {
+            symbol: "BTC-USD".to_string(),
+            cl_ord_id: None,
+            side: OrderSide::Buy,
+            order_type: OrderType::Limit,
+            quantity: "0.001".to_string(),
+            price: Some("50000".to_string()),
+            time_in_force: Some(TimeInForce::Alo),
+            reduce_only: false,
+            stop_price: None,
+            sl_price: None,
+            tp_price: None,
+        };
+        let (request_id, response) =
+            create_order_ws(&params, Duration::from_secs(1), false, &endpoints)
+                .await
+                .unwrap();
+        assert_eq!(response.request_id.as_deref(), Some(request_id.as_str()));
+        assert!(response.accepted());
+        server.await.unwrap();
+        drop(restore);
     }
 
     #[tokio::test]

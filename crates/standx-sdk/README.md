@@ -102,6 +102,22 @@ let order = client
 println!("order id: {}", order.id);
 ```
 
+### Custom StandX endpoints
+
+`StandXEndpoints` validates one root base URL and derives the matching REST,
+market/account WebSocket, and order-response WebSocket addresses:
+
+```rust
+use standx_sdk::{StandXClient, StandXEndpoints};
+
+let endpoints = StandXEndpoints::new("https://canary-perps.standx.org")?;
+let client = StandXClient::from_endpoints(&endpoints)?;
+```
+
+The existing no-argument constructors keep using production. Custom plaintext
+HTTP is accepted only for localhost or loopback test servers; invalid custom
+configuration returns an error rather than falling back.
+
 ### `auth` — credentials and signing
 
 - `Credentials` — load from env (`STANDX_JWT` / `STANDX_PRIVATE_KEY`) or the

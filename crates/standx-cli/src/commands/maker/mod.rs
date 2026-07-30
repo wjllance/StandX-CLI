@@ -103,6 +103,7 @@ pub async fn handle_maker(
     command: MakerCommands,
     output_format: OutputFormat,
     verbose: bool,
+    endpoints: &standx_sdk::StandXEndpoints,
 ) -> Result<()> {
     // Maker output is emitted as JSON lines or a human table; there is no CSV
     // renderer, so `--output csv` would silently fall back to the table. Reject
@@ -119,7 +120,7 @@ pub async fn handle_maker(
             flags,
         } => {
             let args = config::merge(flags, config::load(maker_config.as_deref())?, verbose)?;
-            runtime::run_maker(symbol, args, output_format).await
+            runtime::run_maker(symbol, args, output_format, endpoints).await
         }
         MakerCommands::WsCommandCanary {
             symbol,
@@ -130,13 +131,16 @@ pub async fn handle_maker(
             alert_webhook_format,
         } => {
             canary::run_ws_command_canary(
-                symbol,
-                size,
-                price_offset_bps,
-                timeout_secs,
-                alert_webhook,
-                alert_webhook_format,
-                output_format,
+                canary::WsCommandCanaryRequest {
+                    symbol,
+                    size,
+                    price_offset_bps,
+                    timeout_secs,
+                    alert_webhook,
+                    alert_webhook_format,
+                    output_format,
+                },
+                endpoints,
             )
             .await
         }

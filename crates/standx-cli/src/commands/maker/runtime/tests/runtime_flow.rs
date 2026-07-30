@@ -131,7 +131,9 @@ fn effect_failure_stop_maps_each_flow_variant() {
 
 #[test]
 fn maker_rest_client_is_isolated_from_order_response_session() {
-    let client = new_maker_rest_client().expect("maker REST client is constructible");
+    let endpoints = standx_sdk::StandXEndpoints::new("https://canary-perps.standx.org").unwrap();
+    let client = new_maker_rest_client(&endpoints).expect("maker REST client is constructible");
+    assert_eq!(client.base_url(), "https://canary-perps.standx.org");
     assert_eq!(client.session_id(), None);
 }
 

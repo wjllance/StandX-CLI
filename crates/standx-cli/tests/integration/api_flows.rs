@@ -1,7 +1,9 @@
 //! API Flow Integration Tests
 //! Tests API workflows using mock servers
 
+use assert_cmd::cargo::cargo_bin_cmd;
 use mockito::Server;
+use predicates::str::contains;
 use standx_cli::client::StandXClient;
 
 #[tokio::test]
@@ -52,4 +54,33 @@ async fn test_api_error_handling_flow() {
     // Should handle 401 gracefully
     let result = client.get_positions(None).await;
     assert!(result.is_err());
+}
+
+#[test]
+fn cli_endpoint_override_routes_market_request_to_loopback() {
+    let mut server = Server::new();
+    let symbols = server
+        .mock("GET", "/api/query_symbol_info")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"[{"symbol":"MOCK-USD","base_asset":"MOCK","quote_asset":"DUSD","base_decimals":9,"price_tick_decimals":2,"qty_tick_decimals":4,"min_order_qty":"0.0001","def_leverage":"10","max_leverage":"40","maker_fee":"0.0001","taker_fee":"0.0004","status":"trading"}]"#,
+        )
+        .expect(1)
+        .create();
+
+    let mut command = cargo_bin_cmd!("standx");
+    command.args([
+        "--endpoint",
+        &server.url(),
+        "--output",
+        "json",
+        "market",
+        "symbols",
+    ]);
+    command
+        .assert()
+        .success()
+        .stdout(contains("\"symbol\": \"MOCK-USD\""));
+    symbols.assert();
 }

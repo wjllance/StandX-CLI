@@ -117,6 +117,19 @@ standx --output json --verbose order create BTC-USD buy limit \
   --transport ws
 ```
 
+要让同一次调用中的 REST、账户/行情 WS 和订单 WS 全部进入 canary，可指定全局
+endpoint：
+
+```bash
+standx --endpoint https://canary-perps.standx.org \
+  --output json --verbose \
+  order create BTC-USD buy limit \
+  --qty 0.0001 --price 60000 --transport ws
+```
+
+自定义 endpoint 仍使用当前 JWT 和签名私钥；凭证不适用时会返回认证错误，并且
+不会降级到生产环境。
+
 标准输出是稳定的结构化结果：
 
 ```json

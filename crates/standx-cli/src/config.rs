@@ -2,7 +2,10 @@
 
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
+use standx_sdk::StandXEndpoints;
 use std::path::PathBuf;
+
+pub const BASE_URL_ENV: &str = "STANDX_BASE_URL";
 
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,6 +22,10 @@ pub struct Config {
     /// Configuration directory
     #[serde(skip)]
     pub config_dir: PathBuf,
+
+    /// Exact configuration file selected through `--config`, when present.
+    #[serde(skip)]
+    config_file_override: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -28,6 +35,7 @@ impl Default for Config {
             output_format: "table".to_string(),
             default_symbol: "BTC-USD".to_string(),
             config_dir: Self::default_config_dir(),
+            config_file_override: None,
         }
     }
 }
@@ -42,7 +50,9 @@ impl Config {
 
     /// Get configuration file path
     pub fn config_file(&self) -> PathBuf {
-        self.config_dir.join("config.toml")
+        self.config_file_override
+            .clone()
+            .unwrap_or_else(|| self.config_dir.join("config.toml"))
     }
 
     /// Load configuration from file
@@ -70,14 +80,28 @@ impl Config {
     /// let config = Config::load_from_path(Some("/tmp/my-config"))?;
     /// ```
     pub fn load_from_path<T: Into<PathBuf>>(path: Option<T>) -> Result<Self> {
-        let config_dir = match path {
-            Some(p) => p.into(),
-            None => Self::default_config_dir(),
+        let selected = path.map(Into::into);
+        let (config_dir, config_file_override) = match selected {
+            Some(path) if is_config_file_path(&path) => {
+                let parent = path
+                    .parent()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("."));
+                (parent, Some(path))
+            }
+            Some(path) => (path, None),
+            None => (Self::default_config_dir(), None),
         };
-        let config_file = config_dir.join("config.toml");
+        let config_file = config_file_override
+            .clone()
+            .unwrap_or_else(|| config_dir.join("config.toml"));
 
         if !config_file.exists() {
-            return Ok(Self::default());
+            return Ok(Self {
+                config_dir,
+                config_file_override,
+                ..Self::default()
+            });
         }
 
         let content = std::fs::read_to_string(&config_file).map_err(|e| Error::Config {
@@ -89,7 +113,39 @@ impl Config {
         })?;
 
         config.config_dir = config_dir;
+        config.config_file_override = config_file_override;
         Ok(config)
+    }
+
+    /// Load the configuration selected by the global `--config` option.
+    pub fn load_selected(path: Option<&str>) -> Result<Self> {
+        Self::load_from_path(path.map(PathBuf::from))
+    }
+
+    /// Resolve the effective endpoint using CLI > environment > file > default.
+    pub fn resolve_endpoints(
+        cli_endpoint: Option<&str>,
+        config_path: Option<&str>,
+    ) -> Result<StandXEndpoints> {
+        if let Some(endpoint) = cli_endpoint {
+            return StandXEndpoints::new(endpoint);
+        }
+        if let Some(endpoint) = std::env::var_os(BASE_URL_ENV) {
+            let endpoint = endpoint.into_string().map_err(|_| Error::Config {
+                message: format!("{BASE_URL_ENV} is not valid UTF-8"),
+            })?;
+            return StandXEndpoints::new(endpoint);
+        }
+        let config = Self::load_selected(config_path)?;
+        if config_path.is_some() && !config.config_file().exists() {
+            return Err(Error::Config {
+                message: format!(
+                    "Selected config file does not exist: {}",
+                    config.config_file().display()
+                ),
+            });
+        }
+        StandXEndpoints::new(&config.base_url)
     }
 
     /// Save configuration to file
@@ -112,7 +168,9 @@ impl Config {
     /// Set a configuration value
     pub fn set(&mut self, key: &str, value: &str) -> Result<()> {
         match key {
-            "base_url" => self.base_url = value.to_string(),
+            "base_url" => {
+                self.base_url = StandXEndpoints::new(value)?.base_url().to_string();
+            }
             "output_format" => self.output_format = value.to_string(),
             "default_symbol" => self.default_symbol = value.to_string(),
             _ => {
@@ -137,6 +195,16 @@ impl Config {
     }
 }
 
+fn is_config_file_path(path: &std::path::Path) -> bool {
+    if path.is_dir() {
+        return false;
+    }
+    path.is_file()
+        || path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,21 +217,36 @@ mod tests {
     /// tests never overlap — including across modules (telemetry, maker,
     /// pipeline).
     struct EnvGuard {
-        key: String,
-        original_value: Option<String>,
+        values: Vec<(String, Option<std::ffi::OsString>)>,
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl EnvGuard {
         fn set(key: &str, value: &str) -> Self {
+            Self::set_many(&[(key, Some(value))])
+        }
+
+        fn unset(key: &str) -> Self {
+            Self::set_many(&[(key, None)])
+        }
+
+        fn set_many(values: &[(&str, Option<&str>)]) -> Self {
             let lock = crate::TEST_ENV_LOCK
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let original_value = std::env::var(key).ok();
-            std::env::set_var(key, value);
+            let original_values = values
+                .iter()
+                .map(|(key, value)| {
+                    let original = std::env::var_os(key);
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                    ((*key).to_string(), original)
+                })
+                .collect();
             Self {
-                key: key.to_string(),
-                original_value,
+                values: original_values,
                 _lock: lock,
             }
         }
@@ -171,9 +254,11 @@ mod tests {
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            match &self.original_value {
-                Some(val) => std::env::set_var(&self.key, val),
-                None => std::env::remove_var(&self.key),
+            for (key, original) in self.values.drain(..).rev() {
+                match original {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
             }
         }
     }
@@ -194,6 +279,7 @@ mod tests {
             output_format: "json".to_string(),
             default_symbol: "ETH-USD".to_string(),
             config_dir: temp_dir.path().to_path_buf(),
+            config_file_override: None,
         };
 
         // Save config
@@ -210,7 +296,8 @@ mod tests {
 
     #[test]
     fn test_set_get() {
-        let mut config = Config::default();
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = Config::load_from_path(Some(temp_dir.path())).unwrap();
 
         config.set("base_url", "https://test.com").unwrap();
         assert_eq!(config.get("base_url").unwrap(), "https://test.com");
@@ -256,6 +343,7 @@ mod tests {
             output_format: "json".to_string(),
             default_symbol: "ETH-USD".to_string(),
             config_dir: temp_dir.path().to_path_buf(),
+            config_file_override: None,
         };
 
         // 先保存有效配置
@@ -310,6 +398,7 @@ mod tests {
             output_format: "table".to_string(),
             default_symbol: "BTC-USD".to_string(),
             config_dir: temp_dir.path().to_path_buf(),
+            config_file_override: None,
         };
         config.save().unwrap();
 
@@ -367,6 +456,7 @@ mod tests {
             output_format: "json".to_string(),
             default_symbol: "ETH-USD".to_string(),
             config_dir: temp_dir.path().to_path_buf(),
+            config_file_override: None,
         };
         config.save().unwrap();
 
@@ -390,6 +480,7 @@ mod tests {
             output_format: "csv".to_string(),
             default_symbol: "DOGE-USD".to_string(),
             config_dir: temp_dir.path().to_path_buf(),
+            config_file_override: None,
         };
         config.save().unwrap();
 
@@ -407,6 +498,7 @@ mod tests {
             output_format: "csv".to_string(),
             default_symbol: "DOGE-USD".to_string(),
             config_dir: temp_dir.path().to_path_buf(),
+            config_file_override: None,
         };
         config.save().unwrap();
 
@@ -430,6 +522,7 @@ mod tests {
             output_format: "table".to_string(),
             default_symbol: "BTC-USD".to_string(),
             config_dir: temp_dir.path().to_path_buf(),
+            config_file_override: None,
         };
         config.save().unwrap();
 
@@ -448,5 +541,106 @@ mod tests {
 
         let result = Config::load_from_path(Some(temp_dir.path()));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn endpoint_resolution_precedence_is_cli_then_env_then_file_then_default() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = Config::load_from_path(Some(temp_dir.path())).unwrap();
+        config
+            .set("base_url", "https://file.standx.example")
+            .unwrap();
+        let config_path = temp_dir.path().to_str().unwrap();
+        let isolated_home = TempDir::new().unwrap();
+
+        let env = EnvGuard::set_many(&[
+            (BASE_URL_ENV, Some("https://env.standx.example")),
+            ("HOME", isolated_home.path().to_str()),
+        ]);
+        let cli = Config::resolve_endpoints(Some("https://cli.standx.example/"), Some(config_path))
+            .unwrap();
+        assert_eq!(cli.base_url(), "https://cli.standx.example");
+
+        let from_env = Config::resolve_endpoints(None, Some(config_path)).unwrap();
+        assert_eq!(from_env.base_url(), "https://env.standx.example");
+
+        // Keep the process-wide lock while temporarily clearing the test value;
+        // dropping the guard below restores the caller's original environment.
+        std::env::remove_var(BASE_URL_ENV);
+        let from_file = Config::resolve_endpoints(None, Some(config_path)).unwrap();
+        assert_eq!(from_file.base_url(), "https://file.standx.example");
+
+        let default = Config::resolve_endpoints(None, None).unwrap();
+        assert_eq!(default, StandXEndpoints::default());
+        drop(env);
+    }
+
+    #[test]
+    fn explicit_empty_environment_endpoint_fails_closed() {
+        let _env = EnvGuard::set(BASE_URL_ENV, "");
+        let error = Config::resolve_endpoints(None, None).unwrap_err();
+        assert!(error.to_string().contains("invalid StandX endpoint"));
+    }
+
+    #[test]
+    fn explicitly_selected_missing_config_fails_closed_for_endpoint_resolution() {
+        let _env = EnvGuard::unset(BASE_URL_ENV);
+        let temp_dir = TempDir::new().unwrap();
+        let missing_file = temp_dir.path().join("missing.toml");
+        let error =
+            Config::resolve_endpoints(None, missing_file.to_str()).expect_err("must fail closed");
+        assert!(error.to_string().contains("does not exist"));
+
+        let missing_directory = temp_dir.path().join("missing-directory");
+        let error = Config::resolve_endpoints(None, missing_directory.to_str())
+            .expect_err("must fail closed");
+        assert!(error.to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn selected_toml_file_is_loaded_and_saved_without_directory_rewriting() {
+        let temp_dir = TempDir::new().unwrap();
+        let selected = temp_dir.path().join("canary.toml");
+        let mut config = Config::load_from_path(Some(&selected)).unwrap();
+        config
+            .set("base_url", "https://canary-perps.standx.org/")
+            .unwrap();
+
+        assert!(selected.exists());
+        assert!(!temp_dir.path().join("config.toml").exists());
+        let loaded = Config::load_from_path(Some(&selected)).unwrap();
+        assert_eq!(loaded.base_url, "https://canary-perps.standx.org");
+        assert_eq!(loaded.config_file(), selected);
+    }
+
+    #[test]
+    fn existing_directory_named_with_toml_suffix_remains_a_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let selected = temp_dir.path().join("profile.toml");
+        std::fs::create_dir(&selected).unwrap();
+
+        let mut config = Config::load_from_path(Some(&selected)).unwrap();
+        config
+            .set("base_url", "https://canary-perps.standx.org")
+            .unwrap();
+
+        assert_eq!(config.config_file(), selected.join("config.toml"));
+        assert!(selected.join("config.toml").is_file());
+    }
+
+    #[test]
+    fn setting_base_url_normalizes_valid_values_and_rejects_invalid_ones() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = Config::load_from_path(Some(temp_dir.path())).unwrap();
+        config
+            .set("base_url", "https://canary-perps.standx.org/")
+            .unwrap();
+        assert_eq!(config.base_url, "https://canary-perps.standx.org");
+
+        let error = config
+            .set("base_url", "http://canary-perps.standx.org")
+            .unwrap_err();
+        assert!(error.to_string().contains("plain HTTP"));
+        assert_eq!(config.base_url, "https://canary-perps.standx.org");
     }
 }

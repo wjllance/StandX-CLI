@@ -1,10 +1,11 @@
 use crate::cli::*;
 use anyhow::Result;
 use standx_sdk::client::StandXClient;
+use standx_sdk::StandXEndpoints;
 
 /// Handle margin commands
-pub async fn handle_margin(command: MarginCommands) -> Result<()> {
-    let client = StandXClient::new()?;
+pub async fn handle_margin(command: MarginCommands, endpoints: &StandXEndpoints) -> Result<()> {
+    let client = StandXClient::from_endpoints(endpoints)?;
 
     match command {
         MarginCommands::Transfer {

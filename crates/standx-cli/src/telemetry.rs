@@ -215,7 +215,13 @@ impl Telemetry {
 /// Redact secrets from CLI argv while preserving the flag names needed for
 /// aggregate usage analysis. Handles both `--flag value` and `--flag=value`.
 fn sanitize_args(args: &[String]) -> Vec<String> {
-    const SENSITIVE_FLAGS: &[&str] = &["--private-key", "--token", "--alert-webhook", "-p"];
+    const SENSITIVE_FLAGS: &[&str] = &[
+        "--private-key",
+        "--token",
+        "--alert-webhook",
+        "--endpoint",
+        "-p",
+    ];
 
     let mut sanitized = Vec::with_capacity(args.len());
     let mut redact_next = false;
@@ -305,6 +311,8 @@ mod tests {
             "https://api.telegram.org/bot-secret/sendMessage".to_string(),
             "--token".to_string(),
             "jwt-secret".to_string(),
+            "--endpoint".to_string(),
+            "https://alice:endpoint-secret@example.com".to_string(),
         ];
 
         let sanitized = sanitize_args(&args);
@@ -312,6 +320,8 @@ mod tests {
         assert_eq!(sanitized[5], "***");
         assert_eq!(sanitized[6], "--token");
         assert_eq!(sanitized[7], "***");
+        assert_eq!(sanitized[8], "--endpoint");
+        assert_eq!(sanitized[9], "***");
         assert!(!sanitized.join(" ").contains("secret"));
     }
 
@@ -323,6 +333,7 @@ mod tests {
             "login".to_string(),
             "--private-key=private-secret".to_string(),
             "--alert-webhook=https://hooks.example/secret".to_string(),
+            "--endpoint=https://alice:endpoint-secret@example.com".to_string(),
             "--output=json".to_string(),
         ];
 
@@ -334,6 +345,7 @@ mod tests {
                 "login",
                 "--private-key=***",
                 "--alert-webhook=***",
+                "--endpoint=***",
                 "--output=json",
             ]
         );
