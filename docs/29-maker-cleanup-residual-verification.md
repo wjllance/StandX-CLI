@@ -79,8 +79,16 @@ order-response 并无异常记录），撤单的场馆权威确认本就可用�
   - 终态视为已处理；仍返回 `new`/`open`/`partially_filled`/`untriggered`
     则判为真残余，fail-closed 不变。
   - `maker_cleanup` JSON 遥测事件附带每个单查到的 `status` 与 `updated_at`。
-- 主判据（WS `order:cancel` 等 `is_success()`）与最终列表兜底保留在设计中，
-  尚未实现；Phase 1 只替换原有的列表判定为单查判定。
+- **迟到单兜底**：单查全部终态后，仍再读一次 open-orders 列表，凡**不在本次
+  撤单批次内**的 maker 单一律判残余（外层重试会撤它）。撤单请求发出前场馆刚
+  接受、但直到首次快照之后才可见的单子，从不在撤单批次里；少了这一步，
+  `runtime::cycle_flow` 恢复窗口末尾那次"再验一遍挂单簿"就形同虚设。批次内的
+  单子在这一步被无条件忽略——列表对它们的滞后正是单查要吸收的东西。
+- **reconnect 快照同步改造**：`validate_reconnect_snapshot` 不再直接用列表判残余，
+  改为先经 `confirm_residual_maker_orders()` 逐个单查确认。否则误报只是从 cleanup
+  搬到了 reconnect：cleanup 现在 ~0.5s 就返回成功，列表反而更可能还是陈旧的，
+  reconnect 校验会以"maker orders appeared after cleanup"打死同一个 run。
+- 主判据（WS `order:cancel` 等 `is_success()`）保留在设计中，尚未实现。
 
 ## 测试要求（离线确定性）
 
@@ -91,6 +99,9 @@ order-response 并无异常记录），撤单的场馆权威确认本就可用�
   不算残余也不算误撤；
 - 真残余（撤单被拒绝/单查持续 `open`）→ 仍然 fail-closed，critical 事件带
   单查 status；
+- 撤单批次外的迟到单（首次快照之后才可见）→ 仍然 fail-closed，重试把它撤掉；
+- reconnect 快照遇到陈旧列表里已 `canceled` 的 maker 单 → **不判残余**；同一次
+  校验里真正 `open` 的单仍然打死重连；
 - 全部重试耗尽后的错误文本仍指向 `standx order cancel-all`（现状行为）。
 
 ## 验收
