@@ -1,8 +1,8 @@
 # Cleanup 残余判定硬化立项：WS order-response 主判据 + 按单查询兜底（2026-07-30 草案）
 
-状态：**Phase 1 实施中**（REST `cancel_orders` + 按 `order_id` 单查
-`/api/query_order` 的 `status`）。安全轨硬化项（5-b 后续），非 alpha 候选，
-不占用 live 时间片（纯代码 + 离线验证 + 受监督 canary），可与任何采集/实验并行。
+状态：**Phase 1 已完成**（REST `cancel_orders` + 按 `order_id` 单查
+`/api/query_order` 的 `status`），已合入 main（`ccccdc7`）。安全轨硬化项（5-b 后续），
+非 alpha 候选，不占用 live 时间片（纯代码 + 离线验证 + 受监督 canary），可与任何采集/实验并行。
 
 触发事故：[基线 PnL 采集截断报告](evidence/maker-baseline-pnl-2026-07-30.md)
 （run `baseline-pnl-20260728T081712Z`，2026-07-29T19:09:57Z fail-safe，exit 75）。
