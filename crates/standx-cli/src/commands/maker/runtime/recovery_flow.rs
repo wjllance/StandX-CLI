@@ -174,6 +174,9 @@ pub(super) struct FreezeSpec<'a> {
     /// Live flows cancel and verify venue orders; paper recovery only clears
     /// its simulated in-memory maker book.
     pub(super) cancel_venue_orders: bool,
+    /// Price formatting for any pre-freeze response the cleanup drain captures
+    /// and the preamble re-applies (e.g. a late async place rejection).
+    pub(super) price_decimals: u32,
 }
 
 /// Freeze/cleanup preamble shared by the incident-recovery flows:
@@ -211,8 +214,61 @@ pub(super) async fn freeze_and_cleanup_for_recovery(
         FreezeNotice::Risk(notice) => io.notifier.risk(notice, false).await,
         FreezeNotice::RequestTimeout(notice) => io.notifier.request_timeout(notice, false).await,
     }
-    let cleanup = if spec.cancel_venue_orders {
-        cancel_maker_orders_with_retry(io.client, io.symbol, 3, io.output_format).await
+    let cleanup: Result<()> = if spec.cancel_venue_orders {
+        // Primary verdict path: while the order-response stream is healthy, the
+        // cleanup cancels over WS and trusts the correlated `success` ack. The
+        // stream being replaced (order-response freeze), torn down (shutdown),
+        // or absent (startup) degrades to the REST point-query verdict.
+        let mut ws_cleanup = match io.session.as_deref_mut() {
+            Some(session) if session.order_response_health.is_healthy() => Some(WsCleanupContext {
+                commands: &session.order_commands,
+                responses: &mut session.order_responses,
+                health: &session.order_response_health,
+                minted: &mut session.cleanup_minted_request_ids,
+            }),
+            _ => None,
+        };
+        let result = cancel_maker_orders_with_retry(
+            io.client,
+            io.symbol,
+            3,
+            io.output_format,
+            ws_cleanup.as_mut(),
+        )
+        .await;
+        match result {
+            Ok(leftover_responses) => {
+                // Frames the cleanup drain captured for pre-freeze requests are
+                // re-applied through the canonical response path so the
+                // pending-request lifecycle stays correlated across the cleanup
+                // (`finish_verified_cleanup` below preserves those acks).
+                if let Some(session) = io.session.as_deref_mut() {
+                    for response in leftover_responses {
+                        let request_id = response.request_id.clone();
+                        let generation = session.projection.generation();
+                        let outcome = apply_order_response(
+                            response,
+                            &mut session.projection,
+                            io.output_format,
+                            io.symbol,
+                            io.cycle,
+                            spec.price_decimals,
+                        );
+                        if let Some(reason) = order_response_failure(
+                            &outcome,
+                            request_id.as_deref(),
+                            generation,
+                            io.runtime_state,
+                        ) {
+                            session.order_response_health.mark_unhealthy(reason);
+                            break;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     } else {
         Ok(())
     };
@@ -456,6 +512,7 @@ impl MakerRuntime {
                         abort_account_stream_handle: false,
                         continuity: OrderResponseContinuity::Preserved,
                         cancel_venue_orders: live,
+                        price_decimals: self.deps.cfg.price_decimals,
                     },
                 )
                 .await
@@ -570,7 +627,7 @@ impl MakerRuntime {
                 self.market.maker_book_verified_empty = false;
                 if live {
                     if let Err(error) =
-                        cancel_maker_orders_with_retry(client, symbol, 3, output_format).await
+                        cancel_maker_orders_with_retry(client, symbol, 3, output_format, None).await
                     {
                         break 'phase stop_requested_exit(
                             &mut self.recovery.runtime_state,
@@ -722,6 +779,7 @@ impl MakerRuntime {
                             abort_account_stream_handle: true,
                             continuity: OrderResponseContinuity::Preserved,
                             cancel_venue_orders: true,
+                            price_decimals: self.deps.cfg.price_decimals,
                         },
                     )
                     .await
@@ -767,9 +825,14 @@ impl MakerRuntime {
                                 );
                             }
                             AccountStreamReconnect::Exhausted(reason) => {
-                                if let Err(error) =
-                                    cancel_maker_orders_with_retry(client, symbol, 3, output_format)
-                                        .await
+                                if let Err(error) = cancel_maker_orders_with_retry(
+                                    client,
+                                    symbol,
+                                    3,
+                                    output_format,
+                                    None,
+                                )
+                                .await
                                 {
                                     break 'phase stop_requested_exit(
                                         &mut self.recovery.runtime_state,
@@ -974,7 +1037,7 @@ impl MakerRuntime {
                     // one final authoritative empty-book verification before the
                     // recovered stream can resume quoting.
                     if let Err(error) =
-                        cancel_maker_orders_with_retry(client, symbol, 3, output_format).await
+                        cancel_maker_orders_with_retry(client, symbol, 3, output_format, None).await
                     {
                         handle.abort();
                         break 'phase recovery_failed_exit(
@@ -1098,6 +1161,7 @@ impl MakerRuntime {
                             abort_account_stream_handle: false,
                             continuity: OrderResponseContinuity::Replaced,
                             cancel_venue_orders: true,
+                            price_decimals: self.deps.cfg.price_decimals,
                         },
                     )
                     .await
@@ -1218,6 +1282,7 @@ impl MakerRuntime {
                                             symbol,
                                             3,
                                             output_format,
+                                            None,
                                         )
                                         .await
                                         {
@@ -1327,6 +1392,9 @@ impl MakerRuntime {
                         session.order_responses = reconnected.responses;
                         session.order_response_health = reconnected.health;
                         session.order_response_handle = reconnected.handle;
+                        // The new channel never delivers acks for cleanup
+                        // cancels minted on the old one.
+                        session.cleanup_minted_request_ids.clear();
                         // Cleanup verified an empty maker book. The next cycle
                         // rebuilds exchange state before it may place.
                         resume_quoting_after_recovery(
@@ -1411,6 +1479,7 @@ impl MakerRuntime {
                     latency: Some(&mut session.order_latency),
                     latency_started: Some(session.latency_started),
                 },
+                &mut session.cleanup_minted_request_ids,
             ) {
                 session
                     .order_response_health

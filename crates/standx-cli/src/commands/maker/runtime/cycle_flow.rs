@@ -414,6 +414,14 @@ impl MakerRuntime {
                 // Apply the events buffered during work, ordering order-responses
                 // before account events to mirror the top-of-loop drain.
                 for response in buffered_orders {
+                    // Late ack for a cleanup-minted WS cancel: cleanup already
+                    // established the venue state via `/api/query_order`, so the
+                    // frame is informational only and must not fail closed.
+                    if let Some(request_id) = response.request_id.as_deref() {
+                        if session.cleanup_minted_request_ids.remove(request_id) {
+                            continue;
+                        }
+                    }
                     let request_id = response.request_id.clone();
                     observe_order_ack(
                         Some(&mut session.order_latency),
@@ -855,6 +863,7 @@ impl MakerRuntime {
                                 abort_account_stream_handle: false,
                                 continuity: OrderResponseContinuity::Preserved,
                                 cancel_venue_orders: true,
+                                price_decimals: cfg.price_decimals,
                             },
                         )
                         .await
@@ -980,9 +989,14 @@ impl MakerRuntime {
                             // visible after the initial freeze cleanup. Verify the
                             // maker book again at the end of the bounded recovery
                             // window before unfreezing placements.
-                            if let Err(error) =
-                                cancel_maker_orders_with_retry(client, symbol, 3, output_format)
-                                    .await
+                            if let Err(error) = cancel_maker_orders_with_retry(
+                                client,
+                                symbol,
+                                3,
+                                output_format,
+                                None,
+                            )
+                            .await
                             {
                                 break 'phase recovery_failed_exit(
                                     &mut self.recovery.runtime_state,

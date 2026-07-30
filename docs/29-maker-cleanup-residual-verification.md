@@ -1,8 +1,8 @@
 # Cleanup 残余判定硬化立项：WS order-response 主判据 + 按单查询兜底（2026-07-30 草案）
 
-状态：**Phase 1 已完成**（REST `cancel_orders` + 按 `order_id` 单查
-`/api/query_order` 的 `status`），已合入 main（`ccccdc7`）。安全轨硬化项（5-b 后续），
-非 alpha 候选，不占用 live 时间片（纯代码 + 离线验证 + 受监督 canary），可与任何采集/实验并行。
+状态：**Phase 1 + Phase 2 已完成**（Phase 1 已合入 main `ccccdc7`；Phase 2 见下）。
+安全轨硬化项（5-b 后续），非 alpha 候选，不占用 live 时间片
+（纯代码 + 离线验证 + 受监督 canary），可与任何采集/实验并行。
 
 触发事故：[基线 PnL 采集截断报告](evidence/maker-baseline-pnl-2026-07-30.md)
 （run `baseline-pnl-20260728T081712Z`，2026-07-29T19:09:57Z fail-safe，exit 75）。
@@ -89,6 +89,34 @@ order-response 并无异常记录），撤单的场馆权威确认本就可用�
   搬到了 reconnect：cleanup 现在 ~0.5s 就返回成功，列表反而更可能还是陈旧的，
   reconnect 校验会以"maker orders appeared after cleanup"打死同一个 run。
 - 主判据（WS `order:cancel` 等 `is_success()`）保留在设计中，尚未实现。
+
+## Phase 2 实现范围（当前变更）
+
+- **WS 主判据**：freeze cleanup（`freeze_and_cleanup_for_recovery`）在
+  order-response 流健康时，改为 WS `order:cancel` 逐单下发，按 request_id 关联
+  等待 `is_success()` 响应（窗口 2s，`MAKER_CLEANUP_WS_RESPONSE_TIMEOUT`）。
+  拿到 success = 该单已撤，不再查列表也不再单查。
+- **降级链**：WS 不可用 / 发送失败 / 通道关闭 / ack 超时 / ack 非 success
+  （gateway `accepted` 或 rejection）→ 该单自动降级到 Phase 1 的
+  REST `cancel_orders` + `/api/query_order` 单查判定。startup、shutdown、
+  reconnect 等无健康 WS 的调用点显式传 `None`，行为与 Phase 1 逐字节一致。
+- **迟到帧墓碑**：WS 撤单超时未应答的 request_id 记入 session 的
+  `cleanup_minted_request_ids`；主排干路径（`apply_order_responses_observed`
+  与 cycle 内 buffered 应用）遇到这些 id 的迟到帧时丢弃而非按未知 request_id
+  fail-closed——cleanup 已经通过单查确立了场馆状态，迟到帧不携带新信息。
+  order-response 流被替换（重连）时清空该集合。
+- **leftover 重放**：cleanup 排干窗口内捕获到的、不属于 cleanup 的响应
+  （freeze 前周期请求的 ack）由 freeze preamble 经 `apply_order_response`
+  重新应用，pending 生命周期跨 cleanup 保持关联（`Preserved` 连续性不被破坏）。
+- **遥测**：`maker_cleanup` 事件的 `orders` 数组新增 `confirmed_by` 字段
+  （`ws_success` / `query_order`），canary 验收可直接观察走了哪条路径。
+- 设计中的“最终兜底：列表扫描 + 宽限 + critical 附带单查 status”不再单独存在：
+  列表从 Phase 1 起已不作为残余判据（仅用于发现与迟到单复查），单查 status 附带
+  也已在 Phase 1 完成。send 失败/通道关闭会标记 order-response 流 unhealthy，
+  交给既有重连流程处理。
+- WS 路径的离线测试覆盖 drain 分类逻辑（success/accepted/rejection/超时/外来帧/
+  通道关闭）与迟到帧丢弃；WS 发送/关联的端侧由 SDK 既有测试覆盖，端到端真实
+  滞后行为留待受监督 canary 验收（见“验收”节）。
 
 ## 测试要求（离线确定性）
 

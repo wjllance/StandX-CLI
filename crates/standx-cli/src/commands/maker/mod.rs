@@ -59,6 +59,7 @@ use recovery::{
     reconnect_account_stream, reconnect_order_response, AccountStreamReconnect, ConvergenceProbe,
     PositionReconciliationCause, PositionReconciliationError, ReconcileRequest,
     ReconnectCleanupFailed, ReconnectInterrupted, ReconnectRequest, TransportReconnectExhausted,
+    WsCleanupContext,
 };
 
 // ============================================================================
