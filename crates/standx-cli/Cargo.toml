@@ -1,6 +1,6 @@
 [package]
 name = "standx-cli"
-version = "1.2.0"
+version = "1.3.0"
 description = "AI Agent trading toolkit for StandX - natural language to execution for any CLI-capable agent"
 keywords = ["openclaw", "trading", "crypto", "standx", "agent"]
 categories = ["command-line-utilities", "cryptography::cryptocurrencies"]
