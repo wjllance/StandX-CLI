@@ -456,6 +456,44 @@ fn apply_order_responses_unknown_request_fails_closed() {
 }
 
 #[test]
+fn cleanup_minted_late_ack_is_dropped_without_failing_closed() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let mut projection = projection_with_pending(&[]);
+    let mut runtime_state = MakerState::starting();
+    runtime_state.handle(MakerEvent::StartupReady);
+    assert!(matches!(
+        runtime_state.next_effect(),
+        Some(MakerEffect::RunCycle(_))
+    ));
+    let mut cleanup_minted: std::collections::HashSet<String> =
+        ["cleanup-req".to_string()].into_iter().collect();
+
+    // The late WS ack for a cleanup-minted cancel must be dropped, not judged:
+    // cleanup already established the venue state through `/api/query_order`,
+    // so the frame carries no new information.
+    tx.try_send(order_response(Some("cleanup-req"), 0)).unwrap();
+
+    apply_order_responses_observed(
+        &mut rx,
+        &mut projection,
+        &mut runtime_state,
+        OrderResponseObservation {
+            output_format: OutputFormat::Quiet,
+            symbol: "BTC-USD",
+            cycle: 1,
+            price_decimals: 2,
+            latency: None,
+            latency_started: None,
+        },
+        &mut cleanup_minted,
+    )
+    .expect("cleanup-minted late ack must not fail closed");
+
+    assert!(cleanup_minted.is_empty(), "one-shot tombstone is consumed");
+    assert!(runtime_state.pending_effect().is_none());
+}
+
+#[test]
 fn apply_order_responses_rejected_cancel_fails_closed() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     let mut projection = MakerAccountProjection::new(1, "sxmk-test-", 0.0, 0.005, 0.00005);

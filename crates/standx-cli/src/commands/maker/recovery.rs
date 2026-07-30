@@ -16,7 +16,7 @@ use standx_sdk::models::{Order, OrderStatus, Position, Trade};
 use standx_sdk::order_response::{
     OrderCommandSender, OrderResponse, OrderResponseHealth, OrderResponseStream,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::time::Duration;
 
@@ -24,6 +24,12 @@ const MAKER_CLEANUP_VERIFY_INITIAL_DELAY: Duration = Duration::from_millis(500);
 const MAKER_CLEANUP_VERIFY_INTERVAL: Duration = Duration::from_secs(1);
 const MAKER_CLEANUP_VERIFY_MAX_ATTEMPTS: u32 = 6;
 const MAKER_CLEANUP_RETRY_DELAY: Duration = Duration::from_secs(1);
+/// How long one cleanup attempt waits for the WS order-response ack of a
+/// cleanup-minted cancel before degrading that order to the REST
+/// cancel + `/api/query_order` verification path. A healthy channel answers in
+/// well under a second; a longer silence means the ack cannot be the
+/// cancellation verdict for this attempt.
+const MAKER_CLEANUP_WS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 pub(super) enum PositionReconciliationCause {
@@ -364,6 +370,7 @@ fn cleanup_orders_json(snapshots: &[OrderStatusSnapshot]) -> Vec<serde_json::Val
                 "order_id": s.order_id,
                 "status": format!("{:?}", s.status).to_lowercase(),
                 "updated_at": s.updated_at,
+                "confirmed_by": s.confirmed_by,
             })
         })
         .collect()
@@ -374,12 +381,18 @@ pub(super) async fn cancel_maker_orders_with_retry(
     symbol: &str,
     attempts: u32,
     output_format: OutputFormat,
-) -> Result<()> {
+    mut ws: Option<&mut WsCleanupContext<'_>>,
+) -> Result<Vec<OrderResponse>> {
     let mut last_err: Option<anyhow::Error> = None;
+    let mut leftover_responses: Vec<OrderResponse> = Vec::new();
     for attempt in 1..=attempts {
-        let result = cleanup_once(client, symbol).await;
+        let result = cleanup_once(client, symbol, ws.as_deref_mut()).await;
         match result {
-            Ok(CleanupVerification::Complete(snapshots)) => {
+            Ok(CleanupOutcome {
+                verification: CleanupVerification::Complete(snapshots),
+                leftover_responses: leftover,
+            }) => {
+                leftover_responses.extend(leftover);
                 if output_format == OutputFormat::Json {
                     println!(
                         "{}",
@@ -394,12 +407,17 @@ pub(super) async fn cancel_maker_orders_with_retry(
                 } else {
                     println!("✅ All maker-owned {} orders cancelled", symbol);
                 }
-                return Ok(());
+                return Ok(leftover_responses);
             }
-            Ok(CleanupVerification::Residual {
-                snapshots,
-                residual_ids,
+            Ok(CleanupOutcome {
+                verification:
+                    CleanupVerification::Residual {
+                        snapshots,
+                        residual_ids,
+                    },
+                leftover_responses: leftover,
             }) => {
+                leftover_responses.extend(leftover);
                 let message = format!(
                     "RESIDUAL MAKER ORDERS on {} after cancellation: [{}]",
                     symbol,
@@ -470,13 +488,35 @@ pub(super) async fn cancel_maker_orders_with_retry(
     }))
 }
 
-/// Per-order status observed through `/api/query_order` during cleanup
-/// verification.
+/// The live halves of the order-response stream a cleanup may use as its
+/// primary cancellation verdict. Built by the caller from the live session;
+/// absent whenever the stream is dead, being replaced, or never existed
+/// (startup, shutdown, reconnect), in which case cleanup runs REST-only.
+pub(super) struct WsCleanupContext<'a> {
+    pub(super) commands: &'a OrderCommandSender,
+    pub(super) responses: &'a mut tokio::sync::mpsc::Receiver<OrderResponse>,
+    pub(super) health: &'a OrderResponseHealth,
+    /// Tombstones for cleanup-minted request IDs whose ack never arrived
+    /// inside the drain window. The venue sends exactly one response per
+    /// request ID (a second response would already fail closed in the normal
+    /// cycle path), so only a timed-out ack can still surface later — and when
+    /// it does, cleanup has already established the venue state through
+    /// `/api/query_order`, making the late frame informational only. The
+    /// runtime response drain drops those frames via this set instead of
+    /// failing closed on an unknown request ID.
+    pub(super) minted: &'a mut HashSet<String>,
+}
+
+/// Per-order status observed during cleanup verification.
 #[derive(Debug)]
 struct OrderStatusSnapshot {
     order_id: u64,
     status: OrderStatus,
     updated_at: String,
+    /// Which channel established the terminal verdict: the WS order-response
+    /// `success` ack (`"ws_success"`) or the REST `/api/query_order` point
+    /// query (`"query_order"`).
+    confirmed_by: &'static str,
 }
 
 /// Outcome of a single cleanup verification pass.
@@ -492,6 +532,147 @@ enum CleanupVerification {
         snapshots: Vec<OrderStatusSnapshot>,
         residual_ids: Vec<String>,
     },
+}
+
+/// What one cleanup pass decided, plus any order-response frames it captured
+/// that belong to requests the cleanup did not mint. The caller must re-apply
+/// the leftovers through the canonical response path so the pending-request
+/// lifecycle stays correlated across the cleanup.
+#[derive(Debug)]
+struct CleanupOutcome {
+    verification: CleanupVerification,
+    leftover_responses: Vec<OrderResponse>,
+}
+
+/// Result of draining the order-response stream for cleanup-minted cancel acks.
+#[derive(Debug)]
+struct WsCancelDrain {
+    /// Orders whose cancel ack carried the venue's terminal `success`.
+    confirmed: Vec<(String, i64)>,
+    /// Orders that still need the REST verdict: the ack was not `success`
+    /// (gateway-level `accepted` or a rejection), or never arrived in time.
+    unresolved: Vec<(String, i64)>,
+    /// Responses for request IDs the cleanup did not mint (pre-freeze cycle
+    /// requests); ownership returns to the caller.
+    leftover: Vec<OrderResponse>,
+    /// Cleanup-minted request IDs whose ack never arrived inside the window.
+    timed_out_request_ids: Vec<String>,
+    /// The response channel closed mid-drain; the caller marks it unhealthy.
+    channel_closed: bool,
+}
+
+async fn drain_ws_cancel_responses(
+    responses: &mut tokio::sync::mpsc::Receiver<OrderResponse>,
+    pending: &mut HashMap<String, (String, i64)>,
+    timeout: Duration,
+) -> WsCancelDrain {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut confirmed = Vec::new();
+    let mut unresolved = Vec::new();
+    let mut leftover = Vec::new();
+    let mut channel_closed = false;
+    while !pending.is_empty() {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, responses.recv()).await {
+            Ok(Some(response)) => {
+                let claimed = response
+                    .request_id
+                    .as_deref()
+                    .and_then(|request_id| pending.remove(request_id));
+                match claimed {
+                    Some(order) => {
+                        if response.is_success() {
+                            confirmed.push(order);
+                        } else {
+                            // `accepted` is only a gateway check and a rejection
+                            // denies the cancel — neither proves the order is
+                            // off the book, so the REST point query decides.
+                            unresolved.push(order);
+                        }
+                    }
+                    None => leftover.push(response),
+                }
+            }
+            Ok(None) => {
+                channel_closed = true;
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+    // Acks that never arrived inside the window degrade to the REST verdict.
+    // Sort every outgoing order list for deterministic telemetry and tests.
+    let mut timed_out: Vec<(String, (String, i64))> = pending.drain().collect();
+    timed_out.sort_by_key(|(_, (_, id))| *id);
+    let timed_out_request_ids = timed_out
+        .iter()
+        .map(|(request_id, _)| request_id.clone())
+        .collect();
+    unresolved.extend(timed_out.into_iter().map(|(_, order)| order));
+    confirmed.sort_by_key(|(_, id)| *id);
+    unresolved.sort_by_key(|(_, id)| *id);
+    WsCancelDrain {
+        confirmed,
+        unresolved,
+        leftover,
+        timed_out_request_ids,
+        channel_closed,
+    }
+}
+
+/// Cancel every listed order over the order-response stream and drain the
+/// correlated acks. Only a `success` ack counts as venue-confirmed; anything
+/// else defers to the REST fallback in the caller.
+async fn ws_cancel_orders(
+    ctx: &mut WsCleanupContext<'_>,
+    orders: Vec<(String, i64)>,
+) -> WsCancelDrain {
+    let mut pending: HashMap<String, (String, i64)> = HashMap::new();
+    let mut unsent: Vec<(String, i64)> = Vec::new();
+    let mut send_failed = false;
+    for (id_str, id_i64) in orders {
+        if send_failed {
+            unsent.push((id_str, id_i64));
+            continue;
+        }
+        let command = match ctx.commands.prepare_cancel_order(&id_str) {
+            Ok(command) => command,
+            Err(_) => {
+                // A non-integer ID cannot be signed for the WS protocol; the
+                // REST path owns that error reporting.
+                unsent.push((id_str, id_i64));
+                continue;
+            }
+        };
+        let request_id = command.request_id().to_string();
+        if let Err(error) = ctx.commands.send_prepared(command).await {
+            ctx.health
+                .mark_unhealthy(format!("cleanup WS cancel write failed: {error}"));
+            send_failed = true;
+            unsent.push((id_str, id_i64));
+            continue;
+        }
+        pending.insert(request_id, (id_str, id_i64));
+    }
+    let mut drain = drain_ws_cancel_responses(
+        ctx.responses,
+        &mut pending,
+        MAKER_CLEANUP_WS_RESPONSE_TIMEOUT,
+    )
+    .await;
+    if drain.channel_closed {
+        ctx.health
+            .mark_unhealthy("order-response channel closed during cleanup".to_string());
+    }
+    ctx.minted
+        .extend(drain.timed_out_request_ids.iter().cloned());
+    drain.timed_out_request_ids.clear();
+    drain.unresolved.extend(unsent);
+    drain.unresolved.sort_by_key(|(_, id)| *id);
+    drain
 }
 
 /// Ask the venue for one order's current status.
@@ -511,10 +692,15 @@ async fn query_order_status(client: &StandXClient, id: &str) -> Result<OrderStat
         order_id,
         status: order.status,
         updated_at: order.updated_at,
+        confirmed_by: "query_order",
     })
 }
 
-async fn cleanup_once(client: &StandXClient, symbol: &str) -> Result<CleanupVerification> {
+async fn cleanup_once(
+    client: &StandXClient,
+    symbol: &str,
+    ws: Option<&mut WsCleanupContext<'_>>,
+) -> Result<CleanupOutcome> {
     let orders = client.get_open_orders(Some(symbol)).await?;
     let maker_orders = orders
         .into_iter()
@@ -530,34 +716,64 @@ async fn cleanup_once(client: &StandXClient, symbol: &str) -> Result<CleanupVeri
         })
         .collect::<Result<Vec<_>>>()?;
     if maker_orders.is_empty() {
-        return Ok(CleanupVerification::Complete(Vec::new()));
+        return Ok(CleanupOutcome {
+            verification: CleanupVerification::Complete(Vec::new()),
+            leftover_responses: Vec::new(),
+        });
     }
 
-    let order_ids_i64: Vec<i64> = maker_orders.iter().map(|(_, id)| *id).collect();
-    client.cancel_orders(&order_ids_i64).await?;
+    let mut snapshots: Vec<OrderStatusSnapshot> = Vec::with_capacity(maker_orders.len());
+    let mut leftover_responses: Vec<OrderResponse> = Vec::new();
+    let mut unresolved: Vec<(String, i64)> = maker_orders.clone();
 
-    tokio::time::sleep(MAKER_CLEANUP_VERIFY_INITIAL_DELAY).await;
+    // Primary verdict: a WS cancel acknowledged with `success` is
+    // processing-complete at the venue, so that order needs no further query.
+    if let Some(ctx) = ws {
+        if ctx.health.is_healthy() {
+            let drain = ws_cancel_orders(ctx, unresolved).await;
+            leftover_responses = drain.leftover;
+            unresolved = drain.unresolved;
+            for (_, id_i64) in drain.confirmed {
+                snapshots.push(OrderStatusSnapshot {
+                    order_id: id_i64 as u64,
+                    status: OrderStatus::Canceled,
+                    updated_at: String::new(),
+                    confirmed_by: "ws_success",
+                });
+            }
+        }
+    }
 
-    let mut snapshots = Vec::with_capacity(maker_orders.len());
+    // Fallback verdict: REST batch cancel + per-order point query for every
+    // order the WS phase did not confirm (no stream, unhealthy stream,
+    // non-`success` ack, or timed-out ack).
     let mut residual_ids = Vec::new();
-    for (id_str, _) in &maker_orders {
-        let mut observed = query_order_status(client, id_str).await?;
-        let mut polls = 1;
-        while !observed.status.is_terminal() && polls < MAKER_CLEANUP_VERIFY_MAX_ATTEMPTS {
-            tokio::time::sleep(MAKER_CLEANUP_VERIFY_INTERVAL).await;
-            observed = query_order_status(client, id_str).await?;
-            polls += 1;
+    if !unresolved.is_empty() {
+        let order_ids_i64: Vec<i64> = unresolved.iter().map(|(_, id)| *id).collect();
+        client.cancel_orders(&order_ids_i64).await?;
+        tokio::time::sleep(MAKER_CLEANUP_VERIFY_INITIAL_DELAY).await;
+        for (id_str, _) in &unresolved {
+            let mut observed = query_order_status(client, id_str).await?;
+            let mut polls = 1;
+            while !observed.status.is_terminal() && polls < MAKER_CLEANUP_VERIFY_MAX_ATTEMPTS {
+                tokio::time::sleep(MAKER_CLEANUP_VERIFY_INTERVAL).await;
+                observed = query_order_status(client, id_str).await?;
+                polls += 1;
+            }
+            if !observed.status.is_terminal() {
+                residual_ids.push(id_str.clone());
+            }
+            snapshots.push(observed);
         }
-        if !observed.status.is_terminal() {
-            residual_ids.push(id_str.clone());
-        }
-        snapshots.push(observed);
     }
 
     if !residual_ids.is_empty() {
-        return Ok(CleanupVerification::Residual {
-            snapshots,
-            residual_ids,
+        return Ok(CleanupOutcome {
+            verification: CleanupVerification::Residual {
+                snapshots,
+                residual_ids,
+            },
+            leftover_responses,
         });
     }
 
@@ -581,11 +797,17 @@ async fn cleanup_once(client: &StandXClient, symbol: &str) -> Result<CleanupVeri
         .collect::<Vec<_>>();
 
     if late_ids.is_empty() {
-        Ok(CleanupVerification::Complete(snapshots))
+        Ok(CleanupOutcome {
+            verification: CleanupVerification::Complete(snapshots),
+            leftover_responses,
+        })
     } else {
-        Ok(CleanupVerification::Residual {
-            snapshots,
-            residual_ids: late_ids,
+        Ok(CleanupOutcome {
+            verification: CleanupVerification::Residual {
+                snapshots,
+                residual_ids: late_ids,
+            },
+            leftover_responses,
         })
     }
 }
@@ -890,8 +1112,12 @@ pub(super) async fn reconnect_order_response(
         );
 
         let cleanup_ok = if cleanup_needed {
-            match cancel_maker_orders_with_retry(&cleanup_client, symbol, 3, output_format).await {
-                Ok(()) => true,
+            // The order-response stream is dead or being replaced here, so the
+            // cleanup runs on the REST verdict path (no WS context).
+            match cancel_maker_orders_with_retry(&cleanup_client, symbol, 3, output_format, None)
+                .await
+            {
+                Ok(_) => true,
                 Err(error) => {
                     return Err(anyhow::Error::new(ReconnectCleanupFailed {
                         reason: format!("retry cleanup failed: {error}"),
@@ -1094,6 +1320,119 @@ mod tests {
     const RUN_PREFIX: &str = "sxmk-reconnect-";
     const ORDER_ID: u64 = 11_575_317_826;
     const TRADE_ID: u64 = 900_001;
+
+    fn ws_response(request_id: &str, code: i64, message: &str) -> OrderResponse {
+        OrderResponse {
+            code,
+            message: message.to_string(),
+            request_id: Some(request_id.to_string()),
+        }
+    }
+
+    /// Invariant: only the venue's terminal `success` ack confirms a cleanup
+    /// cancel. A gateway-level `accepted` and a rejection both defer the order
+    /// to the REST point-query verdict.
+    #[tokio::test]
+    async fn ws_drain_confirms_success_and_defers_non_success() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let mut pending: HashMap<String, (String, i64)> = [
+            ("req-success".to_string(), ("1".to_string(), 1)),
+            ("req-accepted".to_string(), ("2".to_string(), 2)),
+            ("req-rejected".to_string(), ("3".to_string(), 3)),
+        ]
+        .into_iter()
+        .collect();
+        tx.send(ws_response("req-success", 0, "success"))
+            .await
+            .unwrap();
+        tx.send(ws_response("req-accepted", 0, "accepted"))
+            .await
+            .unwrap();
+        tx.send(ws_response("req-rejected", 400, "order not found"))
+            .await
+            .unwrap();
+
+        let drain =
+            drain_ws_cancel_responses(&mut rx, &mut pending, Duration::from_millis(50)).await;
+
+        assert_eq!(drain.confirmed, vec![("1".to_string(), 1)]);
+        assert_eq!(
+            drain.unresolved,
+            vec![("2".to_string(), 2), ("3".to_string(), 3)]
+        );
+        assert!(drain.leftover.is_empty());
+        assert!(drain.timed_out_request_ids.is_empty());
+        assert!(!drain.channel_closed);
+    }
+
+    /// Invariant: an ack that never arrives inside the window degrades to the
+    /// REST verdict, and its request ID is reported for tombstoning so the late
+    /// frame cannot trip the unknown-request-ID fail-closed check.
+    #[tokio::test]
+    async fn ws_drain_times_out_unanswered_cancels() {
+        let (_tx, mut rx) = tokio::sync::mpsc::channel::<OrderResponse>(8);
+        let mut pending: HashMap<String, (String, i64)> =
+            [("req-late".to_string(), ("7".to_string(), 7))]
+                .into_iter()
+                .collect();
+
+        let drain =
+            drain_ws_cancel_responses(&mut rx, &mut pending, Duration::from_millis(20)).await;
+
+        assert!(drain.confirmed.is_empty());
+        assert_eq!(drain.unresolved, vec![("7".to_string(), 7)]);
+        assert_eq!(drain.timed_out_request_ids, vec!["req-late".to_string()]);
+        assert!(!drain.channel_closed);
+    }
+
+    /// Invariant: responses the cleanup did not mint (pre-freeze cycle
+    /// requests) are never consumed by the drain — they return to the caller so
+    /// the pending-request lifecycle stays correlated.
+    #[tokio::test]
+    async fn ws_drain_returns_foreign_responses_as_leftover() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let mut pending: HashMap<String, (String, i64)> =
+            [("req-cleanup".to_string(), ("5".to_string(), 5))]
+                .into_iter()
+                .collect();
+        tx.send(ws_response("req-cycle-place", 0, "success"))
+            .await
+            .unwrap();
+        tx.send(ws_response("req-cleanup", 0, "success"))
+            .await
+            .unwrap();
+
+        let drain =
+            drain_ws_cancel_responses(&mut rx, &mut pending, Duration::from_millis(50)).await;
+
+        assert_eq!(drain.confirmed, vec![("5".to_string(), 5)]);
+        assert!(drain.unresolved.is_empty());
+        assert_eq!(drain.leftover.len(), 1);
+        assert_eq!(
+            drain.leftover[0].request_id.as_deref(),
+            Some("req-cycle-place")
+        );
+        assert!(!drain.channel_closed);
+    }
+
+    /// Invariant: a closed channel stops the drain immediately, reports the
+    /// closure, and defers every unanswered cancel to the REST verdict.
+    #[tokio::test]
+    async fn ws_drain_reports_channel_closure() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<OrderResponse>(8);
+        let mut pending: HashMap<String, (String, i64)> =
+            [("req-cleanup".to_string(), ("9".to_string(), 9))]
+                .into_iter()
+                .collect();
+        drop(tx);
+
+        let drain =
+            drain_ws_cancel_responses(&mut rx, &mut pending, Duration::from_millis(50)).await;
+
+        assert!(drain.confirmed.is_empty());
+        assert_eq!(drain.unresolved, vec![("9".to_string(), 9)]);
+        assert!(drain.channel_closed);
+    }
 
     /// Snapshot-validation fixtures. Deliberately separate from the
     /// reconciliation fixtures above: these exercise ownership and trade-ID
@@ -1727,7 +2066,7 @@ mod live_gate_tests {
             .await;
 
         let client = StandXClient::with_base_url(server.url()).unwrap();
-        cancel_maker_orders_with_retry(&client, "BTC-USD", 3, OutputFormat::Quiet)
+        cancel_maker_orders_with_retry(&client, "BTC-USD", 3, OutputFormat::Quiet, None)
             .await
             .unwrap();
 
@@ -1816,7 +2155,7 @@ mod live_gate_tests {
             .await;
 
         let client = StandXClient::with_base_url(server.url()).unwrap();
-        cancel_maker_orders_with_retry(&client, "BTC-USD", 3, OutputFormat::Quiet)
+        cancel_maker_orders_with_retry(&client, "BTC-USD", 3, OutputFormat::Quiet, None)
             .await
             .unwrap();
 
@@ -1886,7 +2225,7 @@ mod live_gate_tests {
             .await;
 
         let client = StandXClient::with_base_url(server.url()).unwrap();
-        cancel_maker_orders_with_retry(&client, "BTC-USD", 3, OutputFormat::Quiet)
+        cancel_maker_orders_with_retry(&client, "BTC-USD", 3, OutputFormat::Quiet, None)
             .await
             .unwrap();
 
@@ -1995,7 +2334,7 @@ mod live_gate_tests {
             .await;
 
         let client = StandXClient::with_base_url(server.url()).unwrap();
-        cancel_maker_orders_with_retry(&client, "BTC-USD", 3, OutputFormat::Quiet)
+        cancel_maker_orders_with_retry(&client, "BTC-USD", 3, OutputFormat::Quiet, None)
             .await
             .unwrap();
 

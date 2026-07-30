@@ -67,6 +67,7 @@ fn order_response_freeze_spec() -> FreezeSpec<'static> {
         abort_account_stream_handle: false,
         continuity: OrderResponseContinuity::Replaced,
         cancel_venue_orders: true,
+        price_decimals: 2,
     }
 }
 

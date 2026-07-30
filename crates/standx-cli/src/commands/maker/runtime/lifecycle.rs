@@ -166,7 +166,8 @@ pub(super) async fn shutdown_report(report: ShutdownReport<'_>) -> Result<()> {
     // Do not return early on cleanup failure: operators need the stopped
     // lifecycle alert most when residual maker orders may still be live.
     let cleanup_error = if live {
-        cancel_maker_orders_with_retry(client, symbol, 3, output_format)
+        // The order-response task was aborted above: REST verdict path.
+        cancel_maker_orders_with_retry(client, symbol, 3, output_format, None)
             .await
             .err()
     } else {

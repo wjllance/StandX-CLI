@@ -26,6 +26,12 @@ pub(super) struct LiveSession {
     pub(super) account_poll: LiveAccountPollState,
     pub(super) order_latency: maker::OrderLatencyTracker,
     pub(super) latency_started: std::time::Instant,
+    /// Cleanup-minted WS cancel request IDs whose ack never arrived inside the
+    /// cleanup drain window. The response drain drops those late frames (see
+    /// `recovery::WsCleanupContext::minted`); the set is cleared whenever the
+    /// order-response stream is replaced, since a new channel never delivers
+    /// acks for requests issued on the old one.
+    pub(super) cleanup_minted_request_ids: std::collections::HashSet<String>,
 }
 
 pub(super) fn new_maker_rest_client() -> Result<StandXClient> {
@@ -330,7 +336,8 @@ pub(super) async fn run_startup(
         // Clean only leftover orders owned by this maker. Manual/API orders
         // are not part of the strategy's reconciliation state and must never
         // be adopted or cancelled as stale.
-        cancel_maker_orders_with_retry(&client, &symbol, 3, output_format).await?;
+        // No order-response session exists yet at startup: REST verdict path.
+        let _ = cancel_maker_orders_with_retry(&client, &symbol, 3, output_format, None).await?;
 
         // Establish the session ledger boundary before any new order can be
         // submitted. Existing inventory is adopted at the current mark, so
@@ -485,6 +492,7 @@ pub(super) async fn run_startup(
             account_poll,
             order_latency: maker::OrderLatencyTracker::default(),
             latency_started: std::time::Instant::now(),
+            cleanup_minted_request_ids: std::collections::HashSet::new(),
         });
         emit_ledger_sync(
             output_format,
