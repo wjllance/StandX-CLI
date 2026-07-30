@@ -376,6 +376,7 @@ fn cleanup_orders_json(snapshots: &[OrderStatusSnapshot]) -> Vec<serde_json::Val
                 "status": format!("{:?}", s.status).to_lowercase(),
                 "updated_at": s.updated_at,
                 "confirmed_by": s.confirmed_by,
+                "ws_request_id": s.ws_request_id,
             })
         })
         .collect()
@@ -571,6 +572,11 @@ struct OrderStatusSnapshot {
     /// `success` ack (`"ws_success"`) or the REST `/api/query_order` point
     /// query (`"query_order"`).
     confirmed_by: &'static str,
+    /// The cleanup-minted WS cancel request ID for this order, when the WS
+    /// phase ran. Recorded so a later two-frame ack can be tied back to the
+    /// cancel that minted it — the 07-30 incident was only inferable because
+    /// this link was missing from the telemetry.
+    ws_request_id: Option<String>,
 }
 
 /// Outcome of a single cleanup verification pass.
@@ -599,19 +605,28 @@ struct WsCancelDrain {
     /// Responses for request IDs the cleanup did not mint (pre-freeze cycle
     /// requests); ownership returns to the caller.
     leftover: Vec<OrderResponse>,
+    /// Frames dropped because their request ID is an earlier cleanup-minted
+    /// cancel (e.g. the terminal half of a two-frame ack arriving in a later
+    /// attempt's drain). Diagnostic only.
+    tombstoned: usize,
     /// The response channel closed mid-drain; the caller marks it unhealthy.
     channel_closed: bool,
+    /// Every cancel actually put on the wire, as `(order_id, request_id)`, so
+    /// the telemetry can tie a WS attempt to its request ID.
+    attempts: Vec<(i64, String)>,
 }
 
 async fn drain_ws_cancel_responses(
     responses: &mut tokio::sync::mpsc::Receiver<OrderResponse>,
     pending: &mut HashMap<String, (String, i64)>,
+    minted: &CleanupTombstones,
     timeout: Duration,
 ) -> WsCancelDrain {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut confirmed = Vec::new();
     let mut unresolved = Vec::new();
     let mut leftover = Vec::new();
+    let mut tombstoned = 0_usize;
     let mut channel_closed = false;
     while !pending.is_empty() {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -635,7 +650,22 @@ async fn drain_ws_cancel_responses(
                             unresolved.push(order);
                         }
                     }
-                    None => leftover.push(response),
+                    None => {
+                        // A frame for a cancel the cleanup itself minted in an
+                        // earlier attempt or round (the terminal half of a
+                        // two-frame ack arrives after that attempt's pending
+                        // map was released): the venue state was already
+                        // established through `/api/query_order`, so the frame
+                        // is informational only. Forwarding it as leftover
+                        // would fail the replay closed on an `Orphan` — this is
+                        // what stopped run `baseline-pnl-20260730T153920Z`.
+                        match response.request_id.as_deref() {
+                            Some(request_id) if minted.covers(request_id) => {
+                                tombstoned += 1;
+                            }
+                            _ => leftover.push(response),
+                        }
+                    }
                 }
             }
             Ok(None) => {
@@ -656,7 +686,9 @@ async fn drain_ws_cancel_responses(
         confirmed,
         unresolved,
         leftover,
+        tombstoned,
         channel_closed,
+        attempts: Vec::new(),
     }
 }
 
@@ -673,6 +705,7 @@ async fn ws_cancel_orders(
 ) -> WsCancelDrain {
     let mut pending: HashMap<String, (String, i64)> = HashMap::new();
     let mut unsent: Vec<(String, i64)> = Vec::new();
+    let mut attempts: Vec<(i64, String)> = Vec::new();
     let mut send_failed = false;
     for (id_str, id_i64) in orders {
         if send_failed {
@@ -702,11 +735,13 @@ async fn ws_cancel_orders(
         // the window would otherwise reach the runtime drain as an unknown
         // request ID and fail the run closed.
         ctx.minted.remember(request_id.clone());
+        attempts.push((id_i64, request_id.clone()));
         pending.insert(request_id, (id_str, id_i64));
     }
     let mut drain = drain_ws_cancel_responses(
         ctx.responses,
         &mut pending,
+        ctx.minted,
         MAKER_CLEANUP_WS_RESPONSE_TIMEOUT,
     )
     .await;
@@ -714,11 +749,18 @@ async fn ws_cancel_orders(
         ctx.health
             .mark_unhealthy("order-response channel closed during cleanup".to_string());
     }
+    if drain.tombstoned > 0 {
+        eprintln!(
+            "cleanup WS drain dropped {} cleanup-minted frame(s) (two-frame ack terminal halves)",
+            drain.tombstoned
+        );
+    }
     // Handed over immediately so the frames outlive any later failure in this
     // cleanup attempt.
     ctx.leftover.append(&mut drain.leftover);
     drain.unresolved.extend(unsent);
     drain.unresolved.sort_by_key(|(_, id)| *id);
+    drain.attempts = attempts;
     drain
 }
 
@@ -740,6 +782,7 @@ async fn query_order_status(client: &StandXClient, id: &str) -> Result<OrderStat
         status: order.status,
         updated_at: order.updated_at,
         confirmed_by: "query_order",
+        ws_request_id: None,
     })
 }
 
@@ -771,6 +814,13 @@ async fn cleanup_once(
 
     let mut snapshots: Vec<OrderStatusSnapshot> = Vec::with_capacity(maker_orders.len());
     let mut unresolved: Vec<(String, i64)> = maker_orders.clone();
+    let mut ws_attempts: Vec<(i64, String)> = Vec::new();
+    let ws_request_id_for = |attempts: &[(i64, String)], order_id: i64| {
+        attempts
+            .iter()
+            .find(|(id, _)| *id == order_id)
+            .map(|(_, request_id)| request_id.clone())
+    };
 
     // Primary verdict: a WS cancel acknowledged with `success` is
     // processing-complete at the venue, so that order needs no further query.
@@ -778,12 +828,14 @@ async fn cleanup_once(
         if ctx.health.is_healthy() {
             let drain = ws_cancel_orders(ctx, unresolved).await;
             unresolved = drain.unresolved;
+            ws_attempts = drain.attempts;
             for (_, id_i64) in drain.confirmed {
                 snapshots.push(OrderStatusSnapshot {
                     order_id: id_i64 as u64,
                     status: OrderStatus::Canceled,
                     updated_at: String::new(),
                     confirmed_by: "ws_success",
+                    ws_request_id: ws_request_id_for(&ws_attempts, id_i64),
                 });
             }
         }
@@ -797,7 +849,7 @@ async fn cleanup_once(
         let order_ids_i64: Vec<i64> = unresolved.iter().map(|(_, id)| *id).collect();
         client.cancel_orders(&order_ids_i64).await?;
         tokio::time::sleep(MAKER_CLEANUP_VERIFY_INITIAL_DELAY).await;
-        for (id_str, _) in &unresolved {
+        for (id_str, id_i64) in &unresolved {
             let mut observed = query_order_status(client, id_str).await?;
             let mut polls = 1;
             while !observed.status.is_terminal() && polls < MAKER_CLEANUP_VERIFY_MAX_ATTEMPTS {
@@ -805,6 +857,7 @@ async fn cleanup_once(
                 observed = query_order_status(client, id_str).await?;
                 polls += 1;
             }
+            observed.ws_request_id = ws_request_id_for(&ws_attempts, *id_i64);
             if !observed.status.is_terminal() {
                 residual_ids.push(id_str.clone());
             }
@@ -1391,8 +1444,13 @@ mod tests {
             .await
             .unwrap();
 
-        let drain =
-            drain_ws_cancel_responses(&mut rx, &mut pending, Duration::from_millis(50)).await;
+        let drain = drain_ws_cancel_responses(
+            &mut rx,
+            &mut pending,
+            &CleanupTombstones::default(),
+            Duration::from_millis(50),
+        )
+        .await;
 
         assert_eq!(drain.confirmed, vec![("1".to_string(), 1)]);
         assert_eq!(
@@ -1414,8 +1472,13 @@ mod tests {
                 .into_iter()
                 .collect();
 
-        let drain =
-            drain_ws_cancel_responses(&mut rx, &mut pending, Duration::from_millis(20)).await;
+        let drain = drain_ws_cancel_responses(
+            &mut rx,
+            &mut pending,
+            &CleanupTombstones::default(),
+            Duration::from_millis(20),
+        )
+        .await;
 
         assert!(drain.confirmed.is_empty());
         assert_eq!(drain.unresolved, vec![("7".to_string(), 7)]);
@@ -1488,8 +1551,13 @@ mod tests {
             .await
             .unwrap();
 
-        let drain =
-            drain_ws_cancel_responses(&mut rx, &mut pending, Duration::from_millis(50)).await;
+        let drain = drain_ws_cancel_responses(
+            &mut rx,
+            &mut pending,
+            &CleanupTombstones::default(),
+            Duration::from_millis(50),
+        )
+        .await;
 
         assert_eq!(drain.confirmed, vec![("5".to_string(), 5)]);
         assert!(drain.unresolved.is_empty());
@@ -1498,6 +1566,47 @@ mod tests {
             drain.leftover[0].request_id.as_deref(),
             Some("req-cycle-place")
         );
+        assert!(!drain.channel_closed);
+    }
+
+    /// Regression for the 07-30 stop (run `baseline-pnl-20260730T153920Z`):
+    /// the venue answers one cancel with a gateway `accepted` frame and a
+    /// terminal `success` frame. Attempt 1's drain claims the first frame and
+    /// releases the ID; the terminal frame lands in a LATER attempt's drain,
+    /// where the ID is no longer pending. It must be dropped via the tombstone
+    /// set, never forwarded as leftover — replaying it would fail closed on
+    /// `Orphan` and stop the run.
+    #[tokio::test]
+    async fn ws_drain_drops_tombstoned_cleanup_frame_instead_of_leftovering_it() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let mut pending: HashMap<String, (String, i64)> =
+            [("req-attempt-2".to_string(), ("8".to_string(), 8))]
+                .into_iter()
+                .collect();
+        let mut tombstones = CleanupTombstones::default();
+        // Minted by attempt 1: its `accepted` half was already claimed there.
+        tombstones.remember("req-attempt-1".to_string());
+        tx.send(ws_response("req-attempt-1", 0, "success"))
+            .await
+            .unwrap();
+        tx.send(ws_response("req-attempt-2", 0, "success"))
+            .await
+            .unwrap();
+
+        let drain = drain_ws_cancel_responses(
+            &mut rx,
+            &mut pending,
+            &tombstones,
+            Duration::from_millis(50),
+        )
+        .await;
+
+        assert_eq!(drain.confirmed, vec![("8".to_string(), 8)]);
+        assert!(
+            drain.leftover.is_empty(),
+            "tombstoned frame must not replay"
+        );
+        assert_eq!(drain.tombstoned, 1);
         assert!(!drain.channel_closed);
     }
 
@@ -1512,8 +1621,13 @@ mod tests {
                 .collect();
         drop(tx);
 
-        let drain =
-            drain_ws_cancel_responses(&mut rx, &mut pending, Duration::from_millis(50)).await;
+        let drain = drain_ws_cancel_responses(
+            &mut rx,
+            &mut pending,
+            &CleanupTombstones::default(),
+            Duration::from_millis(50),
+        )
+        .await;
 
         assert!(drain.confirmed.is_empty());
         assert_eq!(drain.unresolved, vec![("9".to_string(), 9)]);
