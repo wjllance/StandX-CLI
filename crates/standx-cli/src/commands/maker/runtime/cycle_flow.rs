@@ -414,11 +414,11 @@ impl MakerRuntime {
                 // Apply the events buffered during work, ordering order-responses
                 // before account events to mirror the top-of-loop drain.
                 for response in buffered_orders {
-                    // Late ack for a cleanup-minted WS cancel: cleanup already
+                    // Ack for a cleanup-minted WS cancel: cleanup already
                     // established the venue state via `/api/query_order`, so the
                     // frame is informational only and must not fail closed.
                     if let Some(request_id) = response.request_id.as_deref() {
-                        if session.cleanup_minted_request_ids.remove(request_id) {
+                        if session.cleanup_minted_request_ids.covers(request_id) {
                             continue;
                         }
                     }

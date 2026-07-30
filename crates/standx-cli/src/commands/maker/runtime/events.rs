@@ -190,7 +190,7 @@ pub(in crate::commands::maker) fn apply_order_responses(
             latency: None,
             latency_started: None,
         },
-        &mut std::collections::HashSet::new(),
+        &CleanupTombstones::default(),
     )
 }
 
@@ -208,7 +208,7 @@ pub(super) fn apply_order_responses_observed(
     projection: &mut MakerAccountProjection,
     runtime_state: &mut MakerState,
     mut observation: OrderResponseObservation<'_>,
-    cleanup_minted_request_ids: &mut std::collections::HashSet<String>,
+    cleanup_minted_request_ids: &CleanupTombstones,
 ) -> Result<()> {
     loop {
         let response = match receiver.try_recv() {
@@ -220,12 +220,13 @@ pub(super) fn apply_order_responses_observed(
                 ));
             }
         };
-        // A late ack for a cleanup-minted WS cancel: cleanup already
-        // established the venue state through `/api/query_order`, so the frame
-        // carries no new information and must not trip the unknown-request-ID
-        // fail-closed check.
+        // An ack for a cleanup-minted WS cancel: cleanup already established the
+        // venue state through `/api/query_order`, so the frame carries no new
+        // information and must not trip the unknown-request-ID fail-closed
+        // check. Non-consuming, because a two-frame ack can deliver both frames
+        // here.
         if let Some(request_id) = response.request_id.as_deref() {
-            if cleanup_minted_request_ids.remove(request_id) {
+            if cleanup_minted_request_ids.covers(request_id) {
                 continue;
             }
         }

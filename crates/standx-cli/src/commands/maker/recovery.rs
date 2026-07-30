@@ -16,7 +16,7 @@ use standx_sdk::models::{Order, OrderStatus, Position, Trade};
 use standx_sdk::order_response::{
     OrderCommandSender, OrderResponse, OrderResponseHealth, OrderResponseStream,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::time::Duration;
 
@@ -30,6 +30,11 @@ const MAKER_CLEANUP_RETRY_DELAY: Duration = Duration::from_secs(1);
 /// well under a second; a longer silence means the ack cannot be the
 /// cancellation verdict for this attempt.
 const MAKER_CLEANUP_WS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+/// How many cleanup-minted request IDs stay remembered as tombstones. One
+/// cleanup mints at most one ID per open maker order, so a few hundred entries
+/// span many freeze/cleanup rounds; anything older than that cannot still have
+/// a response in flight.
+const MAKER_CLEANUP_TOMBSTONE_CAPACITY: usize = 512;
 
 #[derive(Debug)]
 pub(super) enum PositionReconciliationCause {
@@ -382,17 +387,12 @@ pub(super) async fn cancel_maker_orders_with_retry(
     attempts: u32,
     output_format: OutputFormat,
     mut ws: Option<&mut WsCleanupContext<'_>>,
-) -> Result<Vec<OrderResponse>> {
+) -> Result<()> {
     let mut last_err: Option<anyhow::Error> = None;
-    let mut leftover_responses: Vec<OrderResponse> = Vec::new();
     for attempt in 1..=attempts {
         let result = cleanup_once(client, symbol, ws.as_deref_mut()).await;
         match result {
-            Ok(CleanupOutcome {
-                verification: CleanupVerification::Complete(snapshots),
-                leftover_responses: leftover,
-            }) => {
-                leftover_responses.extend(leftover);
+            Ok(CleanupVerification::Complete(snapshots)) => {
                 if output_format == OutputFormat::Json {
                     println!(
                         "{}",
@@ -407,17 +407,12 @@ pub(super) async fn cancel_maker_orders_with_retry(
                 } else {
                     println!("✅ All maker-owned {} orders cancelled", symbol);
                 }
-                return Ok(leftover_responses);
+                return Ok(());
             }
-            Ok(CleanupOutcome {
-                verification:
-                    CleanupVerification::Residual {
-                        snapshots,
-                        residual_ids,
-                    },
-                leftover_responses: leftover,
+            Ok(CleanupVerification::Residual {
+                snapshots,
+                residual_ids,
             }) => {
-                leftover_responses.extend(leftover);
                 let message = format!(
                     "RESIDUAL MAKER ORDERS on {} after cancellation: [{}]",
                     symbol,
@@ -488,6 +483,63 @@ pub(super) async fn cancel_maker_orders_with_retry(
     }))
 }
 
+/// Request IDs minted by WS cleanup cancels, remembered so the runtime's
+/// order-response drains drop their acks instead of failing closed on a request
+/// ID the projection never registered.
+///
+/// Every ID the cleanup sends is remembered, not only the ones whose ack timed
+/// out. The venue answers some commands with a gateway `accepted` frame and
+/// *then* the terminal `success` frame (see `OrderResponse::is_success`), and
+/// the drain releases an ID as soon as its *first* frame arrives — so an ID the
+/// drain already resolved can still produce another frame afterwards. Cleanup
+/// IDs are never in the projection's request registry, so an untombstoned
+/// second frame classifies as `Orphan`, fails closed, and stops the maker on a
+/// request it minted itself.
+///
+/// Lookup is deliberately non-consuming, for the same reason: both frames of a
+/// two-frame ack can land after the drain window closed. Bounded FIFO eviction,
+/// not consumption, is what keeps the set from growing without limit. Request
+/// IDs are v4 UUIDs, so a retained tombstone cannot mask an unrelated unknown
+/// request ID.
+#[derive(Debug, Default)]
+pub(super) struct CleanupTombstones {
+    ids: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl CleanupTombstones {
+    pub(super) fn remember(&mut self, request_id: String) {
+        if !self.ids.insert(request_id.clone()) {
+            return;
+        }
+        self.order.push_back(request_id);
+        while self.order.len() > MAKER_CLEANUP_TOMBSTONE_CAPACITY {
+            if let Some(evicted) = self.order.pop_front() {
+                self.ids.remove(&evicted);
+            }
+        }
+    }
+
+    /// Whether this response belongs to a cancel the cleanup minted, in which
+    /// case cleanup has already established the venue state through
+    /// `/api/query_order` and the frame carries no new information.
+    pub(super) fn covers(&self, request_id: &str) -> bool {
+        self.ids.contains(request_id)
+    }
+
+    /// A replaced order-response stream never delivers acks for requests issued
+    /// on the old one.
+    pub(super) fn clear(&mut self) {
+        self.ids.clear();
+        self.order.clear();
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.ids.len()
+    }
+}
+
 /// The live halves of the order-response stream a cleanup may use as its
 /// primary cancellation verdict. Built by the caller from the live session;
 /// absent whenever the stream is dead, being replaced, or never existed
@@ -496,15 +548,17 @@ pub(super) struct WsCleanupContext<'a> {
     pub(super) commands: &'a OrderCommandSender,
     pub(super) responses: &'a mut tokio::sync::mpsc::Receiver<OrderResponse>,
     pub(super) health: &'a OrderResponseHealth,
-    /// Tombstones for cleanup-minted request IDs whose ack never arrived
-    /// inside the drain window. The venue sends exactly one response per
-    /// request ID (a second response would already fail closed in the normal
-    /// cycle path), so only a timed-out ack can still surface later — and when
-    /// it does, cleanup has already established the venue state through
-    /// `/api/query_order`, making the late frame informational only. The
-    /// runtime response drain drops those frames via this set instead of
-    /// failing closed on an unknown request ID.
-    pub(super) minted: &'a mut HashSet<String>,
+    /// Tombstones for every cleanup-minted cancel request ID; see
+    /// [`CleanupTombstones`].
+    pub(super) minted: &'a mut CleanupTombstones,
+    /// Order-response frames the cleanup drain captured for requests it did not
+    /// mint (acks for pre-freeze cycle requests). The drain appends to the
+    /// caller's buffer as it goes, so a frame stays recoverable even when the
+    /// attempt that captured it later fails — the drain has already taken it
+    /// off the channel, and dropping it would strand its pending request
+    /// forever. The caller must re-apply these through the canonical response
+    /// path.
+    pub(super) leftover: &'a mut Vec<OrderResponse>,
 }
 
 /// Per-order status observed during cleanup verification.
@@ -534,16 +588,6 @@ enum CleanupVerification {
     },
 }
 
-/// What one cleanup pass decided, plus any order-response frames it captured
-/// that belong to requests the cleanup did not mint. The caller must re-apply
-/// the leftovers through the canonical response path so the pending-request
-/// lifecycle stays correlated across the cleanup.
-#[derive(Debug)]
-struct CleanupOutcome {
-    verification: CleanupVerification,
-    leftover_responses: Vec<OrderResponse>,
-}
-
 /// Result of draining the order-response stream for cleanup-minted cancel acks.
 #[derive(Debug)]
 struct WsCancelDrain {
@@ -555,8 +599,6 @@ struct WsCancelDrain {
     /// Responses for request IDs the cleanup did not mint (pre-freeze cycle
     /// requests); ownership returns to the caller.
     leftover: Vec<OrderResponse>,
-    /// Cleanup-minted request IDs whose ack never arrived inside the window.
-    timed_out_request_ids: Vec<String>,
     /// The response channel closed mid-drain; the caller marks it unhealthy.
     channel_closed: bool,
 }
@@ -604,21 +646,16 @@ async fn drain_ws_cancel_responses(
         }
     }
     // Acks that never arrived inside the window degrade to the REST verdict.
+    // Their request IDs need no special handling here: `ws_cancel_orders`
+    // tombstones every ID it puts on the wire, timed out or not.
     // Sort every outgoing order list for deterministic telemetry and tests.
-    let mut timed_out: Vec<(String, (String, i64))> = pending.drain().collect();
-    timed_out.sort_by_key(|(_, (_, id))| *id);
-    let timed_out_request_ids = timed_out
-        .iter()
-        .map(|(request_id, _)| request_id.clone())
-        .collect();
-    unresolved.extend(timed_out.into_iter().map(|(_, order)| order));
+    unresolved.extend(pending.drain().map(|(_, order)| order));
     confirmed.sort_by_key(|(_, id)| *id);
     unresolved.sort_by_key(|(_, id)| *id);
     WsCancelDrain {
         confirmed,
         unresolved,
         leftover,
-        timed_out_request_ids,
         channel_closed,
     }
 }
@@ -626,6 +663,10 @@ async fn drain_ws_cancel_responses(
 /// Cancel every listed order over the order-response stream and drain the
 /// correlated acks. Only a `success` ack counts as venue-confirmed; anything
 /// else defers to the REST fallback in the caller.
+///
+/// Captured foreign frames are appended to `ctx.leftover` rather than returned,
+/// so they are already safe in the caller's buffer before this returns; the
+/// `leftover` field of the returned drain is therefore empty.
 async fn ws_cancel_orders(
     ctx: &mut WsCleanupContext<'_>,
     orders: Vec<(String, i64)>,
@@ -655,6 +696,12 @@ async fn ws_cancel_orders(
             unsent.push((id_str, id_i64));
             continue;
         }
+        // Tombstoned as soon as it is on the wire, not just if its ack times
+        // out: the drain releases an ID on its first frame, so a second frame
+        // (gateway `accepted` then terminal `success`) or a frame arriving after
+        // the window would otherwise reach the runtime drain as an unknown
+        // request ID and fail the run closed.
+        ctx.minted.remember(request_id.clone());
         pending.insert(request_id, (id_str, id_i64));
     }
     let mut drain = drain_ws_cancel_responses(
@@ -667,9 +714,9 @@ async fn ws_cancel_orders(
         ctx.health
             .mark_unhealthy("order-response channel closed during cleanup".to_string());
     }
-    ctx.minted
-        .extend(drain.timed_out_request_ids.iter().cloned());
-    drain.timed_out_request_ids.clear();
+    // Handed over immediately so the frames outlive any later failure in this
+    // cleanup attempt.
+    ctx.leftover.append(&mut drain.leftover);
     drain.unresolved.extend(unsent);
     drain.unresolved.sort_by_key(|(_, id)| *id);
     drain
@@ -696,11 +743,14 @@ async fn query_order_status(client: &StandXClient, id: &str) -> Result<OrderStat
     })
 }
 
+/// Any order-response frame this pass captures for a request it did not mint is
+/// appended to `ws.leftover` before it can be lost, so an early `?` return below
+/// never strands a pre-freeze ack the drain already consumed.
 async fn cleanup_once(
     client: &StandXClient,
     symbol: &str,
     ws: Option<&mut WsCleanupContext<'_>>,
-) -> Result<CleanupOutcome> {
+) -> Result<CleanupVerification> {
     let orders = client.get_open_orders(Some(symbol)).await?;
     let maker_orders = orders
         .into_iter()
@@ -716,14 +766,10 @@ async fn cleanup_once(
         })
         .collect::<Result<Vec<_>>>()?;
     if maker_orders.is_empty() {
-        return Ok(CleanupOutcome {
-            verification: CleanupVerification::Complete(Vec::new()),
-            leftover_responses: Vec::new(),
-        });
+        return Ok(CleanupVerification::Complete(Vec::new()));
     }
 
     let mut snapshots: Vec<OrderStatusSnapshot> = Vec::with_capacity(maker_orders.len());
-    let mut leftover_responses: Vec<OrderResponse> = Vec::new();
     let mut unresolved: Vec<(String, i64)> = maker_orders.clone();
 
     // Primary verdict: a WS cancel acknowledged with `success` is
@@ -731,7 +777,6 @@ async fn cleanup_once(
     if let Some(ctx) = ws {
         if ctx.health.is_healthy() {
             let drain = ws_cancel_orders(ctx, unresolved).await;
-            leftover_responses = drain.leftover;
             unresolved = drain.unresolved;
             for (_, id_i64) in drain.confirmed {
                 snapshots.push(OrderStatusSnapshot {
@@ -768,12 +813,9 @@ async fn cleanup_once(
     }
 
     if !residual_ids.is_empty() {
-        return Ok(CleanupOutcome {
-            verification: CleanupVerification::Residual {
-                snapshots,
-                residual_ids,
-            },
-            leftover_responses,
+        return Ok(CleanupVerification::Residual {
+            snapshots,
+            residual_ids,
         });
     }
 
@@ -797,17 +839,11 @@ async fn cleanup_once(
         .collect::<Vec<_>>();
 
     if late_ids.is_empty() {
-        Ok(CleanupOutcome {
-            verification: CleanupVerification::Complete(snapshots),
-            leftover_responses,
-        })
+        Ok(CleanupVerification::Complete(snapshots))
     } else {
-        Ok(CleanupOutcome {
-            verification: CleanupVerification::Residual {
-                snapshots,
-                residual_ids: late_ids,
-            },
-            leftover_responses,
+        Ok(CleanupVerification::Residual {
+            snapshots,
+            residual_ids: late_ids,
         })
     }
 }
@@ -1117,7 +1153,7 @@ pub(super) async fn reconnect_order_response(
             match cancel_maker_orders_with_retry(&cleanup_client, symbol, 3, output_format, None)
                 .await
             {
-                Ok(_) => true,
+                Ok(()) => true,
                 Err(error) => {
                     return Err(anyhow::Error::new(ReconnectCleanupFailed {
                         reason: format!("retry cleanup failed: {error}"),
@@ -1361,13 +1397,12 @@ mod tests {
             vec![("2".to_string(), 2), ("3".to_string(), 3)]
         );
         assert!(drain.leftover.is_empty());
-        assert!(drain.timed_out_request_ids.is_empty());
         assert!(!drain.channel_closed);
     }
 
     /// Invariant: an ack that never arrives inside the window degrades to the
-    /// REST verdict, and its request ID is reported for tombstoning so the late
-    /// frame cannot trip the unknown-request-ID fail-closed check.
+    /// REST verdict. Its request ID needs no separate reporting — every ID the
+    /// cleanup put on the wire is already tombstoned by `ws_cancel_orders`.
     #[tokio::test]
     async fn ws_drain_times_out_unanswered_cancels() {
         let (_tx, mut rx) = tokio::sync::mpsc::channel::<OrderResponse>(8);
@@ -1381,8 +1416,56 @@ mod tests {
 
         assert!(drain.confirmed.is_empty());
         assert_eq!(drain.unresolved, vec![("7".to_string(), 7)]);
-        assert_eq!(drain.timed_out_request_ids, vec!["req-late".to_string()]);
         assert!(!drain.channel_closed);
+    }
+
+    /// Invariant: a tombstoned request ID stays remembered across repeated
+    /// lookups. The venue can answer one `order:cancel` with a gateway
+    /// `accepted` frame and then a terminal `success` frame, and both can land
+    /// after the drain window — a one-shot tombstone would absorb the first and
+    /// fail closed on the second.
+    #[test]
+    fn cleanup_tombstones_survive_repeated_lookups() {
+        let mut tombstones = CleanupTombstones::default();
+        tombstones.remember("req-a".to_string());
+
+        assert!(tombstones.covers("req-a"));
+        assert!(tombstones.covers("req-a"));
+        assert!(!tombstones.covers("req-b"));
+
+        tombstones.clear();
+        assert!(!tombstones.covers("req-a"));
+        assert_eq!(tombstones.len(), 0);
+    }
+
+    /// Invariant: remembering every minted ID cannot grow without bound. Older
+    /// IDs are evicted in FIFO order once the capacity is reached; the venue
+    /// cannot still be holding a response for them.
+    #[test]
+    fn cleanup_tombstones_evict_oldest_beyond_capacity() {
+        let mut tombstones = CleanupTombstones::default();
+        for index in 0..MAKER_CLEANUP_TOMBSTONE_CAPACITY + 10 {
+            tombstones.remember(format!("req-{index}"));
+        }
+
+        assert_eq!(tombstones.len(), MAKER_CLEANUP_TOMBSTONE_CAPACITY);
+        // The first 10 aged out; the most recent capacity-worth are retained.
+        assert!(!tombstones.covers("req-0"));
+        assert!(!tombstones.covers("req-9"));
+        assert!(tombstones.covers("req-10"));
+        assert!(tombstones.covers(&format!("req-{}", MAKER_CLEANUP_TOMBSTONE_CAPACITY + 9)));
+    }
+
+    /// Invariant: remembering the same ID twice must not consume two capacity
+    /// slots, or a repeated cleanup could evict live tombstones early.
+    #[test]
+    fn cleanup_tombstones_ignore_duplicate_ids() {
+        let mut tombstones = CleanupTombstones::default();
+        tombstones.remember("req-a".to_string());
+        tombstones.remember("req-a".to_string());
+
+        assert_eq!(tombstones.len(), 1);
+        assert!(tombstones.covers("req-a"));
     }
 
     /// Invariant: responses the cleanup did not mint (pre-freeze cycle
