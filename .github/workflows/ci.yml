@@ -12,6 +12,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # CI does not need debuginfo in test executables; this keeps the cached
+  # target directory materially smaller without changing local profiles.
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 permissions:
   contents: write
@@ -35,17 +38,14 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build
-        run: cargo build --verbose
-
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --workspace --locked
 
       - name: Check formatting
-        run: cargo fmt -- --check
+        run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   # 多平台构建矩阵
   build-matrix:
@@ -89,14 +89,14 @@ jobs:
 
       - name: Build (native)
         if: '!matrix.cross'
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Build (cross)
         if: matrix.cross
         env:
           RUSTFLAGS: "-C linker=aarch64-linux-gnu-gcc"
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --release --locked --target ${{ matrix.target }}
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
