@@ -91,6 +91,13 @@ impl StandXEndpoints {
     pub fn order_response_url(&self) -> &str {
         &self.order_response_url
     }
+
+    /// Whether every derived transport (REST, account-stream, order-response) is
+    /// TLS-protected. `new` ties the WS/WSS scheme to the REST scheme, so the
+    /// base URL alone determines this for the whole set.
+    pub fn is_secure(&self) -> bool {
+        self.base_url.starts_with("https://")
+    }
 }
 
 fn is_loopback(url: &Url) -> bool {
@@ -138,6 +145,7 @@ mod tests {
     fn permits_plain_http_only_for_loopback_testing() {
         let ipv4 = StandXEndpoints::new("http://127.0.0.1:8080").unwrap();
         assert_eq!(ipv4.stream_url(), "ws://127.0.0.1:8080/ws-stream/v1");
+        assert!(!ipv4.is_secure());
 
         let ipv6 = StandXEndpoints::new("http://[::1]:8080/").unwrap();
         assert_eq!(ipv6.order_response_url(), "ws://[::1]:8080/ws-api/v1");
@@ -146,6 +154,17 @@ mod tests {
         assert_eq!(localhost.base_url(), "http://localhost:8080");
 
         assert!(StandXEndpoints::new("http://example.com").is_err());
+    }
+
+    #[test]
+    fn is_secure_reflects_the_rest_scheme() {
+        assert!(StandXEndpoints::default().is_secure());
+        assert!(StandXEndpoints::new("https://perps.example.com")
+            .unwrap()
+            .is_secure());
+        assert!(!StandXEndpoints::new("http://127.0.0.1:8080")
+            .unwrap()
+            .is_secure());
     }
 
     #[test]
