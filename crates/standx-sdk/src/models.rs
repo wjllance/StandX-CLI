@@ -1310,4 +1310,30 @@ mod tests {
         assert_eq!(rate.symbol, "BTC-USD");
         assert_eq!(rate.funding_rate, "0.00001250");
     }
+
+    #[test]
+    fn symbol_info_rejects_missing_required_fields() {
+        let result = serde_json::from_str::<SymbolInfo>(r#"{"symbol":"BTC-USD"}"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn funding_rate_accepts_numeric_decimal_fields() {
+        let json = r#"{
+            "id": 12346,
+            "symbol": "ETH-USD",
+            "funding_rate": 0.00001000,
+            "mark_price": 3456.78,
+            "index_price": 3456.12,
+            "premium": 0.00000050,
+            "time": "2024-01-01T08:00:00Z",
+            "created_at": "2024-01-01T07:59:59Z",
+            "updated_at": "2024-01-01T08:00:00Z"
+        }"#;
+
+        let rate: FundingRate = serde_json::from_str(json).unwrap();
+        assert_eq!(rate.funding_rate, "0.00001");
+        assert_eq!(rate.mark_price, "3456.78");
+        assert_eq!(rate.premium.parse::<f64>().unwrap(), 0.0000005);
+    }
 }
