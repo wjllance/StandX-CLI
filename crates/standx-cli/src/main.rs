@@ -250,7 +250,7 @@ async fn execute_command(
             commands::handle_account(command, output).await?;
         }
         Commands::Order { command } => {
-            commands::handle_order(command).await?;
+            commands::handle_order(command, output, verbose).await?;
         }
         Commands::Trade { command } => {
             commands::handle_trade(command, output).await?;

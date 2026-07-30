@@ -152,7 +152,10 @@ stopped being trustworthy.
 WS command channel instead of REST, for latency-sensitive callers. Commands can
 be `prepare`d to obtain the `request_id` before sending, so an in-flight order
 is still identifiable if the response never arrives. `OrderResponseHealth`
-reports session liveness.
+reports session liveness. Opt-in
+`OrderResponseStream::new(session_id)?.with_verbose(true)` diagnostics print
+only raw post-authentication inbound responses to stderr; signed outbound
+commands and authentication payloads are never logged.
 
 ### `models` and `error`
 

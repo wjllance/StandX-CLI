@@ -257,6 +257,10 @@ standx order create BTC-USD buy market --qty 0.1
 # Limit order
 standx order create BTC-USD buy limit --qty 0.1 --price 64000
 
+# Authenticated WebSocket order with correlated response
+standx --output json --verbose order create BTC-USD buy limit \
+  --qty 0.1 --price 64000 --transport ws
+
 # With stop loss and take profit
 standx order create BTC-USD buy limit --qty 0.1 --price 64000 \
   --sl-price 62000 --tp-price 68000
@@ -265,6 +269,13 @@ standx order create BTC-USD buy limit --qty 0.1 --price 64000 \
 standx order cancel BTC-USD --order-id ord_xxx
 standx order cancel-all BTC-USD
 ```
+
+`order create` and single-order `order cancel` accept
+`--transport <http|ws>` (default `http`) and `--timeout-secs` (default `10`,
+range `1..=30`). WebSocket mode returns the correlated
+`request_id`/`response_code`/`response_message`; `--verbose` writes the raw
+post-authentication inbound response to stderr. A timeout is an unknown
+submission state and never triggers an automatic REST retry.
 
 ### Dashboard
 
