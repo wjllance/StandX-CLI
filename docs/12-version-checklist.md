@@ -21,9 +21,8 @@
 
 | 文件 | 位置 | 更新内容 |
 |------|------|----------|
-| `CHANGELOG.md` | 项目根目录 | 添加新版本 section，记录所有变更 |
+| `CHANGELOG.md` | 项目根目录 | 添加新版本 section，记录所有变更——这是发布说明唯一的来源，不再单独维护 `RELEASE_NOTES_vx.y.z.md`（2026-07-30 起停用该惯例，历史文件已删除并回填进 CHANGELOG） |
 | `README.md` | 项目根目录 | 如有新功能，更新命令参考部分 |
-| `RELEASE_NOTES_vx.y.z.md` | 项目根目录 | 创建新的发布说明文件 |
 
 ### Skill 文件 (必须更新)
 
@@ -57,9 +56,8 @@ https://github.com/wjllance/standx-cli/releases/download/vx.y.z/standx-vx.y.z-aa
 
 - [ ] 更新 `Cargo.toml` 版本号
 - [ ] 更新 `version.json` 版本号
-- [ ] 更新 `CHANGELOG.md`
+- [ ] 更新 `CHANGELOG.md`（唯一的发布说明来源）
 - [ ] 更新 `README.md` (如有新功能)
-- [ ] 创建 `RELEASE_NOTES_vx.y.z.md`
 - [ ] 更新 `SKILL.md` 版本号和下载 URL
 
 ### 3. 验证阶段
@@ -72,11 +70,13 @@ https://github.com/wjllance/standx-cli/releases/download/vx.y.z/standx-vx.y.z-aa
 ### 4. 发布阶段
 
 - [ ] 合并 PR 到 main 分支，等 main 的 CI 变绿
-- [ ] **发布 GitHub Release**（不是只推 tag，见下面的触发矩阵）：
+- [ ] **发布 GitHub Release**（不是只推 tag，见下面的触发矩阵）。发布说明从
+  `CHANGELOG.md` 里对应版本的 section 截取（不再维护单独的
+  `RELEASE_NOTES_vx.y.z.md`，2026-07-30 起停用）：
 
   ```bash
-  gh release create vX.Y.Z --target <全长 SHA> --title vX.Y.Z \
-    --notes-file RELEASE_NOTES_vX.Y.Z.md
+  awk '/^## \[X\.Y\.Z\]/{flag=1; next} /^## \[/{flag=0} flag' CHANGELOG.md \
+    | gh release create vX.Y.Z --target <全长 SHA> --title vX.Y.Z --notes-file -
   ```
 
   `--target` 只接受**全长 SHA 或分支名**，短 SHA 会报
@@ -100,8 +100,9 @@ https://github.com/wjllance/standx-cli/releases/download/vx.y.z/standx-vx.y.z-aa
 | 推 `vX.Y.Z`（**不带**连字符） | 仅 `check` + `build-matrix` | **什么都不发布**——`auto-prerelease` 的条件是 `contains(github.ref, '-')` |
 | 发布 GitHub Release（无连字符 tag） | `release` → `update-homebrew` | 上传产物 + 更新 formula |
 
-`RELEASE_NOTES_<tag>.md` 的取用规则也不对称：`auto-prerelease` 会自动读它当正文，
-而 `release` job **不读**——正式版必须自己用 `--notes-file` 传。
+`auto-prerelease` 的正文来自 CHANGELOG 里去掉 `-rc.N` 后缀的对应 section（同一个
+`awk` 截取，见 ci.yml 的 "Read release notes" 步骤）；`release` job 不自动读
+任何文件——正式版必须自己用上面的 `--notes-file -` 传。
 
 ## ⚠️ 常见错误
 

@@ -25,7 +25,7 @@ We believe the future of trading is conversational. Your agent should trade as n
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Status** — v1.2.0. Market data, account, order, leverage/margin, streaming and
+**Status** — v1.3.0. Market data, account, order, leverage/margin, streaming and
 dashboard commands are stable and in daily use. The [Rust SDK](crates/standx-sdk)
 is usable but pre-1.0 (API may change). The [maker bot](docs/13-maker.md) is
 paper-mode by default and its live mode is env-gated; its real-money PnL is still
@@ -72,7 +72,7 @@ curl -sSL https://raw.githubusercontent.com/wjllance/standx-cli/main/install.sh 
 
 Optional environment variables:
 
-- `STANDX_VERSION` — install a specific tag instead of the latest release (e.g. `STANDX_VERSION=v1.2.0`).
+- `STANDX_VERSION` — install a specific tag instead of the latest release (e.g. `STANDX_VERSION=v1.3.0`).
 - `INSTALL_DIR` — install somewhere other than `/usr/local/bin`.
 
 #### Option 2: Homebrew (macOS)
@@ -389,14 +389,17 @@ Available on every command:
 | `--endpoint <BASE_URL>` | Route all StandX REST/WS traffic to a root HTTPS endpoint |
 | `--verbose` / `--quiet` | Log verbosity |
 
-Endpoint selection uses `--endpoint`, then `STANDX_BASE_URL`, then
-`config.base_url`, then `https://perps.standx.com`. A base such as
+Endpoint selection uses `--endpoint`, then `STANDX_BASE_URL`, then a confirmed
+`config.base_url` (set via `standx config set base_url <url>`; a `base_url`
+left over from before v1.3.0 is ignored until re-confirmed, since it used to be
+purely cosmetic), then `https://perps.standx.com`. A base such as
 `https://perps.example.com` derives REST from the base itself, public and
 account streams from `/ws-stream/v1`, and order responses from `/ws-api/v1`.
 Only root-level HTTPS URLs are accepted; plaintext HTTP is limited to local
-loopback testing. Invalid endpoint configuration fails closed and never falls
-back to production. Authentication and update-download services are not
-overridden.
+loopback testing, and even then every command except `market` refuses to send
+credentials over it unless `STANDX_ALLOW_INSECURE_ENDPOINT=1` is also set.
+Invalid endpoint configuration fails closed and never falls back to
+production. Authentication and update-download services are not overridden.
 
 ### Maker Bot (SIP-5A Community Maker Yield)
 

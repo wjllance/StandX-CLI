@@ -184,10 +184,22 @@ jobs:
       - name: Read release notes
         id: notes
         run: |
+          # No standalone RELEASE_NOTES_<tag>.md file (retired 2026-07-30):
+          # notes come from CHANGELOG.md's "## [X.Y.Z]" section for the base
+          # version, with any `-rc.N` / prerelease suffix stripped. Empty if
+          # that section doesn't exist yet (e.g. an rc tag cut ahead of the
+          # CHANGELOG entry).
           VERSION="${GITHUB_REF#refs/tags/}"
-          if [ -f "RELEASE_NOTES_${VERSION}.md" ]; then
+          BASE_VERSION="${VERSION#v}"
+          BASE_VERSION="${BASE_VERSION%%-*}"
+          NOTES="$(awk -v ver="$BASE_VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { flag=1; next }
+            /^## \[/ { flag=0 }
+            flag { print }
+          ' CHANGELOG.md)"
+          if [ -n "$NOTES" ]; then
             echo "body<<EOF" >> $GITHUB_OUTPUT
-            cat "RELEASE_NOTES_${VERSION}.md" >> $GITHUB_OUTPUT
+            echo "$NOTES" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
           fi
 
