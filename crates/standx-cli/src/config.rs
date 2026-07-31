@@ -39,6 +39,7 @@ pub fn ensure_authenticated_endpoint_is_secure(endpoints: &StandXEndpoints) -> R
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// API base URL
+    #[serde(default = "default_base_url")]
     pub base_url: String,
 
     /// Whether `base_url` was explicitly confirmed through `config set` (or a fresh
@@ -68,7 +69,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            base_url: "https://perps.standx.com".to_string(),
+            base_url: default_base_url(),
             base_url_confirmed: true,
             output_format: "table".to_string(),
             default_symbol: "BTC-USD".to_string(),
@@ -76,6 +77,10 @@ impl Default for Config {
             config_file_override: None,
         }
     }
+}
+
+fn default_base_url() -> String {
+    standx_sdk::endpoints::DEFAULT_BASE_URL.to_string()
 }
 
 impl Config {
@@ -586,6 +591,27 @@ mod tests {
 
         let loaded = Config::load_from_path(Some(temp_dir.path())).unwrap();
         assert_eq!(loaded.base_url, "https://backward.compat.com");
+    }
+
+    #[test]
+    fn legacy_config_without_base_url_uses_default_endpoint() {
+        let _env = EnvGuard::unset(BASE_URL_ENV);
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join("config.toml"),
+            "output_format = \"json\"\ndefault_symbol = \"BTC-USD\"\n",
+        )
+        .unwrap();
+
+        let loaded = Config::load_from_path(Some(temp_dir.path())).unwrap();
+        assert_eq!(loaded.base_url, standx_sdk::endpoints::DEFAULT_BASE_URL);
+        assert!(!loaded.base_url_confirmed);
+        assert_eq!(loaded.output_format, "json");
+        assert_eq!(loaded.default_symbol, "BTC-USD");
+
+        let resolved =
+            Config::resolve_endpoints(None, Some(temp_dir.path().to_str().unwrap())).unwrap();
+        assert_eq!(resolved, StandXEndpoints::default());
     }
 
     #[test]
