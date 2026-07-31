@@ -848,13 +848,20 @@ impl MakerAccountProjection {
                     })
                     .map(|entry| {
                         entry.ack_pending = false;
-                        entry.request.clone()
+                        (entry.request.clone(), entry.venue_observed)
                     });
                 let applied = request.is_some();
-                if let Some(request) = request {
+                if let Some((request, venue_observed)) = request {
+                    // The account stream may have adopted the order BEFORE this
+                    // ack (observe-first ordering). The entry settles and drops
+                    // below, so the tombstone must inherit `venue_observed` —
+                    // otherwise a later terminal rejection frame would be
+                    // misjudged as the ordinary async rejection of a place the
+                    // venue never had, while the adopted order sits in the book.
                     self.remember_completed_request(
                         request,
                         ProjectionRequestResolution::PlaceAccepted,
+                        venue_observed,
                     );
                 }
                 self.drop_settled();
@@ -879,6 +886,8 @@ impl MakerAccountProjection {
                     self.remember_completed_request(
                         request,
                         ProjectionRequestResolution::PlaceRejected,
+                        // The venue rejected the place: no exposure to record.
+                        false,
                     );
                 }
                 self.drop_settled();
@@ -925,6 +934,8 @@ impl MakerAccountProjection {
                 self.remember_completed_request(
                     entry.request,
                     ProjectionRequestResolution::CancelResolved,
+                    // The flag is only consulted for accepted places.
+                    false,
                 );
                 ProjectionOutcome {
                     applied: true,
@@ -1005,6 +1016,7 @@ impl MakerAccountProjection {
         &mut self,
         request: ProjectionPendingRequest,
         resolution: ProjectionRequestResolution,
+        venue_observed: bool,
     ) {
         if self
             .completed
@@ -1017,7 +1029,7 @@ impl MakerAccountProjection {
             request,
             resolution,
             generation: self.generation,
-            venue_observed: false,
+            venue_observed,
         });
         if self.completed.len() > MAX_COMPLETED_ORDER_REQUESTS {
             self.completed.pop_front();
@@ -1092,8 +1104,29 @@ impl MakerAccountProjection {
                     .is_some_and(|client_order_id| place.client_order_id == client_order_id),
                 ProjectionPendingRequest::Cancel(cancel) => cancel.order_id == observation.order_id,
             };
-            if matches {
-                entry.slot_open = false;
+            if !matches {
+                continue;
+            }
+            let slot_was_open = entry.slot_open;
+            entry.slot_open = false;
+            // A terminal observation is the account stream showing this order
+            // one last time — the venue provably HAD it. Record that on the
+            // entry and its tombstone so a terminal rejection frame arriving
+            // later is still judged a venue contradiction, not the ordinary
+            // async rejection of a place the venue never had. Only an open
+            // slot counts: cleanup closes slots precisely to declare that a
+            // later rejection no longer contradicts anything live.
+            if slot_was_open && entry.place().is_some() {
+                entry.venue_observed = true;
+                let request_id = entry.request_id().to_string();
+                if let Some(completed) = self
+                    .completed
+                    .iter_mut()
+                    .rev()
+                    .find(|completed| completed.request_id() == request_id)
+                {
+                    completed.venue_observed = true;
+                }
             }
         }
         self.drop_settled();
