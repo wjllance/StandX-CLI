@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Release preparation now uses `scripts/release.py` with `Cargo.toml` as the version source of truth, and stable releases run through a guarded manual workflow that verifies the requested tag against the source and built binary before publishing.
+
 ## [1.3.2] - 2026-07-31
 
 Patch release restoring compatibility with existing CLI configuration files.

@@ -9,6 +9,12 @@ on:
     branches: [main]
   release:
     types: [published]
+  workflow_call:
+    inputs:
+      version:
+        description: Stable X.Y.Z version to publish from main
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -25,6 +31,53 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Test release tooling
+        run: python3 -m unittest scripts/test_release.py
+
+      - name: Verify version metadata
+        run: python3 scripts/release.py verify
+
+      - name: Verify event tag matches the Cargo version
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || github.ref_name }}
+        run: python3 scripts/release.py verify --tag "$RELEASE_TAG"
+
+      - name: Guard requested stable release
+        if: inputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::version must be a stable X.Y.Z value, got '$RELEASE_VERSION'"
+            exit 1
+          fi
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::stable releases must run from main, got '$GITHUB_REF'"
+            exit 1
+          fi
+          python3 scripts/release.py verify --tag "v$RELEASE_VERSION"
+          git fetch --force --tags origin
+          if git show-ref --verify --quiet "refs/tags/v$RELEASE_VERSION"; then
+            echo "::error::tag v$RELEASE_VERSION already exists"
+            exit 1
+          fi
+          set +e
+          release_check=$(gh api \
+            "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" 2>&1)
+          release_status=$?
+          set -e
+          if [ "$release_status" -eq 0 ]; then
+            echo "::error::release v$RELEASE_VERSION already exists"
+            exit 1
+          fi
+          if ! printf '%s\n' "$release_check" | grep -q '(HTTP 404)'; then
+            echo "::error::could not verify that release v$RELEASE_VERSION is absent"
+            printf '%s\n' "$release_check"
+            exit 1
+          fi
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -103,6 +156,12 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cross build --release --locked --target ${{ matrix.target }}
 
+      - name: Verify native binary version
+        if: '!matrix.cross'
+        run: >-
+          python3 scripts/release.py verify
+          --binary target/${{ matrix.target }}/release/standx
+
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
@@ -113,9 +172,48 @@ jobs:
   release:
     needs: [check, build-matrix]
     runs-on: ubuntu-latest
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || inputs.version != ''
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: release-tag
+        env:
+          EVENT_RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$REQUESTED_VERSION" ]; then
+            echo "tag=v$REQUESTED_VERSION" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$EVENT_RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Recheck guarded stable release target
+        if: inputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
+        run: |
+          python3 scripts/release.py verify --tag "$RELEASE_TAG"
+          git fetch --force --tags origin
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            echo "::error::tag $RELEASE_TAG appeared while the release was building"
+            exit 1
+          fi
+          set +e
+          release_check=$(gh api \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" 2>&1)
+          release_status=$?
+          set -e
+          if [ "$release_status" -eq 0 ]; then
+            echo "::error::release $RELEASE_TAG appeared while the release was building"
+            exit 1
+          fi
+          if ! printf '%s\n' "$release_check" | grep -q '(HTTP 404)'; then
+            echo "::error::could not verify that release $RELEASE_TAG is absent"
+            printf '%s\n' "$release_check"
+            exit 1
+          fi
 
       - name: Download all binaries
         uses: actions/download-artifact@v4
@@ -123,16 +221,20 @@ jobs:
           path: ./binaries
 
       - name: Package binaries
+        env:
+          VERSION: ${{ steps.release-tag.outputs.tag }}
         run: |
-          VERSION="${{ github.event.release.tag_name }}"
           mkdir -p ./packages
 
           for target in aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
-            if [ -f "./binaries/standx-${target}/standx" ]; then
-              chmod +x "./binaries/standx-${target}/standx"
-              tar -czf "./packages/standx-${VERSION}-${target}.tar.gz" -C "./binaries/standx-${target}" standx
-              echo "Packaged: standx-${VERSION}-${target}.tar.gz"
+            binary="./binaries/standx-${target}/standx"
+            if [ ! -f "$binary" ]; then
+              echo "::error::missing required release binary $binary"
+              exit 1
             fi
+            chmod +x "$binary"
+            tar -czf "./packages/standx-${VERSION}-${target}.tar.gz" -C "./binaries/standx-${target}" standx
+            echo "Packaged: standx-${VERSION}-${target}.tar.gz"
           done
 
       - name: Generate checksums
@@ -145,9 +247,31 @@ jobs:
         run: |
           cp install.sh ./packages/
 
-      - name: Upload to release
-        uses: softprops/action-gh-release@v1
+      - name: Read guarded stable release notes
+        if: inputs.version != ''
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: python3 scripts/release.py notes --version "$RELEASE_VERSION" > release-notes.md
+
+      - name: Upload to existing release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
         with:
+          files: |
+            ./packages/*.tar.gz
+            ./packages/checksums.txt
+            ./packages/install.sh
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish guarded stable release
+        if: inputs.version != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release-tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ steps.release-tag.outputs.tag }}
+          body_path: release-notes.md
+          prerelease: false
           files: |
             ./packages/*.tar.gz
             ./packages/checksums.txt
@@ -173,11 +297,14 @@ jobs:
           mkdir -p ./packages
 
           for target in aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
-            if [ -f "./binaries/standx-${target}/standx" ]; then
-              chmod +x "./binaries/standx-${target}/standx"
-              tar -czf "./packages/standx-${VERSION}-${target}.tar.gz" -C "./binaries/standx-${target}" standx
-              echo "Packaged: standx-${VERSION}-${target}.tar.gz"
+            binary="./binaries/standx-${target}/standx"
+            if [ ! -f "$binary" ]; then
+              echo "::error::missing required prerelease binary $binary"
+              exit 1
             fi
+            chmod +x "$binary"
+            tar -czf "./packages/standx-${VERSION}-${target}.tar.gz" -C "./binaries/standx-${target}" standx
+            echo "Packaged: standx-${VERSION}-${target}.tar.gz"
           done
 
       - name: Generate checksums
@@ -209,7 +336,7 @@ jobs:
           fi
 
       - name: Create/Update Pre-release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
@@ -223,7 +350,9 @@ jobs:
   update-homebrew:
     needs: release
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' && !contains(github.event.release.tag_name, '-')
+    if: >-
+      inputs.version != '' ||
+      (github.event_name == 'release' && !contains(github.event.release.tag_name, '-'))
     steps:
       # Fail loudly on a missing secret. The previous
       # `HOMEBREW_TAP_TOKEN || GITHUB_TOKEN` fallback silently degraded to a
@@ -246,11 +375,13 @@ jobs:
           path: homebrew-tap
 
       - name: Download source tarball
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || format('v{0}', inputs.version) }}
         run: |
-          curl -L -o standx-cli.tar.gz "https://github.com/wjllance/standx-cli/archive/refs/tags/${{ github.event.release.tag_name }}.tar.gz"
+          curl -L -o standx-cli.tar.gz "https://github.com/wjllance/standx-cli/archive/refs/tags/${RELEASE_TAG}.tar.gz"
           SHA256=$(sha256sum standx-cli.tar.gz | cut -d' ' -f1)
           echo "SHA256=$SHA256" >> $GITHUB_ENV
-          echo "VERSION=${{ github.event.release.tag_name }}" >> $GITHUB_ENV
+          echo "VERSION=$RELEASE_TAG" >> $GITHUB_ENV
 
       - name: Update Homebrew formula
         run: |
