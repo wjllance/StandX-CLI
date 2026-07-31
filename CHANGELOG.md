@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-07-31
+
+Patch release for standalone installation and maker order-response reliability.
+Strategy parameters, quote formulas, PnL semantics, and live-gate defaults are
+unchanged.
+
+### Changed
+- **Standalone installs are self-updatable by default.** `install.sh` now installs to the user-owned `$HOME/.local/bin`, never invokes `sudo`, warns when another `standx` shadows the installed path, and stages the binary on the destination filesystem before an atomic replacement. System-managed macOS installs remain the responsibility of Homebrew.
+- Baseline-PnL Lark reports use the native Markdown/post format with clearer status, alert, and field presentation; alert exit-code behavior is unchanged.
+
+### Fixed
+- **Maker order-response handling now matches the venue's two-frame protocol.** A terminal cancel frame arriving after the gateway acceptance is idempotent instead of a false contradiction, including cleanup-minted request IDs. For placements, a terminal rejection is treated as an ordinary asynchronous rejection only when the account stream never showed the order; any open or terminal venue observation is retained across acknowledgement ordering and still produces a fail-closed `VenueContradiction`.
+- Standalone installation now fails closed when `checksums.txt` is unavailable, malformed, or does not match, verifies the downloaded binary's release version before replacement, and clears credentials from the version-probe environment.
+- Maker supervisor notifications now always use the Feishu `msg_type=text` envelope, preventing HTTP-200 parameter errors from silently dropping process failure and restart alerts.
+
 ## [1.3.0] - 2026-07-30
 
 Configurable endpoints (`--endpoint`, `STANDX_BASE_URL`, `config set base_url`) and
