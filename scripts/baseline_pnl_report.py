@@ -89,7 +89,7 @@ def fmt(v, digits=6):
 def build_report(stats, run_id: str, process_alive: bool, alerts) -> str:
     cycles = stats["cycles"]
     if not cycles:
-        return f"[standx] {run_id}: 日志中还没有 cycle_summary"
+        return f"**[standx]** {run_id}: 日志中还没有 cycle_summary"
     latest = cycles[-1]
     perf = latest.get("performance") or {}
 
@@ -113,18 +113,19 @@ def build_report(stats, run_id: str, process_alive: bool, alerts) -> str:
     )
 
     crit = len(stats["criticals"])
-    alive = "alive" if process_alive else "**DEAD**"
+    alive = "🟢 alive" if process_alive else "🔴 **DEAD**"
 
-    alert_lines = [f"🚨 ALERT: {a}" for a in alerts] if alerts else []
+    alert_lines = [f"🚨 **ALERT**: {a}" for a in alerts] if alerts else []
 
     lines = [
-        f"[standx] 基线 PnL 采集运行报告",
+        f"**[standx] 基线 PnL 采集运行报告**",
         *alert_lines,
-        f"run: {run_id}",
-        f"进程: {alive} | 最新 cycle: {latest.get('ts')} (#{latest.get('cycle')})",
-        f"仓位: {fmt(latest.get('position'))} | 会话 PnL: {fmt(latest.get('pnl'))}",
+        "---",
+        f"**run**: `{run_id}`",
+        f"**进程**: {alive} | **最新 cycle**: {latest.get('ts')} (#{latest.get('cycle')})",
+        f"**仓位**: {fmt(latest.get('position'))} | **会话 PnL**: {fmt(latest.get('pnl'))}",
         (
-            f"净额归因: gross {fmt(perf.get('gross_spread_quote'))}"
+            f"**净额归因**: gross {fmt(perf.get('gross_spread_quote'))}"
             f" | fee {fmt(perf.get('fee_quote'))}"
             f" | rebate {fmt(perf.get('rebate_quote'))}"
             f" | funding {fmt(perf.get('funding_quote'))}"
@@ -132,33 +133,33 @@ def build_report(stats, run_id: str, process_alive: bool, alerts) -> str:
             f", unattributed={perf.get('funding_unattributed')})"
         ),
         (
-            f"net_pnl_complete={perf.get('net_pnl_complete')}"
-            f" | costs_unavailable={perf.get('execution_costs_unavailable')}"
+            f"**net_pnl_complete**: {perf.get('net_pnl_complete')}"
+            f" | **costs_unavailable**: {perf.get('execution_costs_unavailable')}"
         ),
         (
-            f"markout bps: 1s {fmt(perf.get('markout_1s_bps'), 2)}"
+            f"**markout bps**: 1s {fmt(perf.get('markout_1s_bps'), 2)}"
             f" / 5s {fmt(perf.get('markout_5s_bps'), 2)}"
             f" / 30s {fmt(perf.get('markout_30s_bps'), 2)}"
         ),
         (
-            f"uptime: {fmt(perf.get('time_weighted_uptime_pct'), 1)}%"
-            f" | fills_total: {stats['fills_total']}"
-            f" | 撤单: {cancel_str}"
+            f"**uptime**: {fmt(perf.get('time_weighted_uptime_pct'), 1)}%"
+            f" | **fills_total**: {stats['fills_total']}"
+            f" | **撤单**: {cancel_str}"
         ),
         (
-            f"guard 激活: {guard_on}/{n} cycles ({100.0 * guard_on / n:.1f}%)"
-            f" | halt: {halted}/{n} ({100.0 * halted / n:.1f}%)"
-            f" | 主动退出: {stats['exits_submitted']} (suppressed {stats['exit_suppressed']})"
+            f"**guard 激活**: {guard_on}/{n} cycles ({100.0 * guard_on / n:.1f}%)"
+            f" | **halt**: {halted}/{n} ({100.0 * halted / n:.1f}%)"
+            f" | **主动退出**: {stats['exits_submitted']} (suppressed {stats['exit_suppressed']})"
         ),
         (
-            f"standby: {len(stats['standby'])} 次, 单次 max {standby_max:.0f}s"
+            f"**standby**: {len(stats['standby'])} 次, 单次 max {standby_max:.0f}s"
             f", 累计 {standby_total:.0f}s"
         ),
-        f"critical 事件: {crit}" + (" ⚠️" if crit else ""),
+        f"**critical 事件**: {crit}" + (" ⚠️" if crit else ""),
     ]
     if crit:
         last = stats["criticals"][-1]
-        lines.append(f"最近 critical: {last.get('ts')} {str(last.get('message'))[:120]}")
+        lines.append(f"**最近 critical**: {last.get('ts')} {str(last.get('message'))[:120]}")
     return "\n".join(lines)
 
 
@@ -211,7 +212,7 @@ def send_lark(text: str, open_id: str) -> int:
             open_id,
             "--as",
             "bot",
-            "--text",
+            "--markdown",
             text,
         ],
         capture_output=True,
