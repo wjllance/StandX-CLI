@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-07-31
+
+Patch release restoring compatibility with existing CLI configuration files.
+Strategy parameters, quote formulas, PnL semantics, and live-gate defaults are
+unchanged.
+
+### Fixed
+- Config files that omit `base_url` now load successfully and use the production endpoint default. This fixes commands such as `standx d` after upgrading when the existing config contains only `output_format` and `default_symbol`.
+- The endpoint safety migration remains fail-closed: a legacy custom `base_url` without `base_url_confirmed` is still ignored until the user explicitly confirms it.
+
 ## [1.3.1] - 2026-07-31
 
 Patch release for standalone installation and maker order-response reliability.
