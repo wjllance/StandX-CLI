@@ -396,6 +396,12 @@ struct CompletedRequest {
     /// acknowledgement arriving against it belongs to a superseded epoch and
     /// must be reported as such rather than as an unknown ID.
     generation: u64,
+    /// The account stream showed this request's order live at the venue.
+    /// Tracked on the tombstone (not only the pending entry, which settles and
+    /// drops on adoption) so a terminal *rejection* frame arriving after the
+    /// ack resolved is still recognised as a venue contradiction rather than
+    /// the ordinary async rejection of a place the venue never had.
+    venue_observed: bool,
 }
 
 impl CompletedRequest {
@@ -700,8 +706,8 @@ impl MakerAccountProjection {
         // quote slot — is the authority on what the outcome was. An entry whose
         // slot is open is reported as such, but a second acknowledgement is
         // still judged against the recorded resolution: a rejection arriving for
-        // an accepted place contradicts it whether or not the venue has
-        // confirmed the order yet.
+        // an accepted place contradicts it when the account stream has already
+        // shown the order live (see the PlaceAccepted handling below).
         let slot_still_open = self
             .pending
             .iter()
@@ -748,14 +754,36 @@ impl MakerAccountProjection {
             // Judging it as a channel-integrity contradiction converted a
             // routine cancel/fill race into a spurious fail-closed freeze, so a
             // post-resolution cancel ack is idempotent regardless of its code.
-            // Place resolutions keep the strict check: an accepted-then-rejected
-            // place contradicts a possibly-live quote slot.
+            // Place resolutions keep the strict check — with one exception,
+            // handled next.
             ResponseCorrelation::LateKnown {
                 operation,
                 resolution,
                 resolved_in,
                 lifecycle,
             }
+        } else if resolution == ProjectionRequestResolution::PlaceAccepted
+            && !completed.venue_observed
+        {
+            // Same two-frame protocol, place side (observed live on 2026-07-31,
+            // run `baseline-pnl-20260730T163544Z`): the venue's gateway answers
+            // `order:new` with `accepted`, then the terminal frame rejects the
+            // ALO order (`"alo order rejected"`, would-cross) — a routine race
+            // for a maker. Because the account stream has NOT shown this order,
+            // the rejection cannot contradict anything: the order never existed
+            // at the venue. It is the ordinary async rejection, delivered as a
+            // second frame; the caller applies it as `PlaceRejected`, which
+            // frees the level. Only reachable for places — a resolved cancel's
+            // second frame is handled above.
+            ResponseCorrelation::Matched {
+                operation,
+                lifecycle: RequestLifecycle::AwaitingVenue,
+            }
+        } else if resolution == ProjectionRequestResolution::PlaceAccepted {
+            // The account stream DID show this order live before the terminal
+            // rejection arrived: the two channels genuinely disagree about
+            // whether the order exists right now.
+            ResponseCorrelation::VenueContradiction { operation }
         } else {
             ResponseCorrelation::Contradictory {
                 operation,
@@ -989,6 +1017,7 @@ impl MakerAccountProjection {
             request,
             resolution,
             generation: self.generation,
+            venue_observed: false,
         });
         if self.completed.len() > MAX_COMPLETED_ORDER_REQUESTS {
             self.completed.pop_front();
@@ -1173,25 +1202,41 @@ impl MakerAccountProjection {
         let request_id = self.pending[index].request_id().to_string();
         self.pending[index].slot_open = false;
         self.pending[index].venue_observed = true;
+        // The entry itself settles and drops below; the tombstone is the
+        // durable record that the venue showed this request's order.
+        if let Some(completed) = self
+            .completed
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.request_id() == request_id)
+        {
+            completed.venue_observed = true;
+        }
         self.drop_settled();
         Some((AdoptedSlot::from_place(&place), request_id))
     }
 
     fn completed_place_slot(
-        &self,
+        &mut self,
         observation: &OrderObservation,
     ) -> Option<(AdoptedSlot, String)> {
         let client_order_id = observation.client_order_id.as_deref()?;
-        self.completed.iter().rev().find_map(|entry| {
-            entry
+        self.completed.iter_mut().rev().find_map(|entry| {
+            let matches = entry
                 .accepted_place()
-                .filter(|place| place.client_order_id == client_order_id)
-                .map(|place| {
-                    (
-                        AdoptedSlot::from_place(place),
-                        entry.request_id().to_string(),
-                    )
-                })
+                .is_some_and(|place| place.client_order_id == client_order_id);
+            if !matches {
+                return None;
+            }
+            // This observation proves the venue has the tombstoned request's
+            // order live; record it on the tombstone so a later terminal
+            // rejection frame is judged a contradiction.
+            entry.venue_observed = true;
+            let place = entry.accepted_place().expect("matched above").clone();
+            Some((
+                AdoptedSlot::from_place(&place),
+                entry.request_id().to_string(),
+            ))
         })
     }
 

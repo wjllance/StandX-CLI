@@ -1,7 +1,5 @@
 use super::*;
-use standx_maker::{
-    ProjectionRequestResolution, RequestLifecycle, RequestOperation, ResponseCorrelation,
-};
+use standx_maker::{RequestLifecycle, RequestOperation, ResponseCorrelation};
 
 #[test]
 fn apply_order_response_keeps_accepted_placement() {
@@ -263,36 +261,62 @@ fn duplicate_cancel_ack_matches_completed_request_after_cleanup() {
 }
 
 #[test]
-fn contradictory_replay_for_completed_request_remains_fail_closed() {
+fn two_frame_place_rejection_without_venue_observation_is_async_rejection() {
     let mut projection = projection_with_pending(&["req-1"]);
     assert!(!correlate(&mut projection, Some("req-1"), 0).fails_closed());
 
-    // The tombstone records PlaceAccepted; a rejection for the same request
-    // cannot also be true. This is a contradiction, not an unknown ID, and the
-    // verdict now says so.
+    // The tombstone records PlaceAccepted and the account stream has NOT shown
+    // the order: under the venue's two-frame protocol (gateway `accepted`, then
+    // terminal `"alo order rejected"` — observed live 2026-07-31, run
+    // `baseline-pnl-20260730T163544Z`) this second frame is the ordinary async
+    // rejection, not a channel contradiction.
     let verdict = correlate(&mut projection, Some("req-1"), 400);
-    assert!(verdict.fails_closed());
-    assert_eq!(verdict.label(), "contradictory");
+    assert!(!verdict.fails_closed());
+    assert_eq!(verdict.label(), "matched");
     assert_eq!(
         verdict,
-        ResponseCorrelation::Contradictory {
+        ResponseCorrelation::Matched {
             operation: RequestOperation::Place,
-            resolution: ProjectionRequestResolution::PlaceAccepted,
-            resolved_in: 1,
-            // The accepted place is still awaiting its account-order
-            // observation, which is exactly when a stray rejection is most
-            // dangerous: the slot is open and the maker believes it is filled.
             lifecycle: RequestLifecycle::AwaitingVenue,
         }
     );
+    // The rejection is applied as the ordinary async rejection: the quote
+    // slot is freed and the request lifecycle is retired.
+    assert!(
+        projection.pending_places().is_empty(),
+        "the async rejection must free the level"
+    );
+    assert_eq!(projection.pending_request_count(), 0);
+}
+
+#[test]
+fn two_frame_place_rejection_after_venue_observation_remains_fail_closed() {
+    let mut projection = projection_with_pending(&["req-1"]);
+    assert!(!correlate(&mut projection, Some("req-1"), 0).fails_closed());
+    // The account stream shows the placed order live; the projection adopts it
+    // and retires the pending slot.
+    projection.apply(
+        1,
+        AccountProjectionEvent::OrderObserved(standx_maker::OrderObservation {
+            order_id: 42,
+            client_order_id: Some("sxmk-test-q00000001b0".to_string()),
+            side: OrderSide::Buy,
+            price: 100.0,
+            open_qty: 1.0,
+            terminal: false,
+        }),
+    );
+
+    // The terminal rejection now genuinely contradicts the venue-visible order.
+    let verdict = correlate(&mut projection, Some("req-1"), 400);
+    assert!(verdict.fails_closed());
+    assert_eq!(verdict.label(), "venue_contradiction");
     // The failure detail must let an operator reconstruct all of it.
     let detail = correlation_failure_detail(&verdict, Some("req-1"), projection.generation());
     for expected in [
-        "verdict=contradictory",
+        "verdict=venue_contradiction",
         "request_id=req-1",
         "operation=place",
-        "lifecycle=awaiting_venue",
-        "place_accepted",
     ] {
         assert!(
             detail.contains(expected),

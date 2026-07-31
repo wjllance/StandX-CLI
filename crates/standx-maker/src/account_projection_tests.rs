@@ -119,10 +119,22 @@ fn correlation_verdict_is_pinned_for_every_observation_ordering() {
             "late_known",
         ),
         (
-            "rejection contradicting an accepted place, slot still open",
+            // The venue's two-frame place ack (observed live 2026-07-31): the
+            // terminal ALO rejection arrives as a second frame; the account
+            // stream never showed the order, so it is the ordinary async
+            // rejection, applied as PlaceRejected by the caller.
+            "two-frame place ack: accepted then ALO rejection, venue never showed it",
             vec![Step::Submit, accepted],
             false,
-            "contradictory",
+            "matched",
+        ),
+        (
+            // Same second frame, but the account stream already showed the
+            // order live — the two channels genuinely disagree.
+            "two-frame place ack: terminal rejection after the venue showed it live",
+            vec![Step::Submit, accepted, resting],
+            false,
+            "venue_contradiction",
         ),
         (
             "acceptance contradicting a rejected place",

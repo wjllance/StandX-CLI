@@ -264,6 +264,45 @@ pub(super) fn apply_order_response(
 ) -> std::result::Result<maker::ResponseCorrelation, CancelRejection> {
     let request_id = response.request_id.as_deref();
     let correlation = projection.classify_response(request_id, response.accepted());
+    // The two-frame place ack: gateway `accepted` already resolved the first
+    // frame, and the terminal ALO rejection arrives as a second frame. With no
+    // account-stream observation the classification is Matched+AwaitingVenue:
+    // apply it as the ordinary async rejection, freeing the level.
+    if matches!(
+        correlation,
+        maker::ResponseCorrelation::Matched {
+            operation: maker::RequestOperation::Place,
+            lifecycle: maker::RequestLifecycle::AwaitingVenue,
+        }
+    ) {
+        let request_id = request_id.expect("a matched correlation carries a request ID");
+        let place = projection
+            .pending_places()
+            .into_iter()
+            .find(|place| place.request_id == request_id);
+        let generation = projection.generation();
+        projection.apply(
+            generation,
+            AccountProjectionEvent::PlaceRejected {
+                request_id: request_id.to_string(),
+            },
+        );
+        if let Some(place) = place {
+            output::log_maker_event(output::MakerLogEvent {
+                output_format,
+                symbol,
+                cycle,
+                action: "place_rejected_async",
+                side: place.side,
+                level: place.level,
+                price: place.price,
+                price_decimals,
+                detail: &response.message,
+                exit_kind: None,
+            });
+        }
+        return Ok(correlation);
+    }
     // Only a live pending request produces new projection state. Everything else
     // is either idempotent (a late duplicate) or refused by the caller's
     // fail-closed policy, and must not mutate the projection on the way out.
