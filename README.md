@@ -25,7 +25,7 @@ We believe the future of trading is conversational. Your agent should trade as n
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Status** — v1.3.0. Market data, account, order, leverage/margin, streaming and
+**Status** — v1.3.1. Market data, account, order, leverage/margin, streaming and
 dashboard commands are stable and in daily use. The [Rust SDK](crates/standx-sdk)
 is usable but pre-1.0 (API may change). The [maker bot](docs/13-maker.md) is
 paper-mode by default and its live mode is env-gated; its real-money PnL is still
@@ -72,7 +72,7 @@ curl -sSL https://raw.githubusercontent.com/wjllance/standx-cli/main/install.sh 
 
 Optional environment variables:
 
-- `STANDX_VERSION` — install a specific tag instead of the latest release (e.g. `STANDX_VERSION=v1.3.0`).
+- `STANDX_VERSION` — install a specific tag instead of the latest release (e.g. `STANDX_VERSION=v1.3.1`).
 - `INSTALL_DIR` — install somewhere other than the default `$HOME/.local/bin`.
 
 The standalone installer never elevates privileges. Its user-owned default keeps
