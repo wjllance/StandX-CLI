@@ -7,8 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.4] - 2026-07-31
+
+### Fixed
+- Forward-release corrected `v1.3.4` source and binaries after `v1.3.3` was accidentally published from the `v1.3.2` source commit and its assets reported `standx 1.3.2`.
+
 ### Changed
 - Release preparation now uses `scripts/release.py` with `Cargo.toml` as the version source of truth, and stable releases run through a guarded manual workflow that verifies the requested tag against the source and built binary before publishing.
+
+## [1.3.3] - 2026-07-31
+
+### Known Issues
+- The published tag points to commit `6c89d58`, whose Cargo version is `1.3.2`, and the release binaries report `standx 1.3.2`. The public tag is retained for auditability; use `v1.3.4` or later.
 
 ## [1.3.2] - 2026-07-31
 
