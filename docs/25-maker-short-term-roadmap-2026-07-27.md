@@ -91,13 +91,44 @@ B/C/D 等硬化项）未做。候选 2（基线 PnL 采集）仍是推荐的下�
 移动斜率 ≈ 1 且线性延伸到 ±2bps 桶，成交时点逆向选择系统性存在（买 -3.2 /
 卖 +3.65bps），反事实上限 λ=0.5 → +0.27（回收亏损 25~50%）。设计与预注册判据见
 [28-maker-external-skew-design.md](28-maker-external-skew-design.md)。
-**不占 live 时间片、窗口内不部署**；裁决与 A/B 排在基线 PnL 窗口收尾之后。
+**不占 live 时间片、窗口内不部署**；裁决与 A/B 排在一次**有效**基线采集 run 收尾
+之后（原"2026-07-31T08:17Z"的日历式表述已失效：三次 run 全部被截断）。
 microprice（盘口量失衡）降为第二优先，阻塞在 depth 观测字段（量从未落日志）。
+
+**2026-07-31 细化（设计已可上裁决桌）**：补完了四处——guard 激活期间的复合语义、
+band 预算红线（`spread + nonlinear.cap + external.cap ≤ band`，8+12+8=28≤30，
+故 `cap_bps=8` 是上限）、证据溯源（离线证据来自 run1 `819f0f0`，信号侧可平移、
+水位侧不可，故 **run1 不得充当 baseline 臂**）、以及验收判据的统计功效口径。
+功效那条原判据（"每臂 ≥250 笔 fill" + "markout@30s 改善 ≥2bps"）缺功效论证，
+已补：**σ 于 2026-07-31 实测 = 8.60bps**（两个 baseline-pnl run 池化 n=633、~44h，
+script 口径），代入单侧 α=0.05/power=80% 得 Δ=2bps 需 **229 笔/臂**——
+**原样本量在名义口径下刚好够用**（n=250 时 MDE=1.91bps、功效 83%），施工前按波动上限
+推的 σ=15~25 被实测否掉。**真正的约束是序列相关**（成交成簇、有效样本小于名义样本），
+窗口长度按它定而非按 σ 定。判据同时定稿了 markout 口径（script，不含 capture；与
+runner 口径差一个 capture，实测已对上：-8.09+2.91=-5.18 ≈ 遥测 -5.14）。
+序列相关也已实测（block bootstrap，44 个小时块）：**只有 mo30s 真扎堆**
+（deff 1.8/2.0/3.1 @ 1h/2h/4h 块，且 4h 未封顶，故 3.1 只是下界），capture / mo1s /
+mo5s / drift15s 基本不扎堆。据此定稿窗口：**硬下限 700 笔/臂，授权按 ~1000 笔
+（≈70h）申请**，且**最终置信区间用 block bootstrap（4h 块）在实测数据上算，不用
+假定 deff 反推**——预注册的是方法不是 deff 取值，估错只会落进 inconclusive 分支。
+自举块 4h 与编排的 12h 臂块整齐嵌套。
+**"Stage A 机制段 / Stage B 经济段"两段式已撤销**：中间量 AS 的样本需求与 markout
+同量级，先跑不省时间。改为单窗口跑到底、两指标分析时一起算，AS 降为**诊断量**
+（决定 rejected 之后是关闭方向还是转 microprice），不设硬阈值、不得用于晋级。
+**剩一个未知量**：AS 的实测 σ（口径是 `external_divergence_bps` 的**成交时刻条件
+分布**，不是场内 drift，也不是早前反推的全 cycle 无条件 σ≈2.5）——不占 live 时间片。
 
 ### 候选 3：挂账清理与质量债
 
 - `maker-recovery-dedup` 分支封存（见现状盘点，已确认可无损删除）；
-- Divergence B + C 实现（默认关、replay 等价）——若走候选 1，这两项直接并入 5-b；
+- ~~Divergence B + C 实现（默认关、replay 等价）~~ **已于 2026-07-28 复核后出清**（见现状
+  盘点）：C（熔断豁免）关闭——共享恢复熔断早已从代码移除，没有可豁免的对象；B（恢复迟滞）
+  与 D（tick 阈值）降级为观测项，立项触发条件已预注册（单次 standby >10min / 窗口内累计
+  >1% 运行时间 / 证明发生在"阈值上方悬停"），唯一证据来源是
+  [27 号手册](27-maker-baseline-pnl-collection-runbook.md)的每日 `divergence_standby` /
+  `transport_standby` 记录。**本候选名下不再有 Divergence 代码项**；命中触发条件后按 18 号
+  文档 v0 流程重新立项，B 与 D 合并评估（同属阈值形状问题）。
+  复核记录见 [maker-divergence-degradation-review-2026-07-28.md](evidence/maker-divergence-degradation-review-2026-07-28.md)。
 - 质量债 #259（dedup 残余）/ #261（CLI 一致性）/ #277（请求生命周期关联）。
 
 ### 候选 5（Phase 1+2 已完成，2026-07-30）：cleanup 残余判定硬化
