@@ -1,0 +1,23 @@
+name: Stable Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable X.Y.Z version already prepared and merged to main
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stable-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    uses: ./.github/workflows/ci.yml
+    with:
+      version: ${{ inputs.version }}
+    secrets: inherit

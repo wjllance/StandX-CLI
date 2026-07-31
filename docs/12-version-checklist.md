@@ -1,177 +1,87 @@
-# StandX CLI 版本更新检查清单
+# StandX CLI 发布流程
 
-本文档记录了发布新版本时需要更新的所有文件和注意事项。
+发布流程只保留一个版本真源，并把版本、标签和构建产物的一致性作为硬门禁。
 
-## 📋 版本更新检查清单
+## 版本真源
 
-### 核心版本文件 (必须更新)
+- `crates/standx-cli/Cargo.toml` 是 CLI 版本号的唯一真源。
+- `Cargo.lock` 是生成的依赖锁文件，由发布脚本同步。
+- `CHANGELOG.md` 的 `Unreleased` 段是下一版本发布说明的唯一真源。
+- README、OpenClaw skill 和其他说明文件不得复制当前版本号。
 
-| 文件 | 位置 | 更新内容 | 示例 |
-|------|------|----------|------|
-| `crates/standx-cli/Cargo.toml` | workspace 成员 | `version = "x.y.z"` | `version = "1.1.0"` |
-| `version.json` | 项目根目录 | `{"version": "x.y.z"}` | `{"version": "1.1.0"}` |
+## 准备发布 PR
 
-> **注意（2026-07-28 补）**：根 `Cargo.toml` 自 workspace 拆分后不再带 version，
-> 二进制版本来自 `crates/standx-cli/Cargo.toml`。而 **release 流水线的版本号取自 git
-> tag，不读这两个文件**——v1.0.0 就是在两者仍为 `0.8.0` 的情况下发布的，导致发出去的
-> 二进制自报 `standx 0.8.0`。所以打 tag 前必须先对齐这两个文件，`standx --version`
-> 才不会说谎。
-
-### 文档文件 (必须更新)
-
-| 文件 | 位置 | 更新内容 |
-|------|------|----------|
-| `CHANGELOG.md` | 项目根目录 | 添加新版本 section，记录所有变更——这是发布说明唯一的来源，不再单独维护 `RELEASE_NOTES_vx.y.z.md`（2026-07-30 起停用该惯例，历史文件已删除并回填进 CHANGELOG） |
-| `README.md` | 项目根目录 | 如有新功能，更新命令参考部分 |
-
-### Skill 文件 (必须更新)
-
-| 文件 | 位置 | 更新内容 |
-|------|------|----------|
-| `SKILL.md` | `openclaw/` 或 `skills/standx-cli/openclaw/` | 更新版本号、下载 URL、添加新功能文档 |
-
-### 下载 URL 更新 (必须更新)
-
-在 `SKILL.md` 中更新以下 URL：
-
-```yaml
-# Linux x86_64
-https://github.com/wjllance/standx-cli/releases/download/vx.y.z/standx-vx.y.z-x86_64-unknown-linux-gnu.tar.gz
-
-# macOS Apple Silicon  
-https://github.com/wjllance/standx-cli/releases/download/vx.y.z/standx-vx.y.z-aarch64-apple-darwin.tar.gz
-```
-
-## 🔄 版本更新流程
-
-### 1. 准备阶段
-
-- [ ] 确定新版本号 (遵循 Semantic Versioning)
-- [ ] 检查所有 PR 是否已合并
-- [ ] 运行完整测试: `cargo test`
-- [ ] 检查代码格式: `cargo fmt -- --check`
-- [ ] 运行静态检查: `cargo clippy -- -D warnings`
-
-### 2. 文件更新阶段
-
-- [ ] 更新 `Cargo.toml` 版本号
-- [ ] 更新 `version.json` 版本号
-- [ ] 更新 `CHANGELOG.md`（唯一的发布说明来源）
-- [ ] 更新 `README.md` (如有新功能)
-- [ ] 更新 `SKILL.md` 版本号和下载 URL
-
-### 3. 验证阶段
-
-- [ ] 构建 Release: `cargo build --release`
-- [ ] 验证版本: `./target/release/standx --version`
-- [ ] 检查所有文件已提交
-- [ ] 创建 PR 进行代码审查
-
-### 4. 发布阶段
-
-- [ ] 合并 PR 到 main 分支，等 main 的 CI 变绿
-- [ ] **发布 GitHub Release**（不是只推 tag，见下面的触发矩阵）。发布说明从
-  `CHANGELOG.md` 里对应版本的 section 截取（不再维护单独的
-  `RELEASE_NOTES_vx.y.z.md`，2026-07-30 起停用）：
-
-  ```bash
-  awk '/^## \[X\.Y\.Z\]/{flag=1; next} /^## \[/{flag=0} flag' CHANGELOG.md \
-    | gh release create vX.Y.Z --target <全长 SHA> --title vX.Y.Z --notes-file -
-  ```
-
-  `--target` 只接受**全长 SHA 或分支名**，短 SHA 会报
-  `Release.target_commitish is invalid`。
-
-- [ ] 确认 workflow 里 **`release` 与 `update-homebrew` 两个 job 都绿**
-- [ ] 复核 tap 里的 formula 真的指向新版本（job 绿不等于 sed 写对了）：
-
-  ```bash
-  curl -s https://raw.githubusercontent.com/wjllance/homebrew-standx-cli/main/Formula/standx-cli.rb | grep -E 'url|sha256'
-  curl -sL https://github.com/wjllance/standx-cli/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256
-  ```
-
-- [ ] 通知用户
-
-#### 触发矩阵（2026-07-28 补，v1.1.0/v1.2.0 两次发版踩到）
-
-| 动作 | 跑哪些 job | 结果 |
-|---|---|---|
-| 推 `vX.Y.Z-rc.N`（**带**连字符） | `auto-prerelease` | 自动建 prerelease + 上传产物，不动 homebrew |
-| 推 `vX.Y.Z`（**不带**连字符） | 仅 `check` + `build-matrix` | **什么都不发布**——`auto-prerelease` 的条件是 `contains(github.ref, '-')` |
-| 发布 GitHub Release（无连字符 tag） | `release` → `update-homebrew` | 上传产物 + 更新 formula |
-
-`auto-prerelease` 的正文来自 CHANGELOG 里去掉 `-rc.N` 后缀的对应 section（同一个
-`awk` 截取，见 ci.yml 的 "Read release notes" 步骤）；`release` job 不自动读
-任何文件——正式版必须自己用上面的 `--notes-file -` 传。
-
-## ⚠️ 常见错误
-
-### 错误 1: 忘记更新 Cargo.toml
-```
-# 错误
-version = "0.5.0"  # 旧版本
-
-# 正确
-version = "0.6.0"  # 新版本
-```
-
-### 错误 2: 下载 URL 版本不匹配
-```
-# 错误
-https://github.com/wjllance/standx-cli/releases/download/v0.5.0/...
-
-# 正确
-https://github.com/wjllance/standx-cli/releases/download/v0.6.0/...
-```
-
-### 错误 3: CHANGELOG 格式错误
-```markdown
-# 错误 - 缺少日期
-## [0.6.0]
-
-# 正确
-## [0.6.0] - 2026-03-01
-```
-
-## 📝 版本号规则
-
-### Semantic Versioning
-
-- **MAJOR**: 破坏性变更 (如 API 不兼容)
-- **MINOR**: 新功能 (向后兼容)
-- **PATCH**: Bug 修复 (向后兼容)
-
-### 示例
-
-| 版本 | 说明 |
-|------|------|
-| v0.5.0 → v0.6.0 | 新增 Dashboard 功能 (MINOR) |
-| v0.6.0 → v0.6.1 | 修复 Dashboard bug (PATCH) |
-| v0.6.0 → v1.0.0 | 破坏性 API 变更 (MAJOR) |
-
-## 🔍 验证命令
+日常变更应把面向用户的说明加入 `CHANGELOG.md` 的 `Unreleased` 段。发布时，
+从最新 `main` 创建独立分支并运行：
 
 ```bash
-# 检查所有版本号
-grep -r "version" --include="*.toml" --include="*.json" | grep -E "0\.[0-9]+\.[0-9]+"
-
-# 验证 Cargo.toml
-grep "^version" Cargo.toml
-
-# 验证 version.json
-cat version.json
-
-# 验证构建版本
-cargo build --release
-./target/release/standx --version
+python3 scripts/release.py prepare patch
 ```
 
-## 📚 相关文档
+也可使用 `minor` 或 `major`。脚本会：
 
-- [CHANGELOG.md](../CHANGELOG.md)
-- [Semantic Versioning](https://semver.org/)
+1. 读取 `crates/standx-cli/Cargo.toml` 的当前版本。
+2. 拒绝 `Cargo.lock` 与 manifest 已经漂移的状态。
+3. 拒绝空的 `Unreleased` 或重复的目标版本 section。
+4. 同步更新 manifest 和 lockfile。
+5. 把 `Unreleased` 内容提升为带日期的版本 section，再留下新的空
+   `Unreleased`。
 
----
+检查 diff 后按正常流程提交发布 PR。PR 的 CI 会运行发布脚本单测和版本一致性检查。
 
-*最后更新: 2026-07-28*  
-*版本: v1.1.0*
+## 发布稳定版
+
+发布 PR 合入并且 `main` CI 通过后，只从 `main` 触发：
+
+```bash
+gh workflow run release.yml --ref main -f version=X.Y.Z
+```
+
+不要提前在 GitHub UI 创建 tag 或 Release。`Stable Release` workflow 会在同一次
+运行中完成测试、三平台构建、打包、GitHub Release 和 Homebrew 更新，因此不依赖
+`GITHUB_TOKEN` 再触发第二条 workflow。
+
+发布门禁会拒绝：
+
+- 非 `main` ref。
+- 非稳定 `X.Y.Z` 输入。
+- 输入版本、Cargo version、`Cargo.lock` 或 changelog 不一致。
+- 已存在的 tag 或 Release，包括构建期间发生的竞争创建。
+- 原生构建产物的 `standx --version` 与 Cargo version 不一致。
+- workspace tests、fmt、Clippy、安装脚本测试或任一平台构建失败。
+
+发布说明由以下命令从 changelog 精确提取：
+
+```bash
+python3 scripts/release.py notes --version X.Y.Z
+```
+
+## 验证命令
+
+```bash
+python3 -m unittest scripts/test_release.py
+python3 scripts/release.py verify
+
+cargo test --workspace --locked --offline
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+sh -n install.sh
+sh scripts/test_install.sh
+```
+
+如需额外验证本机构建：
+
+```bash
+cargo build --release --locked
+python3 scripts/release.py verify --binary target/release/standx
+```
+
+## Pre-release
+
+现有 `vX.Y.Z-rc.N` tag 流程保持不变：tag 的基础版本必须与 Cargo version 一致，
+然后 `auto-prerelease` 构建并上传产物，不更新 Homebrew。
+
+## 错误发布恢复
+
+不要静默移动或覆盖已经公开的稳定 tag。若公开资产来自错误提交，保留审计记录并
+前向发布下一个 patch 版本。

@@ -145,7 +145,7 @@ macOS install, use Homebrew instead."
     target=$(get_target)
     say "Detected platform: ${YELLOW}$target${NC}"
 
-    # Resolve version (STANDX_VERSION overrides discovery, e.g. STANDX_VERSION=v1.2.0)
+    # Resolve version (STANDX_VERSION overrides discovery, e.g. STANDX_VERSION=vX.Y.Z)
     if [ -n "${STANDX_VERSION:-}" ]; then
         tag="$STANDX_VERSION"
         say "Requested version: ${YELLOW}$tag${NC}"

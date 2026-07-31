@@ -1,6 +1,6 @@
 ---
 name: standx-cli
-description: "Crypto trading CLI for StandX exchange v1.3.2. Use when users need to: (1) Query crypto market data (prices, order books, klines, funding rates), (2) Manage trading orders (create, cancel, view), (3) Check account balances, positions, and trade history, (4) Stream real-time market data via WebSocket, (5) Manage leverage and margin settings, (6) Monitor real-time dashboard, (7) View portfolio summary. Supports BTC, ETH, SOL, XRP and other trading pairs."
+description: "Crypto trading CLI for StandX exchange. Use when users need to: (1) Query crypto market data (prices, order books, klines, funding rates), (2) Manage trading orders (create, cancel, view), (3) Check account balances, positions, and trade history, (4) Stream real-time market data via WebSocket, (5) Manage leverage and margin settings, (6) Monitor real-time dashboard, (7) View portfolio summary. Supports BTC, ETH, SOL, XRP and other trading pairs."
 metadata:
   {
     "openclaw":
