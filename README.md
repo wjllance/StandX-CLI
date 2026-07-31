@@ -73,7 +73,12 @@ curl -sSL https://raw.githubusercontent.com/wjllance/standx-cli/main/install.sh 
 Optional environment variables:
 
 - `STANDX_VERSION` — install a specific tag instead of the latest release (e.g. `STANDX_VERSION=v1.3.0`).
-- `INSTALL_DIR` — install somewhere other than `/usr/local/bin`.
+- `INSTALL_DIR` — install somewhere other than the default `$HOME/.local/bin`.
+
+The standalone installer never elevates privileges. Its user-owned default keeps
+`standx update` working without `sudo`. If `$HOME/.local/bin` is not already in
+your `PATH`, the installer prints the exact export command to add it. For a
+system-managed macOS installation, use Homebrew instead.
 
 #### Option 2: Homebrew (macOS)
 

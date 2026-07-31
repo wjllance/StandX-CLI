@@ -6,7 +6,6 @@ set -e
 
 REPO="wjllance/standx-cli"
 BINARY_NAME="standx"
-INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 
 # Colors
 RED='\033[0;31m'
@@ -90,6 +89,17 @@ sha256_of() {
     fi
 }
 
+binary_version() {
+    binary_path=$1
+    output=$(env -i \
+        PATH="${PATH:-/usr/bin:/bin}" \
+        HOME="${HOME:-/}" \
+        LANG="${LANG:-C}" \
+        TMPDIR="${TMPDIR:-/tmp}" \
+        "$binary_path" --version 2>/dev/null) || return 1
+    printf '%s\n' "$output" | awk '{print $NF}'
+}
+
 # Main installation logic
 main() {
     say "${GREEN}=== StandX CLI Installer ===${NC}"
@@ -97,6 +107,39 @@ main() {
 
     command -v curl >/dev/null 2>&1 || die "curl is required but was not found"
     command -v tar >/dev/null 2>&1 || die "tar is required but was not found"
+    command -v env >/dev/null 2>&1 || die "env is required but was not found"
+
+    # A standalone install must remain writable by the user so `standx update`
+    # can atomically replace it later without elevating privileges.
+    if [ -z "${INSTALL_DIR:-}" ]; then
+        [ -n "${HOME:-}" ] || die "HOME is not set; choose an install directory with INSTALL_DIR"
+        INSTALL_DIR="${HOME}/.local/bin"
+    fi
+    if [ ! -d "$INSTALL_DIR" ]; then
+        if ! mkdir -p "$INSTALL_DIR"; then
+            die "Unable to create install directory $INSTALL_DIR.
+Choose a directory you own, for example:
+  INSTALL_DIR=\"\$HOME/.local/bin\""
+        fi
+    fi
+    if [ ! -w "$INSTALL_DIR" ]; then
+        die "Install directory $INSTALL_DIR is not writable.
+Choose a directory you own, for example:
+  INSTALL_DIR=\"\$HOME/.local/bin\"
+This installer deliberately does not elevate privileges. For a system-managed
+macOS install, use Homebrew instead."
+    fi
+
+    staging_dir=
+    tmp_dir=
+    cleanup() {
+        [ -z "${tmp_dir:-}" ] || rm -rf "$tmp_dir"
+        [ -z "${staging_dir:-}" ] || rm -rf "$staging_dir"
+    }
+    trap cleanup 0 HUP INT TERM
+    staging_dir=$(mktemp -d "${INSTALL_DIR}/.standx-install.XXXXXX") \
+        || die "Unable to create a staging directory in $INSTALL_DIR"
+    tmp_dir=$(mktemp -d) || die "Unable to create a temporary download directory"
 
     # Detect platform
     target=$(get_target)
@@ -111,7 +154,7 @@ main() {
         tag=$(get_latest_tag) || die "Unable to determine the latest version.
 GitHub may be rate-limiting or blocking this network. Retry later, or pin a
 version explicitly:
-  curl -sSL https://raw.githubusercontent.com/${REPO}/main/install.sh | STANDX_VERSION=v1.2.0 sh"
+  curl -sSL https://raw.githubusercontent.com/${REPO}/main/install.sh | STANDX_VERSION=vX.Y.Z sh"
         say "Latest version: ${YELLOW}$tag${NC}"
     fi
 
@@ -119,10 +162,6 @@ version explicitly:
     tarball_name="${BINARY_NAME}-${tag}-${target}.tar.gz"
     download_url="https://github.com/${REPO}/releases/download/${tag}/${tarball_name}"
     checksums_url="https://github.com/${REPO}/releases/download/${tag}/checksums.txt"
-
-    # Create temp directory
-    tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' EXIT
 
     # Download tarball
     echo ""
@@ -136,71 +175,94 @@ https://github.com/${REPO}/releases/tag/${tag} for available downloads."
     # Download checksums.txt
     echo "Downloading checksums.txt..."
     if ! curl -fsSL -o "${tmp_dir}/checksums.txt" "$checksums_url"; then
-        warn "Warning: Unable to download checksums.txt, skipping verification"
-    else
-        echo "Verifying file integrity..."
-        expected=$(awk -v f="$tarball_name" \
-            '$2 == f || $2 == "*" f {print $1; exit}' "${tmp_dir}/checksums.txt")
-        if [ -z "$expected" ]; then
-            warn "Warning: ${tarball_name} is not listed in checksums.txt, skipping verification"
-        elif ! actual=$(sha256_of "${tmp_dir}/${tarball_name}"); then
-            warn "Warning: no sha256 tool (shasum/sha256sum) found, skipping verification"
-        elif [ "$actual" != "$expected" ]; then
-            die "SHA256 verification failed, file may be corrupted or tampered
-  expected: $expected
-  actual:   $actual"
-        else
-            say "${GREEN}✓ Verification passed${NC}"
-        fi
+        die "Unable to download checksums.txt; nothing was installed"
     fi
+    echo "Verifying file integrity..."
+    expected=$(awk -v f="$tarball_name" \
+        '$2 == f || $2 == "*" f {print $1; exit}' "${tmp_dir}/checksums.txt")
+    if [ -z "$expected" ]; then
+        die "${tarball_name} is not listed in checksums.txt; nothing was installed"
+    fi
+    case "$expected" in
+        *[!0-9a-fA-F]*)
+            die "Checksum entry for ${tarball_name} is not a SHA-256 digest; nothing was installed"
+            ;;
+    esac
+    if [ "${#expected}" -ne 64 ]; then
+        die "Checksum entry for ${tarball_name} is not a SHA-256 digest; nothing was installed"
+    fi
+    if ! actual=$(sha256_of "${tmp_dir}/${tarball_name}"); then
+        die "No SHA-256 tool (shasum or sha256sum) was found; nothing was installed"
+    fi
+    if [ "$actual" != "$expected" ]; then
+        die "SHA256 verification failed, file may be corrupted or tampered
+  expected: $expected
+  actual:   $actual
+Nothing was installed."
+    fi
+    say "${GREEN}✓ Verification passed${NC}"
 
-    # Extract
+    # Extract into the destination filesystem so the final rename is atomic.
     echo ""
     echo "Extracting..."
-    tar -xzf "${tmp_dir}/${tarball_name}" -C "$tmp_dir"
+    if ! tar -xzf "${tmp_dir}/${tarball_name}" -C "$staging_dir" standx; then
+        die "Unable to extract standx from ${tarball_name}; nothing was installed"
+    fi
 
     # Check extracted binary
-    binary_path="${tmp_dir}/${BINARY_NAME}"
-    if [ ! -f "$binary_path" ]; then
-        die "Binary file ${BINARY_NAME} not found after extraction"
+    binary_path="${staging_dir}/${BINARY_NAME}"
+    if [ ! -f "$binary_path" ] || [ -L "$binary_path" ]; then
+        die "Release archive did not contain a regular ${BINARY_NAME} binary; nothing was installed"
+    fi
+    chmod +x "$binary_path" || die "Unable to mark the new binary executable; nothing was installed"
+
+    # Run the downloaded binary with a cleared environment before it replaces
+    # anything. Checksums protect integrity, not release provenance, so secrets
+    # such as STANDX_JWT and STANDX_PRIVATE_KEY must not be inherited here.
+    expected_version=${tag#v}
+    if ! reported_version=$(binary_version "$binary_path"); then
+        die "Downloaded binary could not run on this machine; nothing was installed"
+    fi
+    if [ "$reported_version" != "$expected_version" ]; then
+        die "Downloaded binary reports ${reported_version}, but the release is ${expected_version}; nothing was installed"
     fi
 
-    # Check install directory permissions
-    if [ ! -d "$INSTALL_DIR" ]; then
-        warn "Install directory $INSTALL_DIR does not exist, attempting to create..."
-        sudo mkdir -p "$INSTALL_DIR" || die "Unable to create install directory"
-    fi
-
-    # Install
+    # The staged binary and destination share a filesystem, so this replacement
+    # is atomic even when an older standx already exists.
+    install_path="${INSTALL_DIR}/${BINARY_NAME}"
     echo ""
-    echo "Installing to ${INSTALL_DIR}/${BINARY_NAME}..."
-    if [ -w "$INSTALL_DIR" ]; then
-        mv "$binary_path" "${INSTALL_DIR}/${BINARY_NAME}"
-        chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
-    else
-        warn "Administrator privileges required to install to $INSTALL_DIR"
-        sudo mv "$binary_path" "${INSTALL_DIR}/${BINARY_NAME}" \
-            || die "Unable to install to ${INSTALL_DIR} (sudo failed)"
-        sudo chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
-    fi
+    echo "Installing to ${install_path}..."
+    mv -f "$binary_path" "$install_path" \
+        || die "Unable to atomically install to ${install_path}; the previous binary was left unchanged"
 
-    # Verify installation
+    # Verify the exact installed path, not whichever older copy PATH resolves.
     echo ""
     echo "Verifying installation..."
-    if command -v "$BINARY_NAME" >/dev/null 2>&1; then
-        version=$($BINARY_NAME --version 2>/dev/null || echo "unknown")
-        say "${GREEN}✓ Installation successful!${NC}"
-        echo ""
-        say "Version: ${YELLOW}$version${NC}"
-        echo ""
-        echo "Get started with:"
-        say "  ${YELLOW}standx --help${NC}          Show help"
-        say "  ${YELLOW}standx --version${NC}       Show version"
-        say "  ${YELLOW}standx auth login${NC}      Authenticate"
-    else
-        warn "Warning: Installation complete, but $BINARY_NAME is not in PATH"
-        echo "Please ensure $INSTALL_DIR is in your PATH environment variable"
+    installed_version=$(binary_version "$install_path") \
+        || die "Installed binary at ${install_path} could not report its version"
+    if [ "$installed_version" != "$expected_version" ]; then
+        die "Installed binary at ${install_path} reports ${installed_version}, expected ${expected_version}"
     fi
+    say "${GREEN}✓ Installation successful!${NC}"
+    echo ""
+    say "Version: ${YELLOW}${BINARY_NAME} ${installed_version}${NC}"
+
+    resolved=$(command -v "$BINARY_NAME" 2>/dev/null || true)
+    if [ "$resolved" != "$install_path" ]; then
+        if [ -n "$resolved" ]; then
+            warn "Warning: PATH currently resolves ${BINARY_NAME} to ${resolved}, not ${install_path}"
+        else
+            warn "Warning: ${install_path} is not currently in PATH"
+        fi
+        echo "Add the install directory before other copies:"
+        echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
+    fi
+
+    echo ""
+    echo "Get started with:"
+    say "  ${YELLOW}standx --help${NC}          Show help"
+    say "  ${YELLOW}standx --version${NC}       Show version"
+    say "  ${YELLOW}standx auth login${NC}      Authenticate"
 }
 
 # Run main function
