@@ -31,22 +31,16 @@ Homebrew 装的用 `brew upgrade standx-cli`——`standx update` 会检测到�
 避免 formula 与实际二进制不一致。安装目录不可写时会直接报错并给出说明，**不会**自动
 提权。
 
-### 方式二：直接下载二进制
+### 方式二：独立安装脚本
 
 ```bash
-# 下载对应平台的二进制文件
-# macOS ARM64
-curl -L -o standx.tar.gz https://github.com/wjllance/standx-cli/releases/latest/download/standx-macos-aarch64.tar.gz
+# 默认安装到用户可写的 $HOME/.local/bin，不使用 sudo
+curl -sSL https://raw.githubusercontent.com/wjllance/standx-cli/main/install.sh | sh
 
-# Linux x86_64
-curl -L -o standx.tar.gz https://github.com/wjllance/standx-cli/releases/latest/download/standx-linux-x86_64.tar.gz
+# 如果安装器提示目录尚未加入 PATH
+export PATH="$HOME/.local/bin:$PATH"
 
-# 解压
-tar -xzf standx.tar.gz
-chmod +x standx
-sudo mv standx /usr/local/bin/
-
-# 验证
+# 验证；独立安装后可直接使用上面的 standx update 命令升级
 standx --version
 ```
 

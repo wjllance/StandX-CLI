@@ -47,6 +47,11 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      - name: Test standalone installer
+        run: |
+          sh -n install.sh
+          sh scripts/test_install.sh
+
   # 多平台构建矩阵
   build-matrix:
     strategy:
