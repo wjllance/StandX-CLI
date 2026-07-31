@@ -261,6 +261,90 @@ fn rejection_after_the_venue_showed_the_order_live_is_a_contradiction() {
     assert_eq!(verdict.label(), "venue_contradiction");
 }
 
+/// Observe-first ordering of the same contradiction (adversarial-review
+/// finding, 07-31): the account stream adopts the order BEFORE the command
+/// ack arrives. The pending entry carries `venue_observed`, but it settles
+/// and drops when the accepted ack resolves — the tombstone created at that
+/// point must inherit the flag. Otherwise a later terminal rejection frame is
+/// misjudged as the ordinary async rejection of a place the venue never had,
+/// while the maker still carries the adopted order in its book.
+#[test]
+fn rejection_after_observe_first_adoption_is_still_a_contradiction() {
+    let mut projection = MakerAccountProjection::new(1, PREFIX, 0.0, 0.005, 0.00005);
+    projection.apply(1, AccountProjectionEvent::PlaceSubmitted(pending("req-1")));
+    let adopted = projection.apply(1, AccountProjectionEvent::OrderObserved(order(0.2, false)));
+    assert_eq!(adopted.effective_request_id.as_deref(), Some("req-1"));
+    // The ack resolves AFTER the adoption; the pending entry settles here.
+    projection.apply(
+        1,
+        AccountProjectionEvent::PlaceAccepted {
+            request_id: "req-1".to_owned(),
+        },
+    );
+    assert_eq!(
+        projection.resting_quotes().len(),
+        1,
+        "adopted order is still in the book"
+    );
+
+    let verdict = projection.classify_response(Some("req-1"), false);
+    assert!(
+        verdict.fails_closed(),
+        "the venue showed this order live; rejecting it must fail closed, got {verdict:?}"
+    );
+    assert_eq!(verdict.label(), "venue_contradiction");
+}
+
+/// A terminal observation is the account stream proving the venue HAD the
+/// order — it filled (or closed) and is gone. A terminal rejection frame
+/// arriving after that still contradicts the recorded history, so the
+/// tombstone must carry `venue_observed` even though nothing live remains.
+#[test]
+fn rejection_after_a_terminal_observation_is_a_contradiction() {
+    let mut projection = MakerAccountProjection::new(1, PREFIX, 0.0, 0.005, 0.00005);
+    projection.apply(1, AccountProjectionEvent::PlaceSubmitted(pending("req-1")));
+    projection.apply(
+        1,
+        AccountProjectionEvent::PlaceAccepted {
+            request_id: "req-1".to_owned(),
+        },
+    );
+    // The order fills; the terminal observation closes the slot.
+    let filled = projection.apply(1, AccountProjectionEvent::OrderObserved(order(0.0, true)));
+    assert_eq!(filled.effective_request_id.as_deref(), Some("req-1"));
+
+    let verdict = projection.classify_response(Some("req-1"), false);
+    assert!(
+        verdict.fails_closed(),
+        "the venue provably had this order; rejecting it must fail closed, got {verdict:?}"
+    );
+    assert_eq!(verdict.label(), "venue_contradiction");
+}
+
+/// Terminal observation BEFORE the ack: the entry settles only when the ack
+/// resolves, so the flag set by the terminal observation must survive the
+/// trip through `PlaceAccepted` into the tombstone.
+#[test]
+fn rejection_after_terminal_observation_before_the_ack_is_a_contradiction() {
+    let mut projection = MakerAccountProjection::new(1, PREFIX, 0.0, 0.005, 0.00005);
+    projection.apply(1, AccountProjectionEvent::PlaceSubmitted(pending("req-1")));
+    let filled = projection.apply(1, AccountProjectionEvent::OrderObserved(order(0.0, true)));
+    assert_eq!(filled.effective_request_id.as_deref(), Some("req-1"));
+    projection.apply(
+        1,
+        AccountProjectionEvent::PlaceAccepted {
+            request_id: "req-1".to_owned(),
+        },
+    );
+
+    let verdict = projection.classify_response(Some("req-1"), false);
+    assert!(
+        verdict.fails_closed(),
+        "the venue provably had this order; rejecting it must fail closed, got {verdict:?}"
+    );
+    assert_eq!(verdict.label(), "venue_contradiction");
+}
+
 /// A missing `request_id` is a protocol violation with its own verdict. It
 /// must never share the "unknown ID" path, and it must never be ignored.
 #[test]
