@@ -376,6 +376,7 @@ pub(super) struct AccountEventContext<'a> {
     pub(super) mark: f64,
     pub(super) cycle: u64,
     pub(super) output_format: OutputFormat,
+    pub(super) excess_bps_at_fill: Option<f64>,
 }
 
 pub(super) struct AccountEventState<'a> {
@@ -611,7 +612,13 @@ pub(super) fn apply_account_event(
                         },
                     );
                 }
-                emit_live_fill(fill, context.symbol, context.cycle, context.output_format);
+                emit_live_fill(
+                    fill,
+                    context.symbol,
+                    context.cycle,
+                    context.output_format,
+                    context.excess_bps_at_fill,
+                );
             }
             Ok(AccountEventOutcome {
                 fills: fills.len() as u64,
@@ -670,7 +677,13 @@ pub(super) fn apply_account_event(
                         },
                     );
                 }
-                emit_live_fill(fill, context.symbol, context.cycle, context.output_format);
+                emit_live_fill(
+                    fill,
+                    context.symbol,
+                    context.cycle,
+                    context.output_format,
+                    context.excess_bps_at_fill,
+                );
             }
             Ok(AccountEventOutcome {
                 fills: fills.len() as u64,

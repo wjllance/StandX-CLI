@@ -19,6 +19,7 @@ fn drain_positions(events: Vec<AccountEvent>) -> AccountEventOutcome {
         mark: 100.0,
         cycle: 1,
         output_format: OutputFormat::Quiet,
+        excess_bps_at_fill: None,
     };
     apply_account_events(&mut rx, &mut state, &context).expect("benign events drain cleanly")
 }
@@ -83,6 +84,7 @@ fn balance_event_updates_raw_projection_without_touching_fill_accounting() {
         mark: 100.0,
         cycle: 1,
         output_format: OutputFormat::Quiet,
+        excess_bps_at_fill: None,
     };
     let outcome = {
         let mut state = AccountEventState {
@@ -129,6 +131,7 @@ fn uncorrelated_current_run_order_requires_reconciliation_without_stream_failure
         mark: 100.0,
         cycle: 2,
         output_format: OutputFormat::Quiet,
+        excess_bps_at_fill: None,
     };
     let update = OrderUpdate {
         seq: 1,
@@ -219,6 +222,7 @@ fn stable_trade_reports_current_run_inventory_exit_once() {
         mark: 100.0,
         cycle: 1,
         output_format: OutputFormat::Quiet,
+        excess_bps_at_fill: None,
     };
     let update = OrderUpdate {
         seq: 1,

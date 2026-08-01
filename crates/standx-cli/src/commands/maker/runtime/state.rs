@@ -45,6 +45,9 @@ pub(super) struct RuntimeLoopState {
     pub(super) spread_controller: maker::SpreadController,
     pub(super) size_skew_controller: maker::SizeSkewController,
     pub(super) nonlinear_skew: maker::NonlinearSkewConfig,
+    pub(super) external_skew: maker::ExternalSkewConfig,
+    pub(super) external_skew_previous_shift_bps: f64,
+    pub(super) external_excess_telemetry: ExternalExcessTelemetry,
     pub(super) guard_controller: maker::GuardController,
     /// Latest leader (Hyperliquid) sample for the external guard; `None` when
     /// the guard is disabled and no feed task runs.
@@ -168,6 +171,14 @@ impl MakerRuntime {
         // bad file never rides along silently (band red line included).
         let nonlinear_skew = args.nonlinear_skew;
         nonlinear_skew.validate(&cfg)?;
+        let external_skew = args.external_skew;
+        super::super::config::validate_external_skew(
+            external_skew,
+            &cfg,
+            &args.adaptive_spread,
+            nonlinear_skew,
+            args.external_guard,
+        )?;
         let guard_basis_half_life_secs = args.external_guard_basis_half_life_secs;
         let guard_controller = maker::GuardController::new(args.external_guard)?;
         let (external_feed, external_updates, external_feed_handle) = if args.external_guard.enabled
@@ -271,6 +282,9 @@ impl MakerRuntime {
                 spread_controller,
                 size_skew_controller,
                 nonlinear_skew,
+                external_skew,
+                external_skew_previous_shift_bps: 0.0,
+                external_excess_telemetry: ExternalExcessTelemetry::default(),
                 guard_controller,
                 external_feed,
                 external_updates,

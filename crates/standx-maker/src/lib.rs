@@ -22,6 +22,7 @@ mod stats;
 
 pub mod account_projection;
 pub mod external_guard;
+pub mod external_skew;
 pub mod inventory;
 pub mod latency;
 pub mod ledger;
@@ -44,6 +45,7 @@ pub use alerts::{account_floor_breach, AccountFloorBreach, Alert, AlertMonitor};
 pub use external_guard::{
     ExternalDivergence, GuardConfig, GuardController, GuardDecision, GuardError,
 };
+pub use external_skew::{external_skew_shift_bps, ExternalSkewConfig};
 pub use inventory::{
     NonlinearSkewConfig, SizeSkewConfig, SizeSkewController, SizeSkewDecision, SizeSkewError,
 };
@@ -431,6 +433,27 @@ pub(crate) fn skew_center_with(
     mark * (1.0 - shift_bps * inv_ratio.signum() / 1e4)
 }
 
+/// The single quote-center composition point used by planning, price
+/// generation, and refresh reconciliation.
+///
+/// Keep the zero-shift branch on the exact legacy path. Besides documenting the
+/// default-off contract, this prevents even a mathematically neutral extra
+/// floating-point operation from entering old action sequences.
+pub(crate) fn quote_center(
+    cfg: &MakerConfig,
+    nonlinear: NonlinearSkewConfig,
+    external_shift_bps: f64,
+    mark: f64,
+    position: f64,
+) -> f64 {
+    let inventory_center = skew_center_with(cfg, nonlinear, mark, position);
+    if external_shift_bps == 0.0 {
+        inventory_center
+    } else {
+        inventory_center * (1.0 + external_shift_bps / 1e4)
+    }
+}
+
 /// Whether a quote at `price` on `side` crosses the current touch: a buy at or
 /// above the best ask (`price >= best_ask`), or a sell at or below the best bid
 /// (`price <= best_bid`). Returns false when the relevant book side is absent.
@@ -590,6 +613,11 @@ pub struct CycleInput<'a> {
     pub size_skew: SizeSkewDecision,
     /// Stage 3 v1 nonlinear price-skew strength; disabled ≡ legacy linear skew.
     pub nonlinear_skew: NonlinearSkewConfig,
+    /// Continuous external-price center offset configuration; default disabled.
+    pub external_skew: ExternalSkewConfig,
+    /// Fresh, finite excess from the external-guard signal chain. `None` fails
+    /// open to an exact zero shift.
+    pub external_excess_bps: Option<f64>,
     /// External-price guard outcome for this cycle; inactive ≡ no suppression.
     pub guard: GuardDecision,
     /// Supervisor-requested wind-down (e.g. an A/B arm past its scheduled
@@ -615,8 +643,13 @@ pub struct CyclePlan {
     pub exit_suppression: Option<SuppressedExit>,
     /// Cancels, places, and holds in executor-safe order.
     pub actions: Vec<Action>,
+    /// Inventory-only anchor retained for the legacy `skew_shift_bps`
+    /// telemetry contract.
+    pub inventory_ref_center: f64,
     /// Anchor used for any newly submitted quote.
     pub ref_center: f64,
+    /// External component actually applied to the shared quote center this cycle.
+    pub external_skew_shift_bps: f64,
 }
 
 /// Build a deterministic quote/exit plan after the caller has synchronized
@@ -632,6 +665,8 @@ pub struct CyclePlan {
 /// residual position above `input.qty_tolerance` yields a reduce-only exit
 /// plan regardless of the configured exit thresholds.
 pub fn plan_cycle(cfg: &MakerConfig, input: CycleInput<'_>, halted: bool) -> CyclePlan {
+    let external_shift_bps =
+        external_skew_shift_bps(input.external_skew, input.external_excess_bps);
     let market_active = input.market_data_mode == MarketDataMode::Active;
     // What the configured exit policy asks for, before any market-state or
     // volatility gate. Kept separate purely so suppression is observable: the
@@ -685,6 +720,7 @@ pub fn plan_cycle(cfg: &MakerConfig, input: CycleInput<'_>, halted: bool) -> Cyc
             input.position,
             input.size_skew,
             input.nonlinear_skew,
+            external_shift_bps,
             input.guard,
         );
         cap_desired_exposure(cfg, input.position, &raw, input.pending_slots)
@@ -704,8 +740,23 @@ pub fn plan_cycle(cfg: &MakerConfig, input: CycleInput<'_>, halted: bool) -> Cyc
             input.resting,
             input.cycle,
             input.nonlinear_skew,
+            external_shift_bps,
         ),
-        ref_center: skew_center_with(cfg, input.nonlinear_skew, input.market.mark, input.position),
+        inventory_ref_center: quote_center(
+            cfg,
+            input.nonlinear_skew,
+            0.0,
+            input.market.mark,
+            input.position,
+        ),
+        ref_center: quote_center(
+            cfg,
+            input.nonlinear_skew,
+            external_shift_bps,
+            input.market.mark,
+            input.position,
+        ),
+        external_skew_shift_bps: external_shift_bps,
     }
 }
 
@@ -725,6 +776,7 @@ pub(crate) fn compute_desired_quotes(
     position: f64,
     size_skew: SizeSkewDecision,
     nonlinear_skew: NonlinearSkewConfig,
+    external_shift_bps: f64,
     guard: GuardDecision,
 ) -> Vec<DesiredQuote> {
     let mut out = Vec::new();
@@ -746,9 +798,11 @@ pub(crate) fn compute_desired_quotes(
     let band_lo = mark * (1.0 - cfg.band_bps / 1e4);
     let band_hi = mark * (1.0 + cfg.band_bps / 1e4);
 
-    // Ladder is centered on the inventory-skewed price; the band/no-cross
-    // guards below still reference the true mark and touch.
-    let center = skew_center_with(cfg, nonlinear_skew, mark, position);
+    // Ladder is centered on the shared quote center (inventory skew, then the
+    // external offset); the band/no-cross guards below still reference the true
+    // mark and touch, so an oversized offset gets clamped to the band edge
+    // rather than moving the band with it.
+    let center = quote_center(cfg, nonlinear_skew, external_shift_bps, mark, position);
 
     let suppress_buy = position >= cfg.max_position;
     let suppress_sell = position <= -cfg.max_position;
@@ -934,12 +988,16 @@ pub(crate) fn reconcile(
     resting: &[RestingQuote],
     cycle: u64,
     nonlinear_skew: NonlinearSkewConfig,
+    external_shift_bps: f64,
 ) -> Vec<Action> {
     // Band/no-cross reference the true mark and touch; the anti-flicker anchor
-    // uses the inventory-skewed center.
+    // uses the shared quote center (inventory skew plus the external offset),
+    // the same one `compute_desired_quotes` priced this cycle's ladder from —
+    // comparing against a different anchor would requote every cycle the
+    // offset moved.
     let band_lo = mark * (1.0 - cfg.band_bps / 1e4);
     let band_hi = mark * (1.0 + cfg.band_bps / 1e4);
-    let center = skew_center_with(cfg, nonlinear_skew, mark, position);
+    let center = quote_center(cfg, nonlinear_skew, external_shift_bps, mark, position);
 
     let desired_has = |side: OrderSide, level: u32| -> bool {
         desired.iter().any(|d| d.side == side && d.level == level)

@@ -52,14 +52,15 @@ use notify::{
     RiskSeverity, TokenExpiryLevel,
 };
 use pipeline::{
-    CycleRequest, CycleState, LiveAccountPollState, OrderRequestDeadlines, TimedOutOrderRequest,
+    CycleRequest, CycleState, ExternalExcessTelemetry, LiveAccountPollState, OrderRequestDeadlines,
+    TimedExternalDivergence, TimedOutOrderRequest,
 };
 use recovery::{
     cancel_maker_orders_with_retry, ctrl_c_latched, probe_position_convergence,
     reconnect_account_stream, reconnect_order_response, AccountStreamReconnect, CleanupTombstones,
-    ConvergenceProbe, PositionReconciliationCause, PositionReconciliationError, ReconcileRequest,
-    ReconnectCleanupFailed, ReconnectInterrupted, ReconnectRequest, TransportReconnectExhausted,
-    WsCleanupContext,
+    ConvergenceProbe, FillEmissionContext, PositionReconciliationCause,
+    PositionReconciliationError, ReconcileRequest, ReconnectCleanupFailed, ReconnectInterrupted,
+    ReconnectRequest, TransportReconnectExhausted, WsCleanupContext,
 };
 
 // ============================================================================

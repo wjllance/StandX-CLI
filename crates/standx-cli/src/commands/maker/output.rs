@@ -242,6 +242,8 @@ pub(super) struct CycleOutput<'a> {
     pub(super) account: Option<&'a Balance>,
     pub(super) actions: &'a [Action],
     pub(super) fills: &'a [MakerFill],
+    /// Guard-normalized excess sample in use when these fills were observed.
+    pub(super) excess_bps_at_fill: Option<f64>,
     pub(super) stats: &'a MakerStats,
     pub(super) halt_vol_bps: Option<f64>,
     pub(super) spread_decision: &'a maker::SpreadDecision,
@@ -249,8 +251,10 @@ pub(super) struct CycleOutput<'a> {
     pub(super) guard_decision: &'a maker::GuardDecision,
     /// Divergence-basis EMA the guard's excess is measured against.
     pub(super) external_basis_bps: Option<f64>,
-    /// Realized quote-center shift in bps (mark vs plan ref_center); covers
-    /// linear and nonlinear skew alike. Telemetry only.
+    /// Continuous external-price component of the quote-center shift.
+    pub(super) external_skew_shift_bps: f64,
+    /// Legacy inventory-only quote-center shift in bps; covers linear and
+    /// nonlinear skew but deliberately excludes the additive external field.
     pub(super) skew_shift_bps: f64,
     /// Stage 5-b: typed exit policy outcome for this cycle.
     pub(super) exit_status: ExitStatus,
@@ -275,12 +279,14 @@ pub(super) fn emit_maker_cycle(output: CycleOutput<'_>) {
         account,
         actions,
         fills,
+        excess_bps_at_fill,
         stats,
         halt_vol_bps,
         spread_decision,
         size_skew_decision,
         guard_decision,
         external_basis_bps,
+        external_skew_shift_bps,
         skew_shift_bps,
         exit_status,
         cfg,
@@ -313,6 +319,7 @@ pub(super) fn emit_maker_cycle(output: CycleOutput<'_>) {
                         "price": format_decimals(fill.price, cfg.price_decimals),
                         "qty": format_decimals(fill.qty, cfg.qty_decimals),
                         "mark_at_fill": fill.mark_at_fill,
+                        "excess_bps_at_fill": fill_excess_bps_json(excess_bps_at_fill),
                         "event_time_ms": fill.event_time_ms,
                         "trade_id": fill.trade_id,
                         "order_id": fill.order_id,
@@ -399,6 +406,7 @@ pub(super) fn emit_maker_cycle(output: CycleOutput<'_>) {
                         ),
                         guard_decision,
                         external_basis_bps,
+                        external_skew_shift_bps,
                         skew_shift_bps,
                     ),
                     exit_status,
@@ -598,6 +606,7 @@ fn with_guard_fields(
     mut summary: serde_json::Value,
     decision: &maker::GuardDecision,
     external_basis_bps: Option<f64>,
+    external_skew_shift_bps: f64,
     skew_shift_bps: f64,
 ) -> serde_json::Value {
     let object = summary
@@ -622,6 +631,10 @@ fn with_guard_fields(
     object.insert(
         "external_basis_bps".to_string(),
         serde_json::json!(external_basis_bps.map(|d| (d * 100.0).round() / 100.0)),
+    );
+    object.insert(
+        "external_skew_shift_bps".to_string(),
+        serde_json::json!((external_skew_shift_bps * 100.0).round() / 100.0),
     );
     object.insert(
         "skew_shift_bps".to_string(),
@@ -791,6 +804,37 @@ pub(super) fn emit_guard_transition(
     }
 }
 
+/// Emit when the continuous shift enters/leaves its dead zone or changes sign.
+/// This event is additive and never feeds a decision path.
+pub(super) fn emit_external_skew_transition(
+    output_format: OutputFormat,
+    symbol: &str,
+    cycle: u64,
+    shift_bps: f64,
+    excess_bps: Option<f64>,
+) {
+    match output_format {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::json!({
+                "ts": ts_now(),
+                "cycle": cycle,
+                "symbol": symbol,
+                "action": "external_skew",
+                "active": shift_bps != 0.0,
+                "shift_bps": shift_bps,
+                "excess_bps": excess_bps,
+            })
+        ),
+        OutputFormat::Quiet => {}
+        _ if shift_bps == 0.0 => eprintln!("    ↔️ external skew: returned to dead zone"),
+        _ => eprintln!(
+            "    ↔️ external skew: shift {shift_bps:+.2}bps (excess {:+.2}bps)",
+            excess_bps.unwrap_or(f64::NAN),
+        ),
+    }
+}
+
 pub(super) struct MakerLogEvent<'a> {
     pub(super) output_format: OutputFormat,
     pub(super) symbol: &'a str,
@@ -858,6 +902,7 @@ pub(super) fn emit_live_fill(
     symbol: &str,
     cycle: u64,
     output_format: OutputFormat,
+    excess_bps_at_fill: Option<f64>,
 ) {
     match output_format {
         OutputFormat::Json => println!(
@@ -875,6 +920,7 @@ pub(super) fn emit_live_fill(
                 "price": fill.price,
                 "qty": fill.qty,
                 "mark_at_fill": fill.mark_at_fill,
+                "excess_bps_at_fill": fill_excess_bps_json(excess_bps_at_fill),
                 "event_time_ms": fill.event_time_ms,
                 "role": match fill.role {
                     maker::FillRole::PassiveMaker => "passive_maker",
@@ -892,6 +938,10 @@ pub(super) fn emit_live_fill(
             fill.order_id.unwrap_or_default()
         ),
     }
+}
+
+fn fill_excess_bps_json(excess_bps_at_fill: Option<f64>) -> serde_json::Value {
+    excess_bps_at_fill.map_or(serde_json::Value::Null, serde_json::Value::from)
 }
 
 pub(super) fn emit_reconciliation_state(
@@ -1369,6 +1419,12 @@ mod tests {
     }
 
     #[test]
+    fn fill_excess_distinguishes_missing_sample_from_zero_divergence() {
+        assert!(fill_excess_bps_json(None).is_null());
+        assert_eq!(fill_excess_bps_json(Some(0.0)), serde_json::json!(0.0));
+    }
+
+    #[test]
     fn phase_one_performance_json_exposes_cashflow_capture_and_inventory_time() {
         let mut ledger = maker::PerformanceLedger::new(0.0, 100.0).unwrap();
         ledger.observe_market(0, 100.0).unwrap();
@@ -1515,6 +1571,7 @@ mod tests {
             serde_json::json!({"action": "cycle_summary", "vol_bps": null}),
             &decision,
             Some(-14.2),
+            3.25,
             4.804,
         );
 
@@ -1525,6 +1582,7 @@ mod tests {
         assert_eq!(json["guard_side"], "sell");
         assert_eq!(json["external_divergence_bps"], 7.82);
         assert_eq!(json["external_basis_bps"], -14.2);
+        assert_eq!(json["external_skew_shift_bps"], 3.25);
         assert_eq!(json["skew_shift_bps"], 4.8);
 
         // Inactive guard serializes nulls, never drops the keys.
@@ -1533,12 +1591,14 @@ mod tests {
             &maker::GuardDecision::INACTIVE,
             None,
             0.0,
+            0.0,
         );
         assert_eq!(idle["guard_enabled"], false);
         assert_eq!(idle["guard_active"], false);
         assert!(idle["guard_side"].is_null());
         assert!(idle["external_divergence_bps"].is_null());
         assert!(idle["external_basis_bps"].is_null());
+        assert_eq!(idle["external_skew_shift_bps"], 0.0);
         assert_eq!(idle["skew_shift_bps"], 0.0);
     }
 

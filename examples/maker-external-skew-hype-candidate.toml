@@ -1,0 +1,89 @@
+# Stage 3 v1 combined-candidate live A/B arm, HYPE-USD. No credentials, webhook URL, or --live flag.
+# Venue metadata (2026-07-17 symbol-info): price_tick_decimals=3
+# qty_tick_decimals=2 min_order_qty=0.1 max_leverage=20.
+# Sizing tier approved by operator: ~$59 max notional at HYPE≈$59 (10x skew
+# room, stop_loss ≈2.7% of ~$184 equity). Vol thresholds intentionally kept
+# identical to the XAG arms so the adaptive-spread comparison stays structural.
+spread_bps = 8.0
+band_bps = 30.0
+size = 0.1
+levels = 1
+level_step_bps = 2.0
+refresh_bps = 4.0
+interval = 3
+
+max_position = 1.0
+skew_bps = 8.0
+inventory_exit_pct = 0.0
+inventory_exit_qty = 0.0
+max_divergence_bps = 15.0
+vol_pause_bps = 40.0
+vol_window_secs = 60
+
+stop_loss = 5.0
+alert_loss = 2.5
+alert_inventory_pct = 70.0
+alert_position_change_pct = 20.0
+alert_uptime = 60.0
+alert_equity_below = 94.0
+alert_margin_below = 30.0
+
+no_ws = false
+order_response_reconnect_attempts = 3
+order_response_reconnect_backoff = 2
+account_stream_reconnect_attempts = 3
+account_stream_reconnect_backoff = 2
+
+[adaptive_spread]
+enabled = false
+min_spread_bps = 8.0
+max_spread_bps = 18.0
+
+[[adaptive_spread.tiers]]
+spread_bps = 8.0
+refresh_bps = 4.0
+
+[[adaptive_spread.tiers]]
+enter_vol_bps = 10.0
+exit_vol_bps = 7.0
+spread_bps = 12.0
+refresh_bps = 5.0
+
+[[adaptive_spread.tiers]]
+enter_vol_bps = 20.0
+exit_vol_bps = 15.0
+spread_bps = 18.0
+refresh_bps = 6.0
+
+# size=0.1 is the venue minimum; factor 0.5 floors to 0.05, below the 0.1
+# minimum, so the active v0 controller degenerates to binary add-side suppression.
+[size_skew]
+enabled = false
+activate_pct = 30.0
+release_pct = 20.0
+add_side_factor = 0.5
+
+# Stage 3 v1 combined candidate (docs/22): nonlinear price skew — steeper but
+# never stops quoting; cap red line spread(8)+cap(12)=20 <= band(30).
+[nonlinear_skew]
+enabled = true
+boost = 3.0
+cap_bps = 12.0
+
+# External-price defensive guard: suppress the endangered side while the
+# leader (Hyperliquid midPx) has moved and StandX mark has not yet followed.
+# Fail-open: missing/stale feed deactivates the guard, quoting continues.
+[external_guard]
+enabled = true
+enter_bps = 10.0
+exit_bps = 5.0
+max_age_ms = 5000
+basis_half_life_secs = 300
+
+# Candidate arm (docs/28): continuous external-price center offset.
+# Band red line: spread(8) + nonlinear.cap(12) + external.cap(8) = 28 <= band(30).
+[external_skew]
+enabled = true
+lambda = 0.5
+cap_bps = 8.0
+dead_zone_bps = 1.0

@@ -216,12 +216,17 @@ impl MakerRuntime {
                 let cycle_external_divergence = match self.loop_state.external_feed.as_ref() {
                     Some(feed) => {
                         let state = *feed.read().await;
+                        let external_normalized_at = std::time::Instant::now();
                         super::super::external_feed::divergence_input(
                             state,
                             mark,
-                            std::time::Instant::now(),
+                            external_normalized_at,
                             &mut self.loop_state.external_basis,
                         )
+                        .map(|value| TimedExternalDivergence {
+                            value,
+                            normalized_at: external_normalized_at,
+                        })
                     }
                     None => None,
                 };
@@ -271,6 +276,11 @@ impl MakerRuntime {
                         spread_controller: &mut self.loop_state.spread_controller,
                         size_skew_controller: &mut self.loop_state.size_skew_controller,
                         nonlinear_skew: self.loop_state.nonlinear_skew,
+                        external_skew: self.loop_state.external_skew,
+                        external_skew_previous_shift_bps: &mut self
+                            .loop_state
+                            .external_skew_previous_shift_bps,
+                        external_excess_telemetry: &mut self.loop_state.external_excess_telemetry,
                         guard_controller: &mut self.loop_state.guard_controller,
                         external_divergence: cycle_external_divergence,
                         external_basis_bps: cycle_external_basis_bps,
@@ -461,6 +471,10 @@ impl MakerRuntime {
                             mark: self.market.last_mark.unwrap_or(baseline_mark),
                             cycle,
                             output_format,
+                            excess_bps_at_fill: self
+                                .loop_state
+                                .external_excess_telemetry
+                                .current(std::time::Instant::now()),
                         },
                     ) {
                         Ok(outcome) => {
@@ -899,6 +913,10 @@ impl MakerRuntime {
                                         mark: self.market.last_mark.unwrap_or(baseline_mark),
                                         cycle,
                                         output_format,
+                                        excess_bps_at_fill: self
+                                            .loop_state
+                                            .external_excess_telemetry
+                                            .current(std::time::Instant::now()),
                                     },
                                 ) {
                                     Ok(outcome) => {
@@ -963,8 +981,14 @@ impl MakerRuntime {
                                 &mut self.loop_state.ledger,
                                 &mut self.loop_state.stats,
                                 &mut self.loop_state.counters.total_fills,
-                                cycle,
-                                output_format,
+                                FillEmissionContext {
+                                    cycle,
+                                    output_format,
+                                    excess_bps_at_fill: self
+                                        .loop_state
+                                        .external_excess_telemetry
+                                        .current(std::time::Instant::now()),
+                                },
                             )
                             .await
                             {
@@ -1280,6 +1304,10 @@ impl MakerRuntime {
                                     mark: self.market.last_mark.unwrap_or(baseline_mark),
                                     cycle: self.loop_state.counters.cycle,
                                     output_format,
+                                    excess_bps_at_fill: self
+                                        .loop_state
+                                        .external_excess_telemetry
+                                        .current(std::time::Instant::now()),
                                 },
                             ) {
                                 Ok(outcome) => {

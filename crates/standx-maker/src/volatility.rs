@@ -527,6 +527,8 @@ mod tests {
                 inventory_exit_qty: 0.0,
                 size_skew: Default::default(),
                 nonlinear_skew: Default::default(),
+                external_skew: Default::default(),
+                external_excess_bps: None,
                 guard: Default::default(),
                 wind_down: false,
                 qty_tolerance: 0.0005,
