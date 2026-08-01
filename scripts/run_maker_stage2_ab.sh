@@ -112,13 +112,20 @@ fi
 #       split pair), with external_guard disabled in both arms; or
 #   (f) the enabled assignment inside [external_guard] only (guard spinoff
 #       pair), with nonlinear_skew equal in both arms (it may be enabled in
-#       both as the inherited stage-3 baseline) and guard params identical.
+#       both as the inherited stage-3 baseline) and guard params identical; or
+#   (g) the candidate adding exactly the pre-registered [external_skew] block
+#       (docs/28: enabled, lambda=0.5, cap_bps=8.0, dead_zone_bps=1.0) with
+#       every other line byte-identical and the baseline carrying no
+#       [external_skew] section at all.
 python3 - "$baseline_config" "$candidate_config" <<'PY' || exit 64
 from pathlib import Path
 import re
 import sys
-baseline = Path(sys.argv[1]).read_text(encoding="utf-8")
-candidate = Path(sys.argv[2]).read_text(encoding="utf-8")
+# Read raw bytes so the byte-identity comparisons below see the real file:
+# read_text()'s universal-newline translation would let a lone-CR or CRLF
+# variant pass as "identical" while being invalid TOML downstream.
+baseline = Path(sys.argv[1]).read_bytes().decode("utf-8")
+candidate = Path(sys.argv[2]).read_bytes().decode("utf-8")
 
 TOP = "top"
 TIER0 = "tier0"
@@ -202,8 +209,71 @@ def size_skew_sections(text):
     return "".join(lines), enabled
 
 
+# (g) external_skew pair (docs/28): the candidate carries exactly the
+# pre-registered [external_skew] block and nothing else differs.
+PREREG_EXTERNAL_SKEW = {
+    "enabled": "true",
+    "lambda": "0.5",
+    "cap_bps": "8.0",
+    "dead_zone_bps": "1.0",
+}
+
+
+def external_skew_sections(text):
+    """Strip any [external_skew] section; return (remainder, fields).
+
+    fields is None when the file has no [external_skew] section. The comment
+    or blank lines immediately introducing an added block are part of that
+    block's diff, so they are stripped with the section; unknown keys or
+    unparsable lines inside the section fail closed. A repeated section or a
+    repeated key also fails closed: dict last-wins would otherwise let an
+    unregistered earlier value ride along in the file the gate just approved."""
+    lines = text.splitlines(keepends=True)
+    out = []
+    fields = {}
+    seen = False
+    section = None
+    for line in lines:
+        body = line.strip()
+        header = re.fullmatch(r"\[([^][]+)]", body)
+        if header:
+            section = header.group(1).strip()
+            if section == "external_skew":
+                if seen:
+                    raise SystemExit(
+                        "stage2 config repeats [external_skew]")
+                seen = True
+                while out and (not out[-1].strip()
+                               or out[-1].lstrip().startswith("#")):
+                    out.pop()
+            continue
+        if section == "external_skew":
+            match = re.fullmatch(r"([a-z_]+)\s*=\s*(\S+)(?:\s+#.*)?", body)
+            if match:
+                if match.group(1) in fields:
+                    raise SystemExit(
+                        f"stage2 [external_skew] repeats {match.group(1)}")
+                fields[match.group(1)] = match.group(2)
+            elif body and not body.startswith("#"):
+                raise SystemExit(
+                    f"stage2 [external_skew] unparsable line: {body!r}")
+            continue
+        out.append(line)
+    return "".join(out), (fields if seen else None)
+
+
+baseline_stripped, baseline_es = external_skew_sections(baseline)
+candidate_stripped, candidate_es = external_skew_sections(candidate)
+external_skew_pair = (
+    baseline_es is None
+    and candidate_es == PREREG_EXTERNAL_SKEW
+    and candidate_stripped == baseline_stripped
+)
+
 adaptive_toggle_only = baseline.replace("enabled = false", "enabled = true") == candidate
-if adaptive_toggle_only:
+if external_skew_pair:
+    pass
+elif adaptive_toggle_only:
     pass
 elif "enabled = false" in baseline and "enabled = false" in candidate:
     baseline_norm, baseline_fields = spread_sections(baseline)
@@ -276,12 +346,14 @@ elif "enabled = false" in baseline and "enabled = false" in candidate:
             raise SystemExit(
                 "stage2 arm configs differ outside adaptive_spread.enabled / "
                 "spread_bps / size_skew.enabled / "
-                "nonlinear_skew.enabled(+external_guard.enabled)"
+                "nonlinear_skew.enabled(+external_guard.enabled) / "
+                "the pre-registered [external_skew] block"
             )
 else:
     raise SystemExit(
         "stage2 arm configs differ outside adaptive_spread.enabled / "
-        "spread_bps / size_skew.enabled"
+        "spread_bps / size_skew.enabled / "
+        "the pre-registered [external_skew] block"
     )
 PY
 
@@ -382,7 +454,7 @@ run_arm() {
       wait "$pid"
       status=$?
       invalidate_arm "arm exited before scheduled duration"
-      critical_stop "arm=$arm exited before its 2-hour window (status=$status run_id=$run_id)"
+      critical_stop "arm=$arm exited before its ${arm_seconds}s window (status=$status run_id=$run_id)"
     fi
     sleep "$poll_seconds"
   done
