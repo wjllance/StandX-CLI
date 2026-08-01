@@ -512,3 +512,28 @@ guard 轮的 PnL 读数就是因为"两臂窗口活跃度不同，混淆无法�
 - A/B 判出 rejected（回滚，本立项关闭）；
 - 基线 PnL 窗口给出明确为负且 markout 无改善空间的结论（回 18 号重排）；
 - HL feed 语义或 StandX mark 口径变化（excess 定义失效，需重新校准 basis）。
+
+## 授权记录
+
+已填授权（2026-08-01）：
+
+```text
+授权：external_skew 连续外部领先价偏移 live A/B（docs/28 预注册）
+symbol：HYPE-USD
+baseline 臂：examples/maker-guard-hype-candidate.toml（sha256 6314a374…，原样）
+candidate 臂：examples/maker-external-skew-hype-candidate.toml（sha256 99bec5ea…，
+             = baseline + [external_skew] λ=0.5 cap=8 dead_zone=1）
+代码：git sha 6a3fb3c（含 13bef03 机制实现 + 门禁 (g) 分支）
+部署：docker compose --profile ab-hype（standx-stage2-ab:latest，已重建）
+编排：12h 块交替（ARM_SECONDS=43200，硬帽 64800），首臂 baseline，
+      换臂由编排器 wind-down + 场馆 flat 门 + manifest 校验把关
+风险边界：单 symbol、一档、最小有效数量、max_position=1.0 沿用基线；
+          stop_loss=5.0 生效；账户硬熔断不开启
+窗口：两臂各 ≥700 笔 fill（硬下限），目标 ~1000 笔/臂；样本不足按原参数延长，
+      不改 λ、不加臂
+emergency cancel 操作人：release owner（BossX）
+授权人 / 时间：release owner（BossX），2026-08-01，会话内明确授权（"授权"）
+```
+
+已知约束：启动时 JWT 于 2026-08-09 09:00Z 到期，预计样本窗口跨期，中途需换
+token（改 env 文件 + recreate 容器，编排器从下一臂继续，已完成臂 manifest 保留）。
