@@ -334,6 +334,13 @@ pub(super) enum ConvergenceProbe {
     SnapshotFailed(anyhow::Error),
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct FillEmissionContext {
+    pub(super) cycle: u64,
+    pub(super) output_format: OutputFormat,
+    pub(super) excess_bps_at_fill: Option<f64>,
+}
+
 /// One iteration of the bounded position-convergence window shared by the
 /// account-stream and position-reconciliation recovery paths: REST-reconcile
 /// the ledger, emit every newly explained fill, count fills into `fills_sink`,
@@ -346,8 +353,7 @@ pub(super) async fn probe_position_convergence(
     ledger: &mut MakerLedger,
     stats: &mut MakerStats,
     fills_sink: &mut u64,
-    cycle: u64,
-    output_format: OutputFormat,
+    emission: FillEmissionContext,
 ) -> ConvergenceProbe {
     let symbol = request.symbol;
     let qty_tolerance = request.qty_tolerance;
@@ -355,7 +361,13 @@ pub(super) async fn probe_position_convergence(
         Ok((observed, fills)) => {
             *fills_sink += fills.len() as u64;
             for fill in &fills {
-                emit_live_fill(fill, symbol, cycle, output_format);
+                emit_live_fill(
+                    fill,
+                    symbol,
+                    emission.cycle,
+                    emission.output_format,
+                    emission.excess_bps_at_fill,
+                );
             }
             if (observed - ledger.expected_position).abs() <= qty_tolerance {
                 ConvergenceProbe::Converged { observed }
@@ -2059,8 +2071,11 @@ mod tests {
             &mut ledger,
             &mut stats,
             &mut fills_sink,
-            7,
-            OutputFormat::Quiet,
+            FillEmissionContext {
+                cycle: 7,
+                output_format: OutputFormat::Quiet,
+                excess_bps_at_fill: None,
+            },
         )
         .await;
 
@@ -2095,8 +2110,11 @@ mod tests {
             &mut ledger,
             &mut stats,
             &mut fills_sink,
-            7,
-            OutputFormat::Quiet,
+            FillEmissionContext {
+                cycle: 7,
+                output_format: OutputFormat::Quiet,
+                excess_bps_at_fill: None,
+            },
         )
         .await;
 
@@ -2140,8 +2158,11 @@ mod tests {
             &mut ledger,
             &mut stats,
             &mut fills_sink,
-            7,
-            OutputFormat::Quiet,
+            FillEmissionContext {
+                cycle: 7,
+                output_format: OutputFormat::Quiet,
+                excess_bps_at_fill: None,
+            },
         )
         .await;
 

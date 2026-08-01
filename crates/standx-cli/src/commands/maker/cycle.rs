@@ -5,12 +5,12 @@ use super::model::{
     optional_decimal, position_for_symbol, rest_order_observation, unhealthy_stream, Decimal,
 };
 use super::output::{
-    emit_cycle_skip, emit_guard_transition, emit_maker_cycle, log_maker_event, CycleOutput,
-    ExitStatus, MakerLogEvent,
+    emit_cycle_skip, emit_external_skew_transition, emit_guard_transition, emit_maker_cycle,
+    log_maker_event, CycleOutput, ExitStatus, MakerLogEvent,
 };
 use super::pipeline::{
     fetch_account_audit, CycleRequest, CycleResult, CycleState, OrderRequestKind,
-    BALANCE_FLOOR_MAX_AGE, FUNDING_HISTORY_LIMIT,
+    TimedExternalDivergence, BALANCE_FLOOR_MAX_AGE, FUNDING_HISTORY_LIMIT,
 };
 use super::recovery::PositionReconciliationError;
 use anyhow::Result;
@@ -28,6 +28,37 @@ use standx_sdk::order_response::{OrderCommandSender, OrderResponseHealth};
 use std::time::Instant;
 
 const ORDER_LATENCY_TIMEOUT_MS: u64 = 15_000;
+
+fn external_skew_transitioned(previous: f64, current: f64) -> bool {
+    let previous_active = previous != 0.0;
+    let current_active = current != 0.0;
+    previous_active != current_active
+        || (previous_active
+            && current_active
+            && previous.is_sign_positive() != current.is_sign_positive())
+}
+
+fn legacy_inventory_skew_shift_bps(mark: f64, plan: &maker::CyclePlan) -> f64 {
+    if mark > 0.0 {
+        (mark - plan.inventory_ref_center) / mark * 1e4
+    } else {
+        0.0
+    }
+}
+
+fn external_excess_at_plan(
+    observation: Option<TimedExternalDivergence>,
+    decision: &maker::GuardDecision,
+    max_age_ms: u64,
+    now: Instant,
+) -> (Option<maker::ExternalDivergence>, Option<f64>) {
+    let fresh_observation = observation
+        .map(|sample| sample.at(now))
+        .filter(|sample| sample.age_ms <= max_age_ms && sample.divergence_bps.is_finite());
+    let excess_bps =
+        fresh_observation.and_then(|_| decision.divergence_bps.filter(|value| value.is_finite()));
+    (fresh_observation, excess_bps)
+}
 
 struct LatencyRegistration<'a> {
     started: Option<Instant>,
@@ -264,6 +295,9 @@ pub(super) async fn maker_cycle(
         spread_controller,
         size_skew_controller,
         nonlinear_skew,
+        external_skew,
+        external_skew_previous_shift_bps,
+        external_excess_telemetry,
         guard_controller,
         external_divergence,
         external_basis_bps,
@@ -608,8 +642,28 @@ pub(super) async fn maker_cycle(
 
     // 3. Build the pure quote/exit plan from the synchronized state.
     let size_skew_decision = size_skew_controller.observe(position, cfg);
+    let guard_observed_at = Instant::now();
+    let guard_max_age_ms = guard_controller.config().max_age_ms;
+    // Preserve the established guard action path exactly: it consumes the age
+    // normalized before maker_cycle just as it did before external skew. The
+    // new shift/fill fields additionally account for I/O elapsed since that
+    // normalization, so a newly introduced center offset never uses a sample
+    // that is stale at planning time.
+    let guard_input = external_divergence.map(|sample| sample.value);
     let previous_guard_side = guard_controller.endangered();
-    let guard_decision = guard_controller.observe(external_divergence);
+    let guard_decision = guard_controller.observe(guard_input);
+    let (fresh_external_divergence, external_excess_bps) = external_excess_at_plan(
+        external_divergence,
+        &guard_decision,
+        guard_max_age_ms,
+        guard_observed_at,
+    );
+    external_excess_telemetry.observe(
+        external_excess_bps,
+        fresh_external_divergence,
+        guard_max_age_ms,
+        guard_observed_at,
+    );
     if guard_decision.endangered != previous_guard_side {
         emit_guard_transition(output_format, symbol, cycle, &guard_decision);
     }
@@ -639,12 +693,26 @@ pub(super) async fn maker_cycle(
             inventory_exit_qty,
             size_skew: size_skew_decision,
             nonlinear_skew,
+            external_skew,
+            external_excess_bps,
             guard: guard_decision,
             wind_down,
             qty_tolerance,
         },
         halted,
     );
+    let external_skew_shift_bps = plan.external_skew_shift_bps;
+    let inventory_skew_shift_bps = legacy_inventory_skew_shift_bps(mark, &plan);
+    if external_skew_transitioned(*external_skew_previous_shift_bps, external_skew_shift_bps) {
+        emit_external_skew_transition(
+            output_format,
+            symbol,
+            cycle,
+            external_skew_shift_bps,
+            external_excess_bps,
+        );
+    }
+    *external_skew_previous_shift_bps = external_skew_shift_bps;
     let raw_inventory_exit = plan.requested_inventory_exit;
     if exit_fill_observed {
         *inventory_exit_pending = false;
@@ -1043,17 +1111,15 @@ pub(super) async fn maker_cycle(
         account: account_balance.as_ref(),
         actions: &actions,
         fills: &fills,
+        excess_bps_at_fill: external_excess_bps,
         stats,
         halt_vol_bps: halted.then(|| breaker.vol_bps()),
         spread_decision: &spread_decision,
         size_skew_decision: &size_skew_decision,
         guard_decision: &guard_decision,
         external_basis_bps,
-        skew_shift_bps: if mark > 0.0 {
-            (mark - ref_center) / mark * 1e4
-        } else {
-            0.0
-        },
+        external_skew_shift_bps,
+        skew_shift_bps: inventory_skew_shift_bps,
         exit_status,
         cfg,
         performance: performance_summary.as_ref(),
@@ -1085,6 +1151,108 @@ fn eligible_quote_qty(resting: &[RestingQuote], mark: f64, band_bps: f64) -> (f6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_skew_transition_detects_dead_zone_crossings_and_sign_flips() {
+        assert!(!external_skew_transitioned(0.0, 0.0));
+        assert!(external_skew_transitioned(0.0, 1.0));
+        assert!(external_skew_transitioned(1.0, 0.0));
+        assert!(!external_skew_transitioned(1.0, 2.0));
+        assert!(external_skew_transitioned(1.0, -1.0));
+    }
+
+    #[test]
+    fn legacy_skew_telemetry_excludes_external_center_offset() {
+        let plan = maker::CyclePlan {
+            requested_inventory_exit: None,
+            inventory_exit: None,
+            exit_suppression: None,
+            actions: Vec::new(),
+            inventory_ref_center: 100.0,
+            ref_center: 100.04,
+            external_skew_shift_bps: 4.0,
+        };
+
+        assert_eq!(legacy_inventory_skew_shift_bps(100.0, &plan), 0.0);
+        assert_ne!(plan.ref_center, plan.inventory_ref_center);
+    }
+
+    #[test]
+    fn fill_excess_telemetry_expires_to_none_at_guard_freshness_boundary() {
+        let now = Instant::now();
+        let mut telemetry = super::super::pipeline::ExternalExcessTelemetry::default();
+        let decision = maker::GuardDecision {
+            enabled: true,
+            active: false,
+            endangered: None,
+            divergence_bps: Some(0.0),
+        };
+        telemetry.observe(
+            decision.divergence_bps,
+            Some(maker::ExternalDivergence {
+                divergence_bps: 0.0,
+                age_ms: 5000,
+            }),
+            5000,
+            now,
+        );
+        assert_eq!(telemetry.current(now), Some(0.0));
+        assert_eq!(
+            telemetry.current(now + std::time::Duration::from_millis(1)),
+            None
+        );
+
+        telemetry.observe(None, None, 5000, now);
+        assert_eq!(telemetry.current(now), None);
+    }
+
+    #[test]
+    fn io_delay_is_included_before_external_freshness_decision() {
+        let normalized_at = Instant::now();
+        let observed_at = normalized_at + std::time::Duration::from_millis(200);
+        let timed = super::super::pipeline::TimedExternalDivergence {
+            value: maker::ExternalDivergence {
+                divergence_bps: 8.0,
+                age_ms: 4_900,
+            },
+            normalized_at,
+        };
+        let aged = timed.at(observed_at);
+        assert_eq!(aged.age_ms, 5_100);
+
+        let mut guard = maker::GuardController::new(maker::GuardConfig {
+            enabled: true,
+            enter_bps: 6.0,
+            exit_bps: 3.0,
+            max_age_ms: 5_000,
+        })
+        .unwrap();
+        // The pre-existing guard sees exactly the pre-I/O typed input, so the
+        // default-off arm retains its established side-suppression action.
+        let decision = guard.observe(Some(timed.value));
+        assert!(decision.active);
+        assert_eq!(decision.endangered, Some(OrderSide::Sell));
+        let (fresh, excess_bps) =
+            external_excess_at_plan(Some(timed), &decision, 5_000, observed_at);
+        assert_eq!(fresh, None);
+        assert_eq!(excess_bps, None);
+        assert_eq!(
+            maker::external_skew_shift_bps(
+                maker::ExternalSkewConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+                excess_bps,
+            ),
+            0.0
+        );
+
+        let mut telemetry = super::super::pipeline::ExternalExcessTelemetry::default();
+        // Defensively reject the already-stale sample even if a caller passes
+        // it alongside a numeric value.
+        telemetry.observe(decision.divergence_bps, Some(aged), 5_000, observed_at);
+        assert_eq!(telemetry.current(observed_at), None);
+    }
 
     fn trade(side: Option<&str>, price: &str, qty: &str) -> Trade {
         Trade {

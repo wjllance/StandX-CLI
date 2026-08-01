@@ -91,6 +91,29 @@ impl NonlinearSkewFileConfig {
     }
 }
 
+/// Continuous external-price center offset (`[external_skew]`). This mechanism
+/// is TOML-only so frozen A/B arm files remain the single source of truth.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ExternalSkewFileConfig {
+    pub enabled: Option<bool>,
+    pub lambda: Option<f64>,
+    pub cap_bps: Option<f64>,
+    pub dead_zone_bps: Option<f64>,
+}
+
+impl ExternalSkewFileConfig {
+    pub(super) fn into_domain(self) -> standx_maker::ExternalSkewConfig {
+        let defaults = standx_maker::ExternalSkewConfig::default();
+        standx_maker::ExternalSkewConfig {
+            enabled: self.enabled.unwrap_or(defaults.enabled),
+            lambda: self.lambda.unwrap_or(defaults.lambda),
+            cap_bps: self.cap_bps.unwrap_or(defaults.cap_bps),
+            dead_zone_bps: self.dead_zone_bps.unwrap_or(defaults.dead_zone_bps),
+        }
+    }
+}
+
 /// External-price defensive guard (`[external_guard]`). Field defaults match
 /// [`standx_maker::GuardConfig`] so partial files stay valid.
 #[derive(Debug, Clone, Deserialize)]
@@ -144,6 +167,7 @@ pub(super) struct MakerFileConfig {
     pub adaptive_spread: Option<AdaptiveSpreadFileConfig>,
     pub size_skew: Option<SizeSkewFileConfig>,
     pub nonlinear_skew: Option<NonlinearSkewFileConfig>,
+    pub external_skew: Option<ExternalSkewFileConfig>,
     pub external_guard: Option<ExternalGuardFileConfig>,
     pub stop_loss: Option<f64>,
     pub alert_loss: Option<f64>,
@@ -273,6 +297,10 @@ pub(super) fn merge(
         .nonlinear_skew
         .map(|config| config.into_domain())
         .unwrap_or_default();
+    let external_skew = file
+        .external_skew
+        .map(|config| config.into_domain())
+        .unwrap_or_default();
     let external_guard_basis_half_life_secs = file
         .external_guard
         .as_ref()
@@ -309,6 +337,7 @@ pub(super) fn merge(
         adaptive_spread,
         size_skew,
         nonlinear_skew,
+        external_skew,
         external_guard,
         external_guard_basis_half_life_secs,
         stop_loss: choose(stop_loss, file.stop_loss, 0.0),
@@ -377,6 +406,7 @@ pub(super) struct MakerRunArgs {
     pub(super) adaptive_spread: standx_maker::AdaptiveSpreadConfig,
     pub(super) size_skew: standx_maker::SizeSkewConfig,
     pub(super) nonlinear_skew: standx_maker::NonlinearSkewConfig,
+    pub(super) external_skew: standx_maker::ExternalSkewConfig,
     pub(super) external_guard: standx_maker::GuardConfig,
     pub(super) external_guard_basis_half_life_secs: u64,
     pub(super) stop_loss: f64,
@@ -400,6 +430,72 @@ pub(super) struct MakerRunArgs {
     pub(super) account_stream_reconnect_backoff: u64,
     pub(super) controlled_disconnect_after: Option<u64>,
     pub(super) verbose: bool,
+}
+
+/// Validate the CLI-owned composition constraints for `[external_skew]`.
+/// Maker core remains a pure signal/center calculation and never learns about
+/// TOML sections or ladder geometry.
+pub(super) fn validate_external_skew(
+    external: standx_maker::ExternalSkewConfig,
+    base: &standx_maker::MakerConfig,
+    adaptive_spread: &standx_maker::AdaptiveSpreadConfig,
+    nonlinear: standx_maker::NonlinearSkewConfig,
+    guard: standx_maker::GuardConfig,
+) -> Result<()> {
+    if !external.lambda.is_finite()
+        || !external.cap_bps.is_finite()
+        || !external.dead_zone_bps.is_finite()
+    {
+        return Err(anyhow::anyhow!("external skew values must be finite"));
+    }
+    if external.lambda < 0.0 {
+        return Err(anyhow::anyhow!("external skew lambda must be >= 0"));
+    }
+    if external.cap_bps <= 0.0 {
+        return Err(anyhow::anyhow!("external skew cap_bps must be > 0"));
+    }
+    if external.dead_zone_bps < 0.0 {
+        return Err(anyhow::anyhow!("external skew dead_zone_bps must be >= 0"));
+    }
+    if !external.enabled {
+        return Ok(());
+    }
+    if !guard.enabled {
+        return Err(anyhow::anyhow!(
+            "enabled external skew requires an enabled [external_guard]"
+        ));
+    }
+    if external.cap_bps >= guard.enter_bps {
+        return Err(anyhow::anyhow!(
+            "external skew cap_bps must be < external_guard enter_bps"
+        ));
+    }
+
+    let ladder_bps = f64::from(base.levels.saturating_sub(1)) * base.level_step_bps;
+    // `skew_center_with` falls back to the legacy linear curve when nonlinear
+    // skew is off, and that curve saturates at `base.skew_bps`.
+    let inventory_cap_bps = if nonlinear.enabled {
+        nonlinear.cap_bps
+    } else {
+        base.skew_bps
+    };
+    let spread_cap_bps = if adaptive_spread.enabled {
+        adaptive_spread
+            .tiers
+            .iter()
+            .map(|tier| tier.spread_bps)
+            .fold(base.spread_bps, f64::max)
+    } else {
+        base.spread_bps
+    };
+    let budget_bps = spread_cap_bps + ladder_bps + inventory_cap_bps + external.cap_bps;
+    if budget_bps > base.band_bps {
+        return Err(anyhow::anyhow!(
+            "external skew violates band red line: spread_bps + ladder + inventory cap + cap_bps = {budget_bps} must be <= band_bps {}",
+            base.band_bps
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -664,6 +760,223 @@ add_side_factor = 0.5
         assert!(!guard.enabled);
         assert_eq!(guard.enter_bps, 8.0);
         assert_eq!(guard.exit_bps, 3.0);
+    }
+
+    #[test]
+    fn parses_external_skew_full_partial_and_rejects_unknown_fields() {
+        let config: MakerFileConfig = toml::from_str(
+            "[external_skew]\nenabled = true\nlambda = 0.5\ncap_bps = 8.0\ndead_zone_bps = 1.0\n",
+        )
+        .unwrap();
+        let skew = config.external_skew.unwrap().into_domain();
+        assert!(skew.enabled);
+        assert_eq!(skew.lambda, 0.5);
+        assert_eq!(skew.cap_bps, 8.0);
+        assert_eq!(skew.dead_zone_bps, 1.0);
+
+        let partial: MakerFileConfig = toml::from_str("[external_skew]\nlambda = 0.25\n").unwrap();
+        let skew = partial.external_skew.unwrap().into_domain();
+        assert!(!skew.enabled);
+        assert_eq!(skew.lambda, 0.25);
+        assert_eq!(skew.cap_bps, 8.0);
+        assert_eq!(skew.dead_zone_bps, 1.0);
+
+        assert!(toml::from_str::<MakerFileConfig>(
+            "[external_skew]\nenabled = true\nunknown = 1\n"
+        )
+        .is_err());
+    }
+
+    fn external_skew_validation_base() -> standx_maker::MakerConfig {
+        standx_maker::MakerConfig {
+            spread_bps: 8.0,
+            band_bps: 30.0,
+            level_step_bps: 2.0,
+            refresh_bps: 4.0,
+            levels: 1,
+            size: 0.1,
+            max_position: 1.0,
+            skew_bps: 8.0,
+            price_decimals: 3,
+            qty_decimals: 2,
+            min_order_qty: 0.1,
+        }
+    }
+
+    #[test]
+    fn external_skew_validation_enforces_guard_and_band_red_lines() {
+        let external = standx_maker::ExternalSkewConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let nonlinear = standx_maker::NonlinearSkewConfig {
+            enabled: true,
+            boost: 3.0,
+            cap_bps: 12.0,
+        };
+        let guard = standx_maker::GuardConfig {
+            enabled: true,
+            enter_bps: 10.0,
+            exit_bps: 5.0,
+            max_age_ms: 5000,
+        };
+        assert!(validate_external_skew(
+            external,
+            &external_skew_validation_base(),
+            &Default::default(),
+            nonlinear,
+            guard,
+        )
+        .is_ok());
+
+        let mut too_many_levels = external_skew_validation_base();
+        too_many_levels.levels = 3;
+        let error = validate_external_skew(
+            external,
+            &too_many_levels,
+            &Default::default(),
+            nonlinear,
+            guard,
+        )
+        .expect_err("outer ladder levels must consume band budget");
+        assert!(error.to_string().contains("band red line"), "{error}");
+
+        let wide_guard = standx_maker::GuardConfig {
+            enter_bps: 20.0,
+            ..guard
+        };
+        let exact_edge = standx_maker::ExternalSkewConfig {
+            cap_bps: 10.0,
+            ..external
+        };
+        assert!(validate_external_skew(
+            exact_edge,
+            &external_skew_validation_base(),
+            &Default::default(),
+            nonlinear,
+            wide_guard,
+        )
+        .is_ok());
+        let over_edge = standx_maker::ExternalSkewConfig {
+            cap_bps: 10.5,
+            ..external
+        };
+        assert!(validate_external_skew(
+            over_edge,
+            &external_skew_validation_base(),
+            &Default::default(),
+            nonlinear,
+            wide_guard,
+        )
+        .is_err());
+
+        let guard_disabled = standx_maker::GuardConfig {
+            enabled: false,
+            ..guard
+        };
+        assert!(validate_external_skew(
+            external,
+            &external_skew_validation_base(),
+            &Default::default(),
+            nonlinear,
+            guard_disabled,
+        )
+        .is_err());
+
+        let adaptive_spread = standx_maker::AdaptiveSpreadConfig {
+            enabled: true,
+            min_spread_bps: 8.0,
+            max_spread_bps: 18.0,
+            tiers: vec![standx_maker::SpreadTier {
+                enter_vol_bps: None,
+                exit_vol_bps: None,
+                spread_bps: 18.0,
+                refresh_bps: 4.0,
+            }],
+        };
+        assert!(validate_external_skew(
+            external,
+            &external_skew_validation_base(),
+            &adaptive_spread,
+            nonlinear,
+            guard,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn external_skew_validation_rejects_invalid_scalars_even_when_disabled() {
+        let base = external_skew_validation_base();
+        for external in [
+            standx_maker::ExternalSkewConfig {
+                lambda: f64::NAN,
+                ..Default::default()
+            },
+            standx_maker::ExternalSkewConfig {
+                lambda: -0.5,
+                ..Default::default()
+            },
+            standx_maker::ExternalSkewConfig {
+                cap_bps: 0.0,
+                ..Default::default()
+            },
+            standx_maker::ExternalSkewConfig {
+                dead_zone_bps: -1.0,
+                ..Default::default()
+            },
+        ] {
+            assert!(validate_external_skew(
+                external,
+                &base,
+                &Default::default(),
+                Default::default(),
+                Default::default(),
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn external_skew_band_budget_uses_legacy_cap_when_nonlinear_is_off() {
+        let external = standx_maker::ExternalSkewConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let nonlinear = standx_maker::NonlinearSkewConfig::default();
+        let guard = standx_maker::GuardConfig {
+            enabled: true,
+            enter_bps: 10.0,
+            exit_bps: 5.0,
+            max_age_ms: 5000,
+        };
+        let mut base = external_skew_validation_base();
+        base.skew_bps = 16.0;
+        assert!(
+            validate_external_skew(external, &base, &Default::default(), nonlinear, guard,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn external_skew_candidate_is_frozen_baseline_plus_one_section() {
+        let baseline = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/maker-guard-hype-candidate.toml"
+        ));
+        let candidate = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/maker-external-skew-hype-candidate.toml"
+        ));
+        let suffix = concat!(
+            "\n# Candidate arm (docs/28): continuous external-price center offset.\n",
+            "# Band red line: spread(8) + nonlinear.cap(12) + external.cap(8) = 28 <= band(30).\n",
+            "[external_skew]\n",
+            "enabled = true\n",
+            "lambda = 0.5\n",
+            "cap_bps = 8.0\n",
+            "dead_zone_bps = 1.0\n",
+        );
+        assert_eq!(candidate.strip_suffix(suffix), Some(baseline));
     }
 
     /// The frozen production baseline (docs/25: skew + guard both on) must keep

@@ -32,6 +32,7 @@ fn desired(
         position,
         SizeSkewDecision::INACTIVE,
         NonlinearSkewConfig::default(),
+        0.0,
         GuardDecision::INACTIVE,
     )
 }
@@ -92,6 +93,7 @@ fn requotes_on_touch_move_without_creating_crossed_quote() {
         &[],
         0,
         Default::default(),
+        0.0,
     );
     assert!(actions
         .iter()
@@ -126,6 +128,7 @@ fn requotes_on_touch_move_without_creating_crossed_quote() {
         &resting,
         1,
         Default::default(),
+        0.0,
     );
     assert!(actions.iter().any(|action| matches!(
         action,
@@ -273,6 +276,7 @@ fn reconcile_hold_within_refresh() {
         &rest,
         7,
         Default::default(),
+        0.0,
     );
     assert!(
         actions.iter().all(|a| matches!(a, Action::Hold { .. })),
@@ -301,6 +305,7 @@ fn reconcile_requote_beyond_refresh() {
         &rest,
         1,
         Default::default(),
+        0.0,
     );
     // Expect: cancel(buy, mark_moved), then places for buy+sell.
     assert!(matches!(
@@ -337,6 +342,7 @@ fn reconcile_cancel_outside_band_precedence() {
         &rest,
         1,
         Default::default(),
+        0.0,
     );
     assert!(
         matches!(
@@ -368,6 +374,7 @@ fn reconcile_cancel_would_cross() {
         &rest,
         1,
         Default::default(),
+        0.0,
     );
     assert!(
         matches!(
@@ -416,6 +423,7 @@ fn reconcile_stale_level() {
         &rest,
         1,
         Default::default(),
+        0.0,
     );
     let stale: Vec<_> = actions
         .iter()
@@ -740,6 +748,7 @@ fn reconcile_skew_requote() {
         &rest,
         1,
         Default::default(),
+        0.0,
     );
     assert!(actions.iter().any(|a| matches!(
         a,
@@ -763,6 +772,7 @@ fn reconcile_skew_requote() {
         &rest2,
         1,
         Default::default(),
+        0.0,
     );
     assert!(actions2.iter().any(|a| matches!(a, Action::Hold { .. })));
     assert!(!actions2.iter().any(|a| matches!(a, Action::Cancel { .. })));
@@ -873,6 +883,8 @@ fn cycle_plan_pulls_quotes_for_exit_and_suppresses_exit_during_vol_halt() {
         inventory_exit_qty: 0.01,
         size_skew: Default::default(),
         nonlinear_skew: Default::default(),
+        external_skew: Default::default(),
+        external_excess_bps: None,
         guard: Default::default(),
         wind_down: false,
         qty_tolerance: 0.0005,
@@ -938,6 +950,8 @@ fn vol_halt_suppresses_wind_down_exit_with_typed_reason() {
         inventory_exit_qty: 0.0,
         size_skew: Default::default(),
         nonlinear_skew: Default::default(),
+        external_skew: Default::default(),
+        external_excess_bps: None,
         guard: Default::default(),
         wind_down: true,
         qty_tolerance: 0.0005,
@@ -992,6 +1006,8 @@ fn inactive_market_data_suppresses_exit_and_outranks_halt() {
         inventory_exit_qty: 0.01,
         size_skew: Default::default(),
         nonlinear_skew: Default::default(),
+        external_skew: Default::default(),
+        external_excess_bps: None,
         guard: Default::default(),
         wind_down,
         qty_tolerance: 0.0005,
@@ -1093,6 +1109,8 @@ fn cycle_plan_reserves_delayed_places_and_caps_directional_exposure() {
             inventory_exit_qty: 0.0,
             size_skew: Default::default(),
             nonlinear_skew: Default::default(),
+            external_skew: Default::default(),
+            external_excess_bps: None,
             guard: Default::default(),
             wind_down: false,
             qty_tolerance: 0.0005,
@@ -1136,6 +1154,8 @@ fn paused_market_data_cancels_without_placing_or_exiting() {
             inventory_exit_qty: 0.01,
             size_skew: Default::default(),
             nonlinear_skew: Default::default(),
+            external_skew: Default::default(),
+            external_excess_bps: None,
             guard: Default::default(),
             wind_down: false,
             qty_tolerance: 0.0005,
@@ -1198,6 +1218,8 @@ fn inactive_size_skew_is_exactly_plan_equivalent_across_state_grid() {
                     inventory_exit_qty: 0.0,
                     size_skew: SizeSkewDecision::default(),
                     nonlinear_skew: Default::default(),
+                    external_skew: Default::default(),
+                    external_excess_bps: None,
                     guard: Default::default(),
                     wind_down: false,
                     qty_tolerance: 0.0005,
@@ -1264,6 +1286,8 @@ fn disabled_nonlinear_and_inactive_guard_are_plan_equivalent_across_state_grid()
                 inventory_exit_qty: 0.0,
                 size_skew: SizeSkewDecision::default(),
                 nonlinear_skew: Default::default(),
+                external_skew: Default::default(),
+                external_excess_bps: None,
                 guard: Default::default(),
                 wind_down: false,
                 qty_tolerance: 0.0005,
@@ -1355,6 +1379,8 @@ fn guard_suppresses_endangered_side_and_cancels_its_resting_quotes() {
             inventory_exit_qty: 0.0,
             size_skew: Default::default(),
             nonlinear_skew: Default::default(),
+            external_skew: Default::default(),
+            external_excess_bps: None,
             guard: GuardDecision {
                 enabled: true,
                 active: true,
@@ -1424,6 +1450,8 @@ fn combined_high_inventory_and_guard_keeps_all_invariants() {
             inventory_exit_qty: 0.0,
             size_skew: Default::default(),
             nonlinear_skew: nl,
+            external_skew: Default::default(),
+            external_excess_bps: None,
             guard: GuardDecision {
                 enabled: true,
                 active: true,
@@ -1473,6 +1501,8 @@ fn combined_high_inventory_and_guard_keeps_all_invariants() {
             inventory_exit_qty: 0.0,
             size_skew: Default::default(),
             nonlinear_skew: nl,
+            external_skew: Default::default(),
+            external_excess_bps: None,
             guard: GuardDecision {
                 enabled: true,
                 active: false,
@@ -1488,6 +1518,239 @@ fn combined_high_inventory_and_guard_keeps_all_invariants() {
         .actions
         .iter()
         .any(|action| matches!(action, Action::Place(q) if q.side == OrderSide::Buy)));
+}
+
+fn enabled_external_skew() -> ExternalSkewConfig {
+    ExternalSkewConfig {
+        enabled: true,
+        lambda: 0.5,
+        cap_bps: 8.0,
+        dead_zone_bps: 1.0,
+    }
+}
+
+#[test]
+fn external_skew_composes_after_inventory_skew_deterministically() {
+    let mut c = cfg();
+    c.skew_bps = 8.0;
+    c.max_position = 1.0;
+    let nonlinear = NonlinearSkewConfig {
+        enabled: true,
+        boost: 3.0,
+        cap_bps: 12.0,
+    };
+    let inventory_center = skew_center_with(&c, nonlinear, 100.0, 0.25);
+    let composed = quote_center(&c, nonlinear, 3.5, 100.0, 0.25);
+    assert_eq!(composed, inventory_center * (1.0 + 3.5 / 1e4));
+}
+
+#[test]
+fn external_skew_disabled_is_exactly_plan_equivalent() {
+    let mut c = cfg();
+    c.skew_bps = 8.0;
+    let input = CycleInput {
+        cycle: 11,
+        market: MarketSnapshot {
+            mark: 100.0,
+            best_bid: Some(99.8),
+            best_ask: Some(100.2),
+        },
+        position: 0.02,
+        resting: &[],
+        pending_slots: &[],
+        market_data_mode: MarketDataMode::Active,
+        active_exit_enabled: false,
+        inventory_exit_pct: 0.0,
+        inventory_exit_qty: 0.0,
+        size_skew: Default::default(),
+        nonlinear_skew: Default::default(),
+        external_skew: Default::default(),
+        external_excess_bps: None,
+        guard: Default::default(),
+        wind_down: false,
+        qty_tolerance: 0.0005,
+    };
+    let baseline = plan_cycle(&c, input, false);
+    let explicitly_disabled = plan_cycle(
+        &c,
+        CycleInput {
+            external_skew: ExternalSkewConfig {
+                enabled: false,
+                lambda: 7.0,
+                cap_bps: 99.0,
+                dead_zone_bps: 0.0,
+            },
+            external_excess_bps: Some(40.0),
+            ..input
+        },
+        false,
+    );
+
+    assert_eq!(explicitly_disabled.actions, baseline.actions);
+    assert_eq!(
+        explicitly_disabled.ref_center.to_bits(),
+        baseline.ref_center.to_bits()
+    );
+    assert_eq!(
+        explicitly_disabled.external_skew_shift_bps.to_bits(),
+        0.0_f64.to_bits()
+    );
+}
+
+#[test]
+fn external_skew_still_shifts_surviving_side_while_guard_is_active() {
+    let c = cfg();
+    let guard = GuardDecision {
+        enabled: true,
+        active: true,
+        endangered: Some(OrderSide::Sell),
+        divergence_bps: Some(7.0),
+    };
+    let make_input = |external_skew, external_excess_bps| CycleInput {
+        cycle: 12,
+        market: MarketSnapshot {
+            mark: 100.0,
+            best_bid: Some(99.8),
+            best_ask: Some(100.2),
+        },
+        position: 0.0,
+        resting: &[],
+        pending_slots: &[],
+        market_data_mode: MarketDataMode::Active,
+        active_exit_enabled: false,
+        inventory_exit_pct: 0.0,
+        inventory_exit_qty: 0.0,
+        size_skew: Default::default(),
+        nonlinear_skew: Default::default(),
+        external_skew,
+        external_excess_bps,
+        guard,
+        wind_down: false,
+        qty_tolerance: 0.0005,
+    };
+    let baseline = plan_cycle(&c, make_input(Default::default(), Some(7.0)), false);
+    let shifted = plan_cycle(&c, make_input(enabled_external_skew(), Some(7.0)), false);
+    let buy_price = |plan: &CyclePlan| {
+        plan.actions
+            .iter()
+            .find_map(|action| match action {
+                Action::Place(quote) if quote.side == OrderSide::Buy => Some(quote.price),
+                _ => None,
+            })
+            .expect("guard-surviving buy quote")
+    };
+
+    assert!(buy_price(&shifted) > buy_price(&baseline));
+    assert!(shifted
+        .actions
+        .iter()
+        .all(|action| !matches!(action, Action::Place(q) if q.side == OrderSide::Sell)));
+    assert_eq!(shifted.external_skew_shift_bps, 3.5);
+}
+
+#[test]
+fn shared_external_quote_center_prevents_false_refresh() {
+    let c = cfg();
+    let market = MarketSnapshot {
+        mark: 100.0,
+        best_bid: Some(99.8),
+        best_ask: Some(100.2),
+    };
+    let first = plan_cycle(
+        &c,
+        CycleInput {
+            cycle: 20,
+            market,
+            position: 0.0,
+            resting: &[],
+            pending_slots: &[],
+            market_data_mode: MarketDataMode::Active,
+            active_exit_enabled: false,
+            inventory_exit_pct: 0.0,
+            inventory_exit_qty: 0.0,
+            size_skew: Default::default(),
+            nonlinear_skew: Default::default(),
+            external_skew: enabled_external_skew(),
+            external_excess_bps: Some(8.0),
+            guard: Default::default(),
+            wind_down: false,
+            qty_tolerance: 0.0005,
+        },
+        false,
+    );
+    assert_eq!(first.external_skew_shift_bps, 4.0);
+    assert_eq!(
+        first.ref_center.to_bits(),
+        quote_center(&c, Default::default(), 4.0, 100.0, 0.0).to_bits()
+    );
+    let resting = first
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::Place(quote) => Some(RestingQuote {
+                order_id: Some(format!("{:?}-{}", quote.side, quote.level)),
+                side: quote.side,
+                level: quote.level,
+                price: quote.price,
+                qty: quote.qty,
+                ref_center: first.ref_center,
+                placed_at_cycle: 20,
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let second = plan_cycle(
+        &c,
+        CycleInput {
+            cycle: 21,
+            market,
+            position: 0.0,
+            resting: &resting,
+            pending_slots: &[],
+            market_data_mode: MarketDataMode::Active,
+            active_exit_enabled: false,
+            inventory_exit_pct: 0.0,
+            inventory_exit_qty: 0.0,
+            size_skew: Default::default(),
+            nonlinear_skew: Default::default(),
+            external_skew: enabled_external_skew(),
+            external_excess_bps: Some(8.0),
+            guard: Default::default(),
+            wind_down: false,
+            qty_tolerance: 0.0005,
+        },
+        false,
+    );
+    assert!(second
+        .actions
+        .iter()
+        .all(|action| matches!(action, Action::Hold { .. })));
+    assert!(!second.actions.iter().any(|action| matches!(
+        action,
+        Action::Cancel {
+            reason: CancelReason::MarkMovedBeyondRefresh,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn external_skew_over_band_is_clamped_not_dropped_if_validation_is_bypassed() {
+    let mut c = cfg();
+    c.band_bps = 20.0;
+    let quotes = compute_desired_quotes(
+        &c,
+        100.0,
+        Some(99.5),
+        Some(100.5),
+        0.0,
+        Default::default(),
+        Default::default(),
+        30.0,
+        Default::default(),
+    );
+    let sell = find(&quotes, OrderSide::Sell, 0);
+    assert_eq!(sell.price, 100.20);
 }
 
 // 28. Alert monitor: disabled emits nothing.
@@ -1618,6 +1881,8 @@ fn wind_down_flattens_residual_and_stops_quoting() {
         inventory_exit_qty: 0.0,
         size_skew: Default::default(),
         nonlinear_skew: Default::default(),
+        external_skew: Default::default(),
+        external_excess_bps: None,
         guard: Default::default(),
         wind_down: true,
         qty_tolerance: 0.0005,
@@ -1672,6 +1937,8 @@ fn wind_down_flat_still_suppresses_quotes() {
             inventory_exit_qty: 0.0,
             size_skew: Default::default(),
             nonlinear_skew: Default::default(),
+            external_skew: Default::default(),
+            external_excess_bps: None,
             guard: Default::default(),
             wind_down: true,
             qty_tolerance: 0.0005,
@@ -1705,6 +1972,8 @@ fn wind_down_overrides_threshold_and_honors_tolerance() {
         inventory_exit_qty: 0.01,
         size_skew: Default::default(),
         nonlinear_skew: Default::default(),
+        external_skew: Default::default(),
+        external_excess_bps: None,
         guard: Default::default(),
         wind_down: true,
         qty_tolerance: 0.0005,

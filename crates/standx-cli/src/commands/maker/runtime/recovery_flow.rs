@@ -980,6 +980,10 @@ impl MakerRuntime {
                             mark: self.market.last_mark.unwrap_or(baseline_mark),
                             cycle,
                             output_format,
+                            excess_bps_at_fill: self
+                                .loop_state
+                                .external_excess_telemetry
+                                .current(std::time::Instant::now()),
                         },
                     ) {
                         Ok(outcome) => outcome,
@@ -1052,6 +1056,10 @@ impl MakerRuntime {
                                     mark: self.market.last_mark.unwrap_or(baseline_mark),
                                     cycle,
                                     output_format,
+                                    excess_bps_at_fill: self
+                                        .loop_state
+                                        .external_excess_telemetry
+                                        .current(std::time::Instant::now()),
                                 },
                             ) {
                                 Ok(outcome) => {
@@ -1082,8 +1090,14 @@ impl MakerRuntime {
                                 &mut self.loop_state.ledger,
                                 &mut self.loop_state.stats,
                                 &mut reconnect_fills,
-                                cycle,
-                                output_format,
+                                FillEmissionContext {
+                                    cycle,
+                                    output_format,
+                                    excess_bps_at_fill: self
+                                        .loop_state
+                                        .external_excess_telemetry
+                                        .current(std::time::Instant::now()),
+                                },
                             )
                             .await
                             {
@@ -1450,7 +1464,15 @@ impl MakerRuntime {
 
                         self.loop_state.counters.total_fills += reconnected.fills.len() as u64;
                         for fill in &reconnected.fills {
-                            emit_live_fill(fill, symbol, cycle, output_format);
+                            emit_live_fill(
+                                fill,
+                                symbol,
+                                cycle,
+                                output_format,
+                                self.loop_state
+                                    .external_excess_telemetry
+                                    .current(std::time::Instant::now()),
+                            );
                             if let Some(order_id) = fill.order_id {
                                 let at_ms =
                                     u64::try_from(session.latency_started.elapsed().as_millis())
@@ -1579,6 +1601,10 @@ impl MakerRuntime {
                     mark: self.market.last_mark.unwrap_or(baseline_mark),
                     cycle,
                     output_format,
+                    excess_bps_at_fill: self
+                        .loop_state
+                        .external_excess_telemetry
+                        .current(std::time::Instant::now()),
                 },
             ) {
                 Ok(outcome) => {

@@ -177,10 +177,13 @@ pub(super) struct CycleState<'a> {
     pub(super) size_skew_controller: &'a mut SizeSkewController,
     /// Stage 3 v1 nonlinear price-skew strength (disabled ≡ legacy linear).
     pub(super) nonlinear_skew: standx_maker::NonlinearSkewConfig,
+    pub(super) external_skew: standx_maker::ExternalSkewConfig,
+    pub(super) external_skew_previous_shift_bps: &'a mut f64,
+    pub(super) external_excess_telemetry: &'a mut ExternalExcessTelemetry,
     pub(super) guard_controller: &'a mut standx_maker::GuardController,
     /// Caller-normalized external leader observation for this cycle; `None`
     /// when the guard is disabled or the feed has no usable sample.
-    pub(super) external_divergence: Option<standx_maker::ExternalDivergence>,
+    pub(super) external_divergence: Option<TimedExternalDivergence>,
     /// Current divergence-basis EMA (telemetry only).
     pub(super) external_basis_bps: Option<f64>,
     pub(super) order_request_deadlines: Option<&'a mut OrderRequestDeadlines>,
@@ -191,6 +194,68 @@ pub(super) struct CycleState<'a> {
     /// safety decisions.
     pub(super) order_latency: Option<&'a mut OrderLatencyTracker>,
     pub(super) latency_started: Option<Instant>,
+}
+
+/// An external observation plus the instant at which its feed age was
+/// normalized. Account/audit I/O may delay planning, so the elapsed time must
+/// be folded back into `age_ms` immediately before the guard consumes it.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TimedExternalDivergence {
+    pub(super) value: standx_maker::ExternalDivergence,
+    pub(super) normalized_at: Instant,
+}
+
+impl TimedExternalDivergence {
+    pub(super) fn at(self, now: Instant) -> standx_maker::ExternalDivergence {
+        let elapsed_ms = u64::try_from(
+            now.saturating_duration_since(self.normalized_at)
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX);
+        standx_maker::ExternalDivergence {
+            divergence_bps: self.value.divergence_bps,
+            age_ms: self.value.age_ms.saturating_add(elapsed_ms),
+        }
+    }
+}
+
+/// Last guard-normalized excess sample available to fill telemetry. The expiry
+/// preserves the guard's `max_age_ms` fail-open semantics between cycles without
+/// adding a feed read or a second signal calculation.
+#[derive(Debug, Default)]
+pub(super) struct ExternalExcessTelemetry {
+    value_bps: Option<f64>,
+    valid_until: Option<Instant>,
+}
+
+impl ExternalExcessTelemetry {
+    pub(super) fn observe(
+        &mut self,
+        value_bps: Option<f64>,
+        input: Option<standx_maker::ExternalDivergence>,
+        max_age_ms: u64,
+        now: Instant,
+    ) {
+        let Some((value_bps, input)) = value_bps.filter(|value| value.is_finite()).zip(
+            input.filter(|sample| sample.age_ms <= max_age_ms && sample.divergence_bps.is_finite()),
+        ) else {
+            self.value_bps = None;
+            self.valid_until = None;
+            return;
+        };
+        let remaining_ms = max_age_ms - input.age_ms;
+        self.value_bps = Some(value_bps);
+        self.valid_until = Some(now + Duration::from_millis(remaining_ms));
+    }
+
+    pub(super) fn current(&self, now: Instant) -> Option<f64> {
+        match (self.value_bps, self.valid_until) {
+            (Some(value), Some(valid_until)) if now <= valid_until && value.is_finite() => {
+                Some(value)
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Default)]

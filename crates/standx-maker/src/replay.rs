@@ -173,6 +173,8 @@ pub fn run_replay(
                             inventory_exit_qty: settings.inventory_exit_qty,
                             size_skew: size_skew_decision,
                             nonlinear_skew: Default::default(),
+                            external_skew: Default::default(),
+                            external_excess_bps: None,
                             guard: Default::default(),
                             wind_down: false,
                             qty_tolerance: 0.0005,
