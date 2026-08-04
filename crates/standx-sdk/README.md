@@ -1,7 +1,8 @@
 # standx-sdk
 
-> Low-level Rust SDK for the StandX perpetual DEX: typed REST APIs, public and
-> authenticated WebSocket streams, data models, and Ed25519 request signing.
+> Low-level Rust SDK for the StandX perpetual DEX, built for supervised
+> automated trading: typed REST APIs, explicit stream health, correlation-first
+> asynchronous order commands, and market updates that preserve venue timing.
 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](../../LICENSE)
@@ -16,6 +17,19 @@ stream lifecycles, request signing, or custom transport supervision.
 | Shell commands, JSON output, and live-safety gates | [`standx` CLI](../../README.md) |
 | StandX REST, WebSocket, auth, and wire models in Rust | `standx-sdk` |
 | Deterministic market-making strategy and risk logic | [`standx-maker`](../standx-maker/README.md) |
+
+## What makes it different
+
+- **Order effects stay staged.** Prepared WebSocket commands expose their
+  request ID before I/O; local write, gateway acknowledgement, and venue/account
+  effectiveness remain available as separate signals that callers must
+  reconcile.
+- **Private streams are supervised.** Account and order-response connections
+  return shared health state, explicit failure reasons, and caller-owned task
+  handles alongside their event or response receivers.
+- **Market timing is preserved.** `price` and `depth_book` updates retain venue
+  sequence, envelope and payload timestamps when present, plus local monotonic
+  receipt time for cross-channel coherence decisions.
 
 ## Status
 
