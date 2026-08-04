@@ -140,8 +140,14 @@ let order = client
     })
     .await?;
 
-println!("order id: {}", order.id);
+println!("submission request id: {}", order.id);
 ```
+
+The `Order.id` returned by `create_order` is the gateway `request_id`, not the
+integer venue order ID accepted by `cancel_order`. Treat the REST response as a
+submission acknowledgement. Before considering the order effective or trying
+to cancel it, confirm it through the account order stream or locate its
+authoritative venue ID in `get_open_orders` using the unique `cl_ord_id`.
 
 ### Public market WebSocket
 
@@ -190,11 +196,21 @@ channel. `connect` returns an `OrderCommandSender`, correlated response
 receiver, `OrderResponseHealth`, and supervisor task.
 
 Commands can be prepared before I/O so the request ID is registered before a
-write begins:
+write begins. Keep socket delivery, gateway acknowledgement, and venue/account
+effectiveness as separate lifecycle stages:
 
 1. Call `prepare_create_order` or `prepare_cancel_order`.
-2. Store `PreparedOrderCommand::request_id()` in the caller's ledger.
-3. Call `send_prepared` and correlate the eventual `OrderResponse`.
+2. Store `PreparedOrderCommand::request_id()` in the caller's ledger before I/O.
+3. Call `send_prepared`; success means only that the frame reached the local
+   WebSocket writer, so keep the request pending.
+4. Correlate the `OrderResponse`, then require the matching account order event
+   or an authoritative REST observation before treating placement or
+   cancellation as effective. A code-zero gateway `accepted` response alone is
+   not venue confirmation.
+5. After cancellation, confirm a terminal account event or REST absence and
+   reconcile the position. On timeout, disconnect, contradiction, or unknown
+   effectiveness, freeze new placements, run bounded maker-order cleanup, and
+   resume only after the order book and position reconcile.
 
 `OrderResponseStream::new(session_id)?.with_verbose(true)` logs only raw
 post-authentication inbound responses to stderr. Signed outbound commands and
@@ -207,15 +223,24 @@ account WebSocket, and order-response WebSocket addresses:
 
 ```rust
 use standx_sdk::client::StandXClient;
+use standx_sdk::websocket::StandXWebSocket;
 use standx_sdk::StandXEndpoints;
 
 let endpoints = StandXEndpoints::new("https://perps.example.com")?;
 let client = StandXClient::from_endpoints(&endpoints)?;
+let public_stream = StandXWebSocket::without_auth_from_endpoints(&endpoints)?;
 ```
 
 Custom plaintext HTTP is accepted only for localhost or loopback test servers.
 Invalid configuration returns an error rather than falling back to production.
-The stream types provide corresponding `from_endpoints` constructors.
+For public market streams, use `StandXWebSocket::without_auth_from_endpoints`
+as shown above. Public REST calls through `StandXClient` do not need credentials,
+but account and order methods load and send the JWT to the configured REST host;
+order requests may also include signatures. The authenticated
+`StandXWebSocket::from_endpoints`, `AccountStream::from_endpoints`, and
+`OrderResponseStream::from_endpoints` constructors load and send the JWT to the
+configured stream host. Use custom endpoints for authenticated traffic only
+when those hosts are trusted with the account credentials.
 
 ### Models and errors
 
