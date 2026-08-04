@@ -1,52 +1,74 @@
 # standx-sdk
 
-> Rust SDK for the StandX perpetual DEX — REST client, WebSocket streams, data
-> models, and Ed25519 request signing.
+> Low-level Rust SDK for the StandX perpetual DEX: typed REST APIs, public and
+> authenticated WebSocket streams, data models, and Ed25519 request signing.
 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](../../LICENSE)
 
-This is the library that powers the [`standx` CLI](../../README.md). If your
-agent can shell out, use the CLI. If you are writing a Rust bot and want typed
-models, streams, and signing without a subprocess, use this crate directly.
+`standx-sdk` is the exchange integration crate behind the
+[`standx` CLI](../../README.md). Use the CLI for shell-based automation. Use
+this crate when a Rust application needs direct access to typed responses,
+stream lifecycles, request signing, or custom transport supervision.
 
-**Presentation-free by design**: no table/TUI/formatting dependencies, nothing
-written to stdout, and no reading of global config. Table rendering for the core
-models is behind the optional `tabled` feature, which only the CLI enables.
-WebSocket debug tracing is opt-in (`StandXWebSocket::new_with_verbose(true)` /
-`without_auth_with_verbose`) and goes to stderr.
+| Need | Use |
+|------|-----|
+| Shell commands, JSON output, and live-safety gates | [`standx` CLI](../../README.md) |
+| StandX REST, WebSocket, auth, and wire models in Rust | `standx-sdk` |
+| Deterministic market-making strategy and risk logic | [`standx-maker`](../standx-maker/README.md) |
 
-**Stability**: pre-1.0 (`0.1.0`) — the API can change between releases. MSRV 1.75.
+## Status
 
----
+- **Version:** `0.1.0`, pre-1.0; public APIs may change between releases.
+- **MSRV:** Rust 1.75.
+- **Distribution:** Git or workspace path dependency; not published to
+  crates.io yet.
+- **Output:** no stdout output or TUI dependency. Optional WebSocket diagnostics
+  go to stderr only when verbose mode is enabled.
 
-## Install
+Public REST and market streams need no credentials. Authenticated constructors
+and private REST calls load credentials from `STANDX_JWT` /
+`STANDX_PRIVATE_KEY`, falling back to the credential store written by the CLI.
 
-Not published to crates.io yet — depend on it by git:
+## Capabilities
+
+| Module | Purpose |
+|--------|---------|
+| `client` | Public and authenticated REST requests |
+| `websocket` | Public `price`, `depth_book`, `public_trade`, and `kline` streams |
+| `account_stream` | Authenticated `order`, `position`, `trade`, and `balance` events with health tracking |
+| `order_response` | Authenticated WebSocket order commands and correlated responses |
+| `auth` | Credential loading, JWT expiry inspection, and Ed25519 signing |
+| `models` / `error` | Typed API models and structured, classifiable errors |
+| `endpoints` | Validated REST and WebSocket endpoint derivation |
+
+## Installation
+
+Add the SDK from Git:
 
 ```toml
 [dependencies]
 standx-sdk = { git = "https://github.com/wjllance/standx-cli" }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-Or, in a local checkout of this workspace:
+For reproducible applications, pin the Git dependency with Cargo's `rev`
+option. In a local checkout of this workspace, use a path dependency:
 
 ```toml
+[dependencies]
 standx-sdk = { path = "crates/standx-sdk" }
 ```
 
----
+## Quick start: public REST
 
-## Quick Start
-
-Public market data needs no credentials:
+Public market data works without credentials:
 
 ```rust
 use standx_sdk::client::StandXClient;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> standx_sdk::Result<()> {
     let client = StandXClient::new()?;
 
     let ticker = client.get_symbol_market("BTC-USD").await?;
@@ -59,14 +81,31 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
----
+No-argument constructors use the production StandX endpoints.
 
-## What's in the box
+## Authentication and trading
 
-### `client` — REST
+`Credentials` loads environment variables first, then the on-disk credential
+store:
+
+- `STANDX_JWT` authenticates account reads and user streams.
+- `STANDX_PRIVATE_KEY` is the Base58 Ed25519 key used to sign trading requests.
+
+It also exposes JWT lifetime helpers: `is_expired`, `remaining_seconds`, and
+`expires_at_string`. `StandXSigner` provides `from_base58`, `sign_request`,
+`sign_request_now`, and `pubkey_hex` for callers that need direct signing.
+
+> **Live-order warning:** the REST and WebSocket order APIs submit real commands
+> when configured with production endpoints and valid credentials. This SDK
+> does not provide the CLI's confirmation and live-authorization gates.
+
+## API guide
+
+### REST client
 
 `StandXClient` covers public and authenticated REST in one type. Auth headers
-are built per request and signed when a private key is present.
+are built per request and include an Ed25519 signature when a private key is
+available.
 
 | Area | Methods |
 |------|---------|
@@ -74,6 +113,8 @@ are built per request and signed when a private key is present.
 | **Account** | `get_balance`, `get_positions`, `get_open_orders`, `get_order`, `get_order_history`, `get_user_trades`, `get_funding_history` |
 | **Orders** | `create_order`, `cancel_order`, `cancel_orders`, `cancel_all_orders` |
 | **Risk config** | `get_position_config`, `change_leverage`, `change_margin_mode`, `transfer_margin` |
+
+Authenticated order creation uses the same typed client:
 
 ```rust
 use standx_sdk::client::order::CreateOrderParams;
@@ -92,8 +133,8 @@ let order = client
         // Add-liquidity-only: rejected rather than taking. This is the
         // maker-safe TIF; `post_only` is spelled `Alo` on this venue.
         time_in_force: Some(TimeInForce::Alo),
-        // Client-generated correlation ID — how a bot recognises its own
-        // orders after a reconnect.
+        // Client-generated correlation ID for recognising the order after a
+        // reconnect.
         cl_ord_id: Some("mybot-0001".into()),
         ..Default::default()
     })
@@ -102,116 +143,117 @@ let order = client
 println!("order id: {}", order.id);
 ```
 
-### Custom StandX endpoints
+### Public market WebSocket
 
-`StandXEndpoints` validates one root base URL and derives the matching REST,
-market/account WebSocket, and order-response WebSocket addresses:
-
-```rust
-use standx_sdk::{StandXClient, StandXEndpoints};
-
-let endpoints = StandXEndpoints::new("https://perps.example.com")?;
-let client = StandXClient::from_endpoints(&endpoints)?;
-```
-
-The existing no-argument constructors keep using production. Custom plaintext
-HTTP is accepted only for localhost or loopback test servers; invalid custom
-configuration returns an error rather than falling back.
-
-### `auth` — credentials and signing
-
-- `Credentials` — load from env (`STANDX_JWT` / `STANDX_PRIVATE_KEY`) or the
-  on-disk credential store, with JWT expiry inspection (`is_expired`,
-  `remaining_seconds`, `expires_at_string`).
-- `StandXSigner` — Ed25519 signing from a Base58 private key
-  (`from_base58`, `sign_request`, `sign_request_now`, `pubkey_hex`).
-
-The JWT alone is enough to read account state; trading calls additionally
-require the private key.
-
-### `websocket` — public market streams
+Register subscriptions before connecting so the initial connection and every
+reconnect carry the same subscription set:
 
 ```rust
 use standx_sdk::websocket::{StandXWebSocket, WsMessage};
 
 let ws = StandXWebSocket::without_auth()?;
-let mut rx = ws.connect().await?;
 ws.subscribe("price", Some("BTC-USD")).await?;
+let mut rx = ws.connect().await?;
 
-while let Some(msg) = rx.recv().await {
-    match msg {
-        WsMessage::Price(update) => println!("{} seq={:?}", update.data.mark_price, update.seq),
+while let Some(message) = rx.recv().await {
+    match message {
+        WsMessage::Price(update) => {
+            println!("{} seq={:?}", update.data.mark_price, update.seq);
+        }
         WsMessage::Disconnected => break,
         _ => {}
     }
 }
 ```
 
-Channels: `price`, `depth_book`, `public_trade`, `kline`. Messages arrive as a
-typed `WsMessage`; public-market payloads are wrapped in `WsMarketUpdate<T>`,
-which carries the venue's sequence and timestamp alongside the data — so a
-consumer can decide whether two independently-published channels form one
-coherent snapshot instead of assuming it. `connect_managed` returns the reader
-task handle for callers that own the lifecycle.
+Public payloads arrive as typed `WsMessage` variants. `price` and `depth_book`
+use `WsMarketUpdate<T>`, which keeps the venue sequence, venue timestamp, and
+local monotonic receipt time. Consumers can therefore judge whether
+independently published channels form a coherent snapshot.
 
-### `account_stream` — authenticated user streams
+Use `subscribe_with_interval` for `kline`. Use `connect_managed` when the caller
+needs ownership of the reader task for shutdown or supervision. Verbose tracing
+is opt-in through `new_with_verbose` or `without_auth_with_verbose` and writes
+to stderr.
 
-`AccountStream` delivers `AccountEvent` values over the `order`, `position`,
-`trade`, and `balance` channels, with `AccountStreamHealth` exposing per-channel
-sequence numbers, an epoch, and an explicit failure reason. Gap detection is the
-point: a bot that reconciles against a stream needs to know when the stream
-stopped being trustworthy.
+### Authenticated account stream
 
-### `order_response` — WebSocket order commands
+`AccountStream` delivers typed `AccountEvent` values for the `order`,
+`position`, `trade`, and `balance` channels. `AccountStreamHealth` exposes the
+connection epoch, per-channel sequence numbers, and an explicit failure reason
+so consumers can fail closed and reconcile after gaps.
 
-`OrderResponseStream` places and cancels orders over the authenticated
-WS command channel instead of REST, for latency-sensitive callers. Commands can
-be `prepare`d to obtain the `request_id` before sending, so an in-flight order
-is still identifiable if the response never arrives. `OrderResponseHealth`
-reports session liveness. Opt-in
-`OrderResponseStream::new(session_id)?.with_verbose(true)` diagnostics print
-only raw post-authentication inbound responses to stderr; signed outbound
-commands and authentication payloads are never logged.
+### WebSocket order commands
 
-### `models` and `error`
+`OrderResponseStream` places and cancels orders over the authenticated command
+channel. `connect` returns an `OrderCommandSender`, correlated response
+receiver, `OrderResponseHealth`, and supervisor task.
 
-Every wire type is `serde`-serializable: `MarketData`, `PriceData`, `OrderBook`,
-`Trade`, `Kline`, `FundingRate`, `Order`, `Position`, `Balance`, plus the
-`OrderSide` / `OrderType` / `TimeInForce` / `OrderStatus` enums.
+Commands can be prepared before I/O so the request ID is registered before a
+write begins:
 
-`Error` is a `thiserror` enum with retryability baked in — transport failures
-and `RateLimitExceeded { retry_after }` are classified as retryable, so callers
-can branch on the variant rather than on a message string.
+1. Call `prepare_create_order` or `prepare_cancel_order`.
+2. Store `PreparedOrderCommand::request_id()` in the caller's ledger.
+3. Call `send_prepared` and correlate the eventual `OrderResponse`.
 
----
+`OrderResponseStream::new(session_id)?.with_verbose(true)` logs only raw
+post-authentication inbound responses to stderr. Signed outbound commands and
+authentication payloads are never logged.
+
+### Custom endpoints
+
+`StandXEndpoints` validates one root URL and derives matching REST, market and
+account WebSocket, and order-response WebSocket addresses:
+
+```rust
+use standx_sdk::client::StandXClient;
+use standx_sdk::StandXEndpoints;
+
+let endpoints = StandXEndpoints::new("https://perps.example.com")?;
+let client = StandXClient::from_endpoints(&endpoints)?;
+```
+
+Custom plaintext HTTP is accepted only for localhost or loopback test servers.
+Invalid configuration returns an error rather than falling back to production.
+The stream types provide corresponding `from_endpoints` constructors.
+
+### Models and errors
+
+REST data models and `Error` are `serde`-serializable. Core types include
+`MarketData`, `PriceData`, `OrderBook`, `Trade`, `Kline`, `FundingRate`,
+`Order`, `Position`, and `Balance`, plus the `OrderSide`, `OrderType`,
+`TimeInForce`, and `OrderStatus` enums.
+
+`Error::is_retryable()` classifies retryable HTTP/API failures, rate limits,
+and WebSocket failures without requiring callers to parse display strings.
+`Error::to_json()` provides a structured error payload for automation.
 
 ## Feature flags
 
 | Flag | Default | Effect |
 |------|---------|--------|
-| `tabled` | off | Implements `tabled::Tabled` for core models. Enabled by the CLI; SDK consumers otherwise carry no presentation dependencies. |
-
----
+| `tabled` | off | Implements `tabled::Tabled` for core models. The CLI enables it; SDK-only consumers avoid the presentation dependency. |
 
 ## Testing
 
-Unit tests cover models, signing, credential handling, error classification and
-the REST paths. No network required — REST is exercised against `mockito`:
+Tests cover models, signing, credential handling, error classification, REST
+paths, and WebSocket lifecycle behavior. REST uses `mockito`; WebSocket tests
+use local loopback servers. They do not require StandX credentials or an
+external StandX connection.
+
+From the workspace root:
 
 ```bash
-cargo test -p standx-sdk
+cargo test -p standx-sdk --offline
 ```
 
----
+## Related documentation
 
-## Related
-
-- [`standx` CLI](../../README.md) — the agent-facing binary built on this crate
+- [`standx` CLI](../../README.md) — command-line workflows and live-safety gates
 - [`standx-maker`](../standx-maker/README.md) — deterministic market-making
-  strategy and risk engine, also built on this crate
-- [API docs](../../API_DOCUMENTATION.md) — the underlying StandX HTTP/WS API
-
----
+  strategy and risk engine
+- [StandX API reference](../../API_DOCUMENTATION.md) — underlying HTTP and
+  WebSocket protocol
 
 ## License
 
