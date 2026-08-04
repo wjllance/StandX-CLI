@@ -5,7 +5,7 @@
 [21-maker-stage3-live-ab-runbook.md](../21-maker-stage3-live-ab-runbook.md)。
 
 - Release commit：`c4fc893fb86d8c16193017a6dd047b097c57b2d0`（工作树干净）
-- Named operator：wujunlin
+- Named operator：release owner
 - 授权文本（release record）：
 
   > 授权执行 HYPE-USD size=0.1 max_position=1.0 的阶段3 canary 与4小时A/B

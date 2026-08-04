@@ -8,7 +8,7 @@
 
 - Release commit：`45311e79e7b211d662e8c37b993a47118aa62c06`（工作树干净，
   仅未跟踪的 `.mimocode/` 本地目录）
-- Named operator：wujunlin
+- Named operator：release owner
 - 授权文本（release record，2026-07-22 会话中给出）：
 
   > 授权执行 HYPE-USD size=0.1 max_position=1.0 的阶段3v1组合候选 canary 与4小时A/B

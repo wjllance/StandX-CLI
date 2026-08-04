@@ -62,7 +62,7 @@ profile `ab`), per the release owner's instruction "在docker中执行".
   `test_id=stage2-webhook-ccf00583cabf` (stop_loss, position_risk, equity,
   margin; all HTTP 2xx). Receiver confirmation: **confirmed** by the release
   owner — all four messages received in the feishu receiver.
-- Named operator wujunlin confirmed ready with authenticated venue access for
+- Named operator (release owner) confirmed ready with authenticated venue access for
   the first 30 minutes of the canary window.
 
 ## Canary evidence
@@ -200,7 +200,7 @@ Consider adding those paths to `.dockerignore` after the A/B window.
   Dockerfile clean-source gate passed at build. Config hashes unchanged
   (baseline `3df955e9…`, candidate `30fdd415…`); validate-only preflight
   passed 2026-07-17T05:2xZ.
-- Operator wujunlin re-confirmed ready for the canary window.
+- The release owner re-confirmed ready for the canary window.
 
 ### Retry canary (new binary) — passed 2026-07-17T05:35Z
 
@@ -281,7 +281,7 @@ throughout).
   fills_total=11 unchanged since 08:38Z). Residual orders UNKNOWN — the
   final quote pair could not be cancelled (auth), so one bid+ask pair of
   0.01 XAG each may still be resting on the book.
-- Handoff to operator (wujunlin): 1) `standx auth login` on the host to
+- Handoff to the release owner: 1) `standx auth login` on the host to
   refresh credentials.enc; 2) verify `account orders`/`account positions`;
   3) cancel any residual sxmk- orders and flatten the -0.01 if still
   present; 4) only then consider a fresh A/B launch (preflight requires
