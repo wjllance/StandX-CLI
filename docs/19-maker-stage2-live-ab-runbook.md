@@ -1,7 +1,7 @@
 # Maker Stage 2 v0 live canary and A/B runbook
 
 This runbook merges the renewed live gate with Stage 2 rollout. It does not
-record a pass by itself. The named online operator is **wujunlin**. Live work
+record a pass by itself. The named online operator is **the release owner**. Live work
 must not begin until the release record contains this exact authorization:
 
 > 授权执行 XAG-USD size=0.01 max_position=0.2 的阶段2 canary 与2小时A/B
@@ -65,7 +65,7 @@ A successful HTTP response without receiver confirmation is not a pass.
 
 ## Emergency procedure
 
-At least wujunlin must have authenticated venue access throughout the first 30
+At least the release owner must have authenticated venue access throughout the first 30
 minutes. On any unknown fill, residual maker order, failed reconnect/reconcile,
 missing webhook or non-zero terminal position:
 
@@ -78,7 +78,7 @@ missing webhook or non-zero terminal position:
    /opt/standx/bin/standx --output json account positions --symbol XAG-USD
    ```
 
-3. If a residual position remains after stop-loss or cleanup, wujunlin reads
+3. If a residual position remains after stop-loss or cleanup, the release owner reads
    its exact side and quantity, submits one manually reviewed opposite-side
    `--reduce-only` order, and rechecks orders and positions. Never infer the
    quantity from configured `max_position`; never submit an automated flatten.

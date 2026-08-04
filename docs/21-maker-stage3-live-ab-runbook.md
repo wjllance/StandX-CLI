@@ -5,7 +5,7 @@
 相同，本文只记录阶段 3 的差异与本次授权；未提及的章节（应急处置、webhook
 探针、bounded canary 判定顺序）以 19 号手册为准，symbol 一律替换为 HYPE-USD。
 
-Named online operator：**wujunlin**。Live work must not begin until the
+Named online operator：**release owner**。Live work must not begin until the
 release record contains this exact authorization:
 
 > 授权执行 HYPE-USD size=0.1 max_position=1.0 的阶段3 canary 与4小时A/B
