@@ -26,9 +26,11 @@ stream lifecycles, request signing, or custom transport supervision.
 - **Output:** no stdout output or TUI dependency. Optional WebSocket diagnostics
   go to stderr only when verbose mode is enabled.
 
-Public REST and market streams need no credentials. Authenticated constructors
-and private REST calls load credentials from `STANDX_JWT` /
-`STANDX_PRIVATE_KEY`, falling back to the credential store written by the CLI.
+The public market REST methods listed below and unauthenticated market streams
+need no credentials. Authenticated constructors and REST methods use the
+environment credential set when `STANDX_JWT` is present, with
+`STANDX_PRIVATE_KEY` as its optional signing key; otherwise they fall back to
+the credential store written by the CLI.
 
 ## Capabilities
 
@@ -85,8 +87,8 @@ No-argument constructors use the production StandX endpoints.
 
 ## Authentication and trading
 
-`Credentials` loads environment variables first, then the on-disk credential
-store:
+`Credentials::load` treats an environment JWT as the authoritative credential
+set. If `STANDX_JWT` is absent, it falls back to the on-disk credential store:
 
 - `STANDX_JWT` authenticates account reads and user streams.
 - `STANDX_PRIVATE_KEY` is the Base58 Ed25519 key used to sign trading requests.
@@ -109,10 +111,10 @@ available.
 
 | Area | Methods |
 |------|---------|
-| **Market** | `get_symbol_info`, `get_symbol_market`, `get_symbol_price`, `get_depth`, `get_recent_trades`, `get_kline`, `get_funding_rate`, `get_block_trades`, `health_check` |
-| **Account** | `get_balance`, `get_positions`, `get_open_orders`, `get_order`, `get_order_history`, `get_user_trades`, `get_funding_history` |
+| **Public market** | `get_symbol_info`, `get_symbol_market`, `get_symbol_price`, `get_depth`, `get_recent_trades`, `get_kline`, `get_funding_rate`, `health_check` |
+| **Authenticated reads** | `get_block_trades`, `get_balance`, `get_positions`, `get_open_orders`, `get_order`, `get_order_history`, `get_user_trades`, `get_funding_history`, `get_position_config` |
 | **Orders** | `create_order`, `cancel_order`, `cancel_orders`, `cancel_all_orders` |
-| **Risk config** | `get_position_config`, `change_leverage`, `change_margin_mode`, `transfer_margin` |
+| **Risk mutations** | `change_leverage`, `change_margin_mode`, `transfer_margin` |
 
 Authenticated order creation uses the same typed client:
 
@@ -143,11 +145,26 @@ let order = client
 println!("submission request id: {}", order.id);
 ```
 
+#### Order-effect contract
+
+REST and WebSocket order mutations are asynchronous. A successful SDK call
+establishes only the transport or acknowledgement stage documented for that
+method; it does not by itself prove the requested venue effect.
+
 The `Order.id` returned by `create_order` is the gateway `request_id`, not the
 integer venue order ID accepted by `cancel_order`. Treat the REST response as a
 submission acknowledgement. Before considering the order effective or trying
 to cancel it, confirm it through the account order stream or locate its
 authoritative venue ID in `get_open_orders` using the unique `cl_ord_id`.
+
+The REST `cancel_order`, `cancel_orders`, and `cancel_all_orders` methods return
+after a successful response, not after proving that every target is terminal or
+absent. `cancel_all_orders` first snapshots the currently open order IDs and
+then submits an asynchronous batch cancellation, so it cannot cover an order
+that appears after that snapshot. Confirm terminal account events or
+authoritative REST absence for every target, then reconcile the position before
+resuming order placement. On timeout, contradiction, or unknown effectiveness,
+freeze new placements and run bounded cleanup rather than assuming success.
 
 ### Public market WebSocket
 
@@ -186,8 +203,12 @@ to stderr.
 
 `AccountStream` delivers typed `AccountEvent` values for the `order`,
 `position`, `trade`, and `balance` channels. `AccountStreamHealth` exposes the
-connection epoch, per-channel sequence numbers, and an explicit failure reason
-so consumers can fail closed and reconcile after gaps.
+connection epoch, per-channel sequence numbers, and an explicit failure reason.
+Sequence tracking rejects duplicates and regressions, but it does not establish
+contiguity: numeric jumps are accepted and do not mark the stream unhealthy.
+Do not use health alone as a missing-event detector; reconcile authoritative
+orders and positions after reconnects or whenever another signal makes event
+loss plausible.
 
 ### WebSocket order commands
 
@@ -234,9 +255,10 @@ let public_stream = StandXWebSocket::without_auth_from_endpoints(&endpoints)?;
 Custom plaintext HTTP is accepted only for localhost or loopback test servers.
 Invalid configuration returns an error rather than falling back to production.
 For public market streams, use `StandXWebSocket::without_auth_from_endpoints`
-as shown above. Public REST calls through `StandXClient` do not need credentials,
-but account and order methods load and send the JWT to the configured REST host;
-order requests may also include signatures. The authenticated
+as shown above. Only methods in the **Public market** row avoid credential
+loading. Every authenticated read, order method, and risk mutation loads and
+sends the JWT to the configured REST host; calls built with signed auth headers
+may also include an Ed25519 signature. The authenticated
 `StandXWebSocket::from_endpoints`, `AccountStream::from_endpoints`, and
 `OrderResponseStream::from_endpoints` constructors load and send the JWT to the
 configured stream host. Use custom endpoints for authenticated traffic only
