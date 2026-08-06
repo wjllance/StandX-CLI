@@ -46,6 +46,7 @@ runbook 统一放在 [archive/](archive/README.md)，不能作为新的 live 授
 | [17 - WS canary 快速启动](17-ws-command-canary-quickstart.md) | 受控命令链 create/cancel 验证 | 操作手册 |
 | [18 - 当前状态与路线](18-maker-strategy-roadmap.md) | 机制判定、经济结论、优先级与长期不变量 | 当前策略状态真源 |
 | [29 - External skew 候选](29-maker-external-skew-design.md) | 默认关闭候选的设计和预注册判据 | 待裁决候选，不代表已授权 |
+| [30 - 带内 uptime 参数收缩](30-maker-uptime-band-tightening-design.md) | SIP-5A ±10bp 带内 uptime 的渐进参数收缩设计与预注册判据 | 待裁决序列，每步需 owner 裁决 |
 
 ## 生产操作与实验
 
