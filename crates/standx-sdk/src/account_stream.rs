@@ -258,6 +258,34 @@ pub struct AccountStream {
     idle_timeout: Duration,
 }
 
+fn validate_account_auth(envelope: &serde_json::Value) -> Result<()> {
+    if envelope.get("channel").and_then(|value| value.as_str()) != Some("auth") {
+        return Err(Error::WebSocket {
+            message: "unexpected account event before authentication".to_string(),
+        });
+    }
+
+    // Authentication must have positive, explicitly typed venue evidence.
+    // Missing or non-numeric codes are malformed responses, not code 0 success.
+    let code = envelope
+        .pointer("/data/code")
+        .and_then(|value| value.as_i64())
+        .ok_or_else(|| Error::WebSocket {
+            message: "account-stream authentication response has no numeric data.code".to_string(),
+        })?;
+    if code != 200 && code != 0 {
+        return Err(Error::AuthRequired {
+            message: envelope
+                .pointer("/data/msg")
+                .and_then(|value| value.as_str())
+                .unwrap_or("account-stream authentication rejected")
+                .to_string(),
+            resolution: "Run 'standx auth login' and retry".to_string(),
+        });
+    }
+    Ok(())
+}
+
 impl AccountStream {
     pub fn new(epoch: u64) -> Result<Self> {
         Self::from_endpoints(epoch, &StandXEndpoints::default())
@@ -340,25 +368,7 @@ impl AccountStream {
             match message {
                 Message::Text(text) => {
                     let envelope: serde_json::Value = serde_json::from_str(&text)?;
-                    if envelope.get("channel").and_then(|value| value.as_str()) != Some("auth") {
-                        return Err(Error::WebSocket {
-                            message: "unexpected account event before authentication".to_string(),
-                        });
-                    }
-                    let code = envelope
-                        .pointer("/data/code")
-                        .and_then(|value| value.as_i64())
-                        .unwrap_or_default();
-                    if code != 200 && code != 0 {
-                        return Err(Error::AuthRequired {
-                            message: envelope
-                                .pointer("/data/msg")
-                                .and_then(|value| value.as_str())
-                                .unwrap_or("account-stream authentication rejected")
-                                .to_string(),
-                            resolution: "Run 'standx auth login' and retry".to_string(),
-                        });
-                    }
+                    validate_account_auth(&envelope)?;
                     break;
                 }
                 Message::Ping(payload) => write.send(Message::Pong(payload)).await?,
@@ -675,6 +685,66 @@ mod tests {
         assert_eq!(health.last_seq(AccountChannel::Position), 0);
         assert_eq!(health.last_seq(AccountChannel::Trade), 0);
         assert_eq!(health.last_seq(AccountChannel::Balance), 0);
+    }
+
+    #[test]
+    fn account_auth_requires_explicit_numeric_success_code() {
+        for malformed in [
+            r#"{"channel":"auth","data":{"msg":"success"}}"#,
+            r#"{"channel":"auth","data":{"code":null,"msg":"success"}}"#,
+            r#"{"channel":"auth","data":{"code":"200","msg":"success"}}"#,
+        ] {
+            let envelope = serde_json::from_str(malformed).unwrap();
+            assert!(matches!(
+                validate_account_auth(&envelope),
+                Err(Error::WebSocket { message })
+                    if message.contains("no numeric data.code")
+            ));
+        }
+
+        for success in [
+            r#"{"channel":"auth","data":{"code":0,"msg":"success"}}"#,
+            r#"{"channel":"auth","data":{"code":200,"msg":"success"}}"#,
+        ] {
+            let envelope = serde_json::from_str(success).unwrap();
+            validate_account_auth(&envelope).unwrap();
+        }
+
+        let rejected = serde_json::json!({
+            "channel": "auth",
+            "data": { "code": 401, "msg": "token rejected" },
+        });
+        assert!(matches!(
+            validate_account_auth(&rejected),
+            Err(Error::AuthRequired { message, .. }) if message == "token rejected"
+        ));
+    }
+
+    #[tokio::test]
+    async fn connect_rejects_auth_without_numeric_code() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(socket).await.unwrap();
+            let _auth = websocket.next().await.unwrap().unwrap();
+            websocket
+                .send(Message::Text(
+                    r#"{"seq":1,"channel":"auth","data":{"msg":"success"}}"#.into(),
+                ))
+                .await
+                .unwrap();
+        });
+
+        let stream = AccountStream::with_url_and_token(url, "jwt", 3);
+        match stream.connect(&[AccountChannel::Order]).await {
+            Err(Error::WebSocket { message }) => {
+                assert!(message.contains("no numeric data.code"));
+            }
+            Err(error) => panic!("unexpected malformed-auth error: {error:?}"),
+            Ok(_) => panic!("malformed auth response must not create a healthy account stream"),
+        }
+        server.await.unwrap();
     }
 
     #[tokio::test]
