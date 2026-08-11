@@ -27,6 +27,7 @@ pub mod inventory;
 pub mod latency;
 pub mod ledger;
 pub mod market_data;
+pub mod micro_price;
 pub mod ownership;
 pub mod performance;
 pub mod recovery;
@@ -59,6 +60,7 @@ pub use market_data::{
     MarketDataTransition, MARKET_DATA_BAD_GRACE_MS, MARKET_DATA_BAD_OBSERVATIONS_TO_DEGRADE,
     MARKET_DATA_COHERENT_SNAPSHOTS_TO_RECOVER,
 };
+pub use micro_price::{micro_price_shift_bps, MicroPriceConfig};
 pub use ownership::{
     exit_client_order_id, is_current_run_client_order_id, is_maker_client_order_id,
     open_qty_adopts, pending_covers_slot, position_within_limit, quote_client_order_id, QuoteSlot,
@@ -621,6 +623,8 @@ pub struct CycleInput<'a> {
     /// Fresh, finite excess from the external-guard signal chain. `None` fails
     /// open to an exact zero shift.
     pub external_excess_bps: Option<f64>,
+    /// Continuous in-venue touch-mid center offset configuration; default disabled.
+    pub micro_price: MicroPriceConfig,
     /// External-price guard outcome for this cycle; inactive ≡ no suppression.
     pub guard: GuardDecision,
     /// Supervisor-requested wind-down (e.g. an A/B arm past its scheduled
@@ -653,6 +657,9 @@ pub struct CyclePlan {
     pub ref_center: f64,
     /// External component actually applied to the shared quote center this cycle.
     pub external_skew_shift_bps: f64,
+    /// In-venue touch-mid component actually applied to the shared quote center
+    /// this cycle (0 when disabled or inside the dead zone).
+    pub micro_price_shift_bps: f64,
 }
 
 /// Build a deterministic quote/exit plan after the caller has synchronized
@@ -670,6 +677,19 @@ pub struct CyclePlan {
 pub fn plan_cycle(cfg: &MakerConfig, input: CycleInput<'_>, halted: bool) -> CyclePlan {
     let external_shift_bps =
         external_skew_shift_bps(input.external_skew, input.external_excess_bps);
+    // In-venue touch-mid bias: how far the venue's book mid sits from our mark
+    // anchor, in bps. A positive value means the in-venue screen is trading
+    // above our reference. Missing/finite guard handled inside the pure fn.
+    let mid_bias_bps = match (input.market.best_bid, input.market.best_ask) {
+        (Some(bid), Some(ask)) if bid > 0.0 && ask > 0.0 && input.market.mark > 0.0 => {
+            Some(((bid + ask) / 2.0 - input.market.mark) / input.market.mark * 1e4)
+        }
+        _ => None,
+    };
+    let micro_shift_bps = micro_price_shift_bps(input.micro_price, mid_bias_bps);
+    // Micro and external offsets share the same center ladder; sum them into a
+    // single shift so band/no-cross/refresh logic sees one composed center.
+    let total_shift_bps = external_shift_bps + micro_shift_bps;
     let market_active = input.market_data_mode == MarketDataMode::Active;
     // What the configured exit policy asks for, before any market-state or
     // volatility gate. Kept separate purely so suppression is observable: the
@@ -723,7 +743,7 @@ pub fn plan_cycle(cfg: &MakerConfig, input: CycleInput<'_>, halted: bool) -> Cyc
             input.position,
             input.size_skew,
             input.nonlinear_skew,
-            external_shift_bps,
+            total_shift_bps,
             input.guard,
         );
         cap_desired_exposure(cfg, input.position, &raw, input.pending_slots)
@@ -743,7 +763,7 @@ pub fn plan_cycle(cfg: &MakerConfig, input: CycleInput<'_>, halted: bool) -> Cyc
             input.resting,
             input.cycle,
             input.nonlinear_skew,
-            external_shift_bps,
+            total_shift_bps,
         ),
         inventory_ref_center: quote_center(
             cfg,
@@ -755,11 +775,12 @@ pub fn plan_cycle(cfg: &MakerConfig, input: CycleInput<'_>, halted: bool) -> Cyc
         ref_center: quote_center(
             cfg,
             input.nonlinear_skew,
-            external_shift_bps,
+            total_shift_bps,
             input.market.mark,
             input.position,
         ),
         external_skew_shift_bps: external_shift_bps,
+        micro_price_shift_bps: micro_shift_bps,
     }
 }
 

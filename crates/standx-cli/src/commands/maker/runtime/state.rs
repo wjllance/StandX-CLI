@@ -46,6 +46,7 @@ pub(super) struct RuntimeLoopState {
     pub(super) size_skew_controller: maker::SizeSkewController,
     pub(super) nonlinear_skew: maker::NonlinearSkewConfig,
     pub(super) external_skew: maker::ExternalSkewConfig,
+    pub(super) microprice: maker::MicroPriceConfig,
     pub(super) external_skew_previous_shift_bps: f64,
     pub(super) external_excess_telemetry: ExternalExcessTelemetry,
     pub(super) guard_controller: maker::GuardController,
@@ -179,6 +180,7 @@ impl MakerRuntime {
             nonlinear_skew,
             args.external_guard,
         )?;
+        let microprice = args.microprice;
         let guard_basis_half_life_secs = args.external_guard_basis_half_life_secs;
         let guard_controller = maker::GuardController::new(args.external_guard)?;
         let (external_feed, external_updates, external_feed_handle) = if args.external_guard.enabled
@@ -283,6 +285,7 @@ impl MakerRuntime {
                 size_skew_controller,
                 nonlinear_skew,
                 external_skew,
+                microprice,
                 external_skew_previous_shift_bps: 0.0,
                 external_excess_telemetry: ExternalExcessTelemetry::default(),
                 guard_controller,
