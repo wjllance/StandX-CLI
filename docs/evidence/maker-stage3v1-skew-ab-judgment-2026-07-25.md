@@ -4,7 +4,7 @@
 vs 静态 baseline 的纯配置 A/B（不重锁，编排器白名单 case (e)）。
 上游判定（组合候选 rejected_split_branch）与授权见
 [maker-stage3v1-ab-judgment-2026-07-24.md](maker-stage3v1-ab-judgment-2026-07-24.md)；
-判据沿用 [22-maker-stage3v1-guard-design.md](../22-maker-stage3v1-guard-design.md)
+判据沿用 [22-maker-stage3v1-guard-design.md](../archive/2026-07-maker/22-maker-stage3v1-guard-design.md)
 （撤单 +20% 与 guard 预算条对无 guard 臂自然失效）。
 
 **本报告状态：已裁决（release owner 2026-07-25）——accepted（保留 PnL

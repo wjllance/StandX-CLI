@@ -1,19 +1,23 @@
 # Maker 短期迭代路线图（2026-07-27 快照）
 
+> **归档记录**：这是按日期冻结的执行快照，后续基线读数和尾部分解已经改变优先级。
+> 本文不能作为当前实施顺序或 live 授权依据；当前结论见
+> [../../18-maker-strategy-roadmap.md](../../18-maker-strategy-roadmap.md)。
+
 本文档取代已失效的
 [20-maker-short-term-roadmap-2026-07.md](20-maker-short-term-roadmap-2026-07.md)
 （其失效条件"阶段 3 A/B 判定完成"早在 07-22 命中，此后一直无替代快照）。
 
 和 20 号文档一样，这是未来 2–4 周的执行层快照，回答"下一步做什么、按什么顺序、什么
 条件下改变计划"。长期阶段定义、验收口径和轨道原则见
-[18-maker-strategy-roadmap.md](18-maker-strategy-roadmap.md)，本文不重复也不修改它们；
+[18-maker-strategy-roadmap.md](18-maker-strategy-roadmap-full-2026-07.md)，本文不重复也不修改它们；
 两者冲突时以 18 号文档为准。
 
 ## 现状盘点（2026-07-27）
 
 - **阶段 3 全线关闭**：v1 拆单 `nonlinear_skew`（boost=3.0 / cap=12.0）07-25 accepted；
   阶段 3-guard `external_guard`（enter=10 / exit=5）07-27 accepted
-  （[判定报告](evidence/maker-guard-spinoff-ab-judgment-2026-07-27.md)）。
+  （[判定报告](../../evidence/maker-guard-spinoff-ab-judgment-2026-07-27.md)）。
   **当前冻结生产基线 = `examples/maker-guard-hype-candidate.toml`**（skew + guard 双开，
   sha256 `6314a37462e3bfda2cb21f14e503fae4d2997dca449f329de80e7ab22be4b9fc`）。
 - **alpha 轨当前没有在跑的实验，live 时间片空闲。** 这是本快照要回答的空档。
@@ -32,7 +36,7 @@
   **C（熔断豁免）关闭——前提消失**（共享恢复熔断早已从代码移除，只剩两个 deprecated
   配置字段，没有任何跨恢复累计的计数器）；**B（恢复迟滞）/ D（tick 阈值）降级为观测项**，
   致命后果已从"60s 后硬停"变成"standby 期间不报价"，立项触发条件已预注册。复核记录见
-  [maker-divergence-degradation-review-2026-07-28.md](evidence/maker-divergence-degradation-review-2026-07-28.md)。
+  [maker-divergence-degradation-review-2026-07-28.md](../../evidence/maker-divergence-degradation-review-2026-07-28.md)。
   六条架构建议 #6 的缺口随 C 一并关闭。
 - **ADR 0001 已修订**（2026-07-27）：C-lite 触发条件确认命中，落地形态判定为折中 C-lite，
   往后的扩张判据已写入 ADR 修订记录。此项从债务清单移除。
@@ -59,7 +63,7 @@ B/C/D 等硬化项）未做。候选 2（基线 PnL 采集）仍是推荐的下�
 ### 候选 1（已选为主线，四项主体已合并 main）：5-b 安全轨二级
 
 18 号文档写明的下一步，也是**唯一能解锁扩大规模的路**。范围（见
-[18 号阶段 5 剩余范围](18-maker-strategy-roadmap.md)）：
+[18 号阶段 5 剩余范围](18-maker-strategy-roadmap-full-2026-07.md)）：
 
 - 正常 inventory trim 与 emergency risk exit 使用不同 typed policy/effect；
 - volatility halt 期间是否允许紧急退出——**定稿在本级**（原"阶段 3 v1 前"的时点已随
@@ -79,7 +83,7 @@ B/C/D 等硬化项）未做。候选 2（基线 PnL 采集）仍是推荐的下�
 "不知道是否赚钱"的基线会把损耗按比例放大。这一步把 PnL 未判项从"结构性缺口"降级为
 "有数字的已知量"。占用人力极小（开机 + 每日看一眼遥测）。
 
-**手册已就绪**：[27-maker-baseline-pnl-collection-runbook.md](27-maker-baseline-pnl-collection-runbook.md)
+**手册已就绪**：[27-maker-baseline-pnl-collection-runbook.md](../../27-maker-baseline-pnl-collection-runbook.md)
 （前置检查、授权文本模板、单臂跑法、每日记录清单、异常处置、终止条件）。等 release owner
 填授权文本即可开跑；采集顺带记录 `divergence_standby` 事件，为 Divergence B 是否立项提供
 唯一证据来源。
@@ -90,7 +94,7 @@ B/C/D 等硬化项）未做。候选 2（基线 PnL 采集）仍是推荐的下�
 把靶心定在 markout 上；离线检验（同一 run 日志，只读）显示 excess→30s mark
 移动斜率 ≈ 1 且线性延伸到 ±2bps 桶，成交时点逆向选择系统性存在（买 -3.2 /
 卖 +3.65bps），反事实上限 λ=0.5 → +0.27（回收亏损 25~50%）。设计与预注册判据见
-[28-maker-external-skew-design.md](28-maker-external-skew-design.md)。
+[29-maker-external-skew-design.md](../../29-maker-external-skew-design.md)。
 **不占 live 时间片、窗口内不部署**；裁决与 A/B 排在一次**有效**基线采集 run 收尾
 之后（原"2026-07-31T08:17Z"的日历式表述已失效：三次 run 全部被截断）。
 microprice（盘口量失衡）降为第二优先，阻塞在 depth 观测字段（量从未落日志）。
@@ -119,7 +123,7 @@ mo5s / drift15s 基本不扎堆。据此定稿窗口：**硬下限 700 笔/臂�
 分布**，不是场内 drift，也不是早前反推的全 cycle 无条件 σ≈2.5）——不占 live 时间片。
 
 **2026-08-01 复核：保持待裁决，不降级、不关闭，但价值上限已钉死。** 依据见
-[尾部分解报告](evidence/maker-markout-tail-decomposition-2026-08-01.md)：
+[尾部分解报告](../../evidence/maker-markout-tail-decomposition-2026-08-01.md)：
 
 - **靶子更稳**：立项依据 (b)（成交时刻 excess 系统性逆向）三样本复现，全部落在
   ±0.35bps 内（买 -3.2/-3.25/-3.35，卖 +3.65/+3.31/+3.53）。
@@ -142,7 +146,7 @@ mo5s / drift15s 基本不扎堆。据此定稿窗口：**硬下限 700 笔/臂�
 `post_suppressed` 一支（~10% 的有毒成交）**：主支（条件冷却，~48%）因快代理够不着而
 判死，尾部剩余 2/3 阻塞在遥测缺失。**规划上限已从 ~30% 下调到 5~8%，低于候选 4。**
 
-已有线索（[尾部分解报告](evidence/maker-markout-tail-decomposition-2026-08-01.md)
+已有线索（[尾部分解报告](../../evidence/maker-markout-tail-decomposition-2026-08-01.md)
 发现 3）：有毒成交**单龄小**（中位 9~26 秒，刚挂上就被打穿）、成交前 drift 略大。
 
 **成因假设已查证（2026-08-02）：证伪，且方向相反。** 原假设是"我们自己撞上去"
@@ -263,10 +267,10 @@ uptime 代价远低于主支，两条路都可行，replay 时一并比较。）
   盘点）：C（熔断豁免）关闭——共享恢复熔断早已从代码移除，没有可豁免的对象；B（恢复迟滞）
   与 D（tick 阈值）降级为观测项，立项触发条件已预注册（单次 standby >10min / 窗口内累计
   >1% 运行时间 / 证明发生在"阈值上方悬停"），唯一证据来源是
-  [27 号手册](27-maker-baseline-pnl-collection-runbook.md)的每日 `divergence_standby` /
+  [27 号手册](../../27-maker-baseline-pnl-collection-runbook.md)的每日 `divergence_standby` /
   `transport_standby` 记录。**本候选名下不再有 Divergence 代码项**；命中触发条件后按 18 号
   文档 v0 流程重新立项，B 与 D 合并评估（同属阈值形状问题）。
-  复核记录见 [maker-divergence-degradation-review-2026-07-28.md](evidence/maker-divergence-degradation-review-2026-07-28.md)。
+  复核记录见 [maker-divergence-degradation-review-2026-07-28.md](../../evidence/maker-divergence-degradation-review-2026-07-28.md)。
 - 质量债 #259（dedup 残余）/ #261（CLI 一致性）/ #277（请求生命周期关联）。
 
 ### 候选 5（Phase 1+2 已完成，2026-07-30）：cleanup 残余判定硬化

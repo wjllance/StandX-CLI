@@ -1,6 +1,8 @@
 # 外部领先价连续偏移（`[external_skew]`）立项设计（2026-07-29 草案，2026-07-31 细化）
 
-状态：**草案，待 release owner 裁决**（2026-08-01 复核：**保持待裁决，不降级、不关闭**）。
+状态：**实现已合入、默认关闭，live 判定待 release owner 裁决**。实现提交 `13bef03` 保持
+toggle-off 等价；本文的候选配置和预注册判据不构成 live 授权。2026-08-01 复核结论仍是
+**保持待裁决，不降级、不关闭**。
 
 - **2026-07-31 细化**四处（机制与配置面不变）：guard 激活期间的复合语义、band 预算
   红线、验收判据的统计功效口径、证据溯源。
@@ -19,8 +21,10 @@ run2 2min / run3 51min 两帧 ack，见
 live 时间片。
 
 上游口径：[18-maker-strategy-roadmap.md](18-maker-strategy-roadmap.md)；
-信号源机制沿用 [22 号设计](22-maker-stage3v1-guard-design.md)的
-`[external_guard]` 与 [24 号独立立项](24-maker-guard-spinoff-design.md)。
+信号源机制沿用归档的
+[22 号设计](archive/2026-07-maker/22-maker-stage3v1-guard-design.md)与
+[24 号独立立项](archive/2026-07-maker/24-maker-guard-spinoff-design.md)中的
+`[external_guard]`。
 
 ## 立项依据（证据链）
 
@@ -154,7 +158,8 @@ microprice（盘口量失衡）类候选保留为第二优先，等 depth 观测
 与 19h 时点同向同量级）。裁决时必须知道这条证据链跨了一次代码变更：
 
 - **A/B 将跑的二进制 ≠ run1 的 `819f0f0`**。07-30/31 之间合并了 cleanup 残余判定
-  硬化（[29 号文档](29-maker-cleanup-residual-verification.md) Phase 1+2）与两帧
+  硬化（归档的
+  [cleanup 设计](archive/2026-07-maker/29-maker-cleanup-residual-verification.md) Phase 1+2）与两帧
   ack 三处修复（`4464167` / `97d14e8` / `02f6cea`）。
 - **信号侧证据可以平移**：这些修复动的是撤单/下单 ack 落账与 cleanup 残余判定，
   不碰报价中心、excess 计算、band/no-cross、refresh。excess→30s mark 移动的斜率
@@ -195,7 +200,7 @@ shift_bps = clamp(λ × excess_bps, ±cap_bps)     |excess| < dead_zone 时为 0
 与 guard 状态完全解耦。**
 
 - 两者作用在**不同的杠杆**上，不存在重复计数：guard 决定"危险侧这一轮还挂不挂"
-  （[lib.rs:764](../crates/standx-maker/src/lib.rs:764) 的 `guard.active &&
+  （[lib.rs:818](../crates/standx-maker/src/lib.rs#L818) 的 `guard.active &&
   endangered == Some(side)` → `continue`，整侧不挂 + resting 走
   `SideSuppressed` 撤单），skew 决定"挂着的那些单的锚点在哪"。guard 激活时危险侧
   根本没有报价，center 偏移对它无意义；**存活侧的偏移方向恰好是保护性的**——
@@ -211,7 +216,7 @@ shift_bps = clamp(λ × excess_bps, ±cap_bps)     |excess| < dead_zone 时为 0
 ### band 预算红线（2026-07-31 新增）
 
 `external_skew` 与库存 skew 在同一 center 上**同号叠加**（最坏情况），而 band
-资格区间锚定的是**真实 mark**（[lib.rs:745](../crates/standx-maker/src/lib.rs:745)
+资格区间锚定的是**真实 mark**（[lib.rs:797](../crates/standx-maker/src/lib.rs#L797)
 注释明确："Band eligibility is defined around the TRUE mark, not the skewed
 center"）。故远侧报价到 mark 的距离在最坏情况下是三项之和，必须留在 band 内：
 
@@ -221,17 +226,18 @@ spread_bps + (levels − 1) × level_step_bps + nonlinear.cap_bps + external_ske
 
 冻结基线代入：`8 + 0 + 12 + 8 = 28 ≤ 30`（`levels=1`，故 level_step 项为 0），
 **留 2bps 余量，`cap_bps = 8` 是能取的上限**。这条红线与
-[22 号文档](22-maker-stage3v1-guard-design.md)的 `spread + cap ≤ band`（8+12=20）
+[22 号历史设计](archive/2026-07-maker/22-maker-stage3v1-guard-design.md)的
+`spread + cap ≤ band`（8+12=20）
 同源，只是多消耗了 8bps 预算。
 
 越线的后果不是报错，是**静默劣化**，两条都值得知道：
 
 1. **band 夹取（饱和）**：越出 band 的价格被 `clamp(price_lo, price_hi)` 夹到
-   band 边沿（[lib.rs:805](../crates/standx-maker/src/lib.rs:805)），不是丢弃该侧
+   band 边沿（[lib.rs:859](../crates/standx-maker/src/lib.rs#L859)），不是丢弃该侧
    ——报价照挂，但远侧钉在边沿，梯子变成非预期的不对称形状，且此后 center 再动
    对该侧价格不再有任何影响（机制在这一侧失效而无任何告警）。
 2. **撤单 churn**：refresh 判据比的是 **center 漂移**而非价格差
-   （[lib.rs:965](../crates/standx-maker/src/lib.rs:965)
+   （[lib.rs:1023](../crates/standx-maker/src/lib.rs#L1023)
    `bps_diff(center, r.ref_center) > refresh_bps`）。价格已被夹住时，center 继续
    移动仍会触发 `MarkMovedBeyondRefresh` → 撤单重挂到**同一个价格**，纯 churn。
 
@@ -466,11 +472,13 @@ runner 口径，立项依据 (d) 的 -10.6 是 script 口径下的**分桶条件
 ### 编排：分块交替，不是两段长跑
 
 guard 轮的 PnL 读数就是因为"两臂窗口活跃度不同，混淆无法分离"而作废的
-（[25 号现状盘点](25-maker-short-term-roadmap-2026-07-27.md)）。本轮两臂按
+（归档的
+[25 号现状盘点](archive/2026-07-maker/25-maker-short-term-roadmap-2026-07-27.md)）。本轮两臂按
 **≥12h 的块交替**，块边界覆盖不同 UTC 时段，使两臂的 regime 暴露大致平衡。
 
 - 代价：每次换臂要重启进程，而重启要过 cleanup / 残余判定这一关——run1/run2/run3
-  三次截断有两次死在这里。[29 号文档](29-maker-cleanup-residual-verification.md)
+  三次截断有两次死在这里。归档的
+  [cleanup 设计](archive/2026-07-maker/29-maker-cleanup-residual-verification.md)
   Phase 1+2 与两帧 ack 三处修复已合并，per-restart 风险已降低，**但这是本编排的
   已知主要风险，不是零**。块长取 12h（而非 4h）就是为了把重启次数压到 ~10 次量级。
 - 交替不改善 primary 的功效（逐笔方差是主项，块设计治的是偏差不是方差），

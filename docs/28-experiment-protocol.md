@@ -1,8 +1,9 @@
 # 实验轨规程：预注册判据与未判项登记
 
-上游口径见 [18-maker-strategy-roadmap.md](18-maker-strategy-roadmap.md)，操作层面见各阶段
-runbook（[19](19-maker-stage2-live-ab-runbook.md) / [21](21-maker-stage3-live-ab-runbook.md) /
-[23](23-maker-stage3v1-live-ab-runbook.md) / [27](27-maker-baseline-pnl-collection-runbook.md)）。
+上游口径见 [18-maker-strategy-roadmap.md](18-maker-strategy-roadmap.md)，当前操作层面见
+[19](19-maker-stage2-live-ab-runbook.md) / [27](27-maker-baseline-pnl-collection-runbook.md)；
+已结束阶段的 [21](archive/2026-07-maker/21-maker-stage3-live-ab-runbook.md) /
+[23](archive/2026-07-maker/23-maker-stage3v1-live-ab-runbook.md) 只用于追溯历史判据和授权边界。
 
 ## 适用范围
 

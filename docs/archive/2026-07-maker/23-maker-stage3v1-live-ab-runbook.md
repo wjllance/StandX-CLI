@@ -1,9 +1,13 @@
 # Maker Stage 3 v1 combined candidate live canary and A/B runbook
 
+> **Archived runbook**: the combined-candidate experiment and its authorization window are
+> closed. The quoted authorization below is historical evidence and must never be reused. Follow
+> the current [live gate](../../14-maker-live-gate.md) for any future live action.
+
 本手册把 renewed live gate 应用到阶段 3 v1 组合候选（非线性 price skew +
 外部价防御门，一个 release、两个独立开关，设计见
 [22-maker-stage3v1-guard-design.md](22-maker-stage3v1-guard-design.md)）。
-流程与 [19-maker-stage2-live-ab-runbook.md](19-maker-stage2-live-ab-runbook.md)
+流程与 [19-maker-stage2-live-ab-runbook.md](../../19-maker-stage2-live-ab-runbook.md)
 相同，本文只记录 v1 的差异与本次授权；未提及的章节（应急处置、webhook
 探针、bounded canary 判定顺序）以 19 号手册为准，symbol 一律为 HYPE-USD。
 
@@ -66,7 +70,7 @@ release record contains this exact authorization:
 - **FLAT 前置（2026-07-27 补充）**：启动任何 canary / A/B 前必须实测账户为空仓空簿，
   不能只依赖上一轮的收尾记录——阶段 3-guard 轮结束时 baseline#4 留下 -0.1 HYPE 空头
   （按"不自动平仓"原则由 owner 手动处置，见
-  [guard 判定报告运维记录](evidence/maker-guard-spinoff-ab-judgment-2026-07-27.md)）。
+  [guard 判定报告运维记录](../../evidence/maker-guard-spinoff-ab-judgment-2026-07-27.md)）。
   复核方式（两条都要看，`positions` 为空但 `orders` 非空同样是阻塞项）：
 
   ```bash
@@ -82,7 +86,7 @@ release record contains this exact authorization:
   `STANDX_STAGE2_VALIDATE_ONLY=1` 通过（pair 形态
   nonlinear_skew.enabled + external_guard.enabled 双开关翻转，case (d)）。
 - Candidate paper 冒烟：见
-  [maker-stage3v1-implementation-2026-07-23.md](evidence/maker-stage3v1-implementation-2026-07-23.md)
+  [maker-stage3v1-implementation-2026-07-23.md](../../evidence/maker-stage3v1-implementation-2026-07-23.md)
   （基差扣除修复后 36 cycles：基线初始化零穿透、事件级激活/释放/换边、
   skew_shift 公式精确、遥测齐全、SIGTERM 干净退出）。
 - canary 期间 XAG/HYPE 两条 A/B 容器与任何手工 live maker 全部停止；锁路径

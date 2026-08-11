@@ -1,10 +1,10 @@
 # Stage 3 v1 组合候选 live gate 重验记录（2026-07-22/23）
 
 阶段 3 v1 组合候选（非线性 price skew + 外部价防御门，一个 release 两个
-开关，设计见 [22-maker-stage3v1-guard-design.md](../22-maker-stage3v1-guard-design.md)）
+开关，设计见 [22-maker-stage3v1-guard-design.md](../archive/2026-07-maker/22-maker-stage3v1-guard-design.md)）
 策略代码合并后的 renewed live gate 证据。流程依据
 [14-maker-live-gate.md](../14-maker-live-gate.md) 与
-[23-maker-stage3v1-live-ab-runbook.md](../23-maker-stage3v1-live-ab-runbook.md)。
+[23-maker-stage3v1-live-ab-runbook.md](../archive/2026-07-maker/23-maker-stage3v1-live-ab-runbook.md)。
 
 - Release commit：`45311e79e7b211d662e8c37b993a47118aa62c06`（工作树干净，
   仅未跟踪的 `.mimocode/` 本地目录）
@@ -107,7 +107,7 @@ A/B 启动准备：env 两条配置路径已改指 stage3v1 配置对、
 镜像按当前 HEAD 重建（策略源码与 45311e7 逐字节一致）、容器内
 `STANDX_STAGE2_VALIDATE_ONLY=1` 通过（配置对哈希匹配）、宿主 HL 连通性
 实测通过（HTTPS 200，容器 host 网络同源）。
-判定按 [22-maker-stage3v1-guard-design.md](../22-maker-stage3v1-guard-design.md)
+判定按 [22-maker-stage3v1-guard-design.md](../archive/2026-07-maker/22-maker-stage3v1-guard-design.md)
 预注册判据执行。
 
 ## A/B 启动（2026-07-22T17:52Z）

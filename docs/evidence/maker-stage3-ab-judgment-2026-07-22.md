@@ -4,7 +4,7 @@
 激活阈值 `0.3 × max_position`，恢复迟滞 `0.2 × max_position`）。
 判据预注册于 [18-maker-strategy-roadmap.md](../18-maker-strategy-roadmap.md)
 阶段 3 验收标准；执行手册与授权见
-[21-maker-stage3-live-ab-runbook.md](../21-maker-stage3-live-ab-runbook.md)；
+[21-maker-stage3-live-ab-runbook.md](../archive/2026-07-maker/21-maker-stage3-live-ab-runbook.md)；
 gate 与运行事件记录见 [maker-stage3-canary-2026-07-21.md](maker-stage3-canary-2026-07-21.md)。
 
 ## 判定：rejected（uptime 代价过大）

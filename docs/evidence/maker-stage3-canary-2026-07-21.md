@@ -2,7 +2,7 @@
 
 阶段 3 v0（size skew → 退化为加仓侧压制）策略代码合并后的 renewed live gate
 证据。流程依据 [14-maker-live-gate.md](../14-maker-live-gate.md) 与
-[21-maker-stage3-live-ab-runbook.md](../21-maker-stage3-live-ab-runbook.md)。
+[21-maker-stage3-live-ab-runbook.md](../archive/2026-07-maker/21-maker-stage3-live-ab-runbook.md)。
 
 - Release commit：`c4fc893fb86d8c16193017a6dd047b097c57b2d0`（工作树干净）
 - Named operator：release owner

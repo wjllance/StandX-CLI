@@ -1,7 +1,7 @@
 # markout 尾部分解与外部信号判别力（2026-08-01，两个 baseline-pnl run，纯离线只读）
 
 **这份文档只报读数与推论边界，不给晋级/否决结论。** 它是两件事的依据：候选 4
-（[`[external_skew]`](../28-maker-external-skew-design.md)）的**价值上限**，以及尾部避让类
+（[`[external_skew]`](../29-maker-external-skew-design.md)）的**价值上限**，以及尾部避让类
 机制的**立项证据**。
 
 ## 数据来源
@@ -19,7 +19,7 @@
 离 `stop_loss=5.0` 尚远，无安全事件。
 
 **口径**：本文全部 markout 为 **script 口径**（从成交时的 mark 起算，**不含**
-capture），与 [28 号验收判据](../28-maker-external-skew-design.md)预注册的口径一致。
+capture），与 [29 号验收判据](../29-maker-external-skew-design.md)预注册的口径一致。
 遥测的 `performance.markout_*` 是 runner 口径（从成交价起算、含 capture），两者差一个
 capture，**数字不可互换**。
 
@@ -75,7 +75,7 @@ capture +2.8 bps  −  markout@30s 7.8 bps  −  手续费 ≈1 bps  ≈  −6 b
 `external_guard` 的 `enter_bps=10` 阈值在这 103 笔有毒成交里**一次都没够着**。
 
 **推论**：尾部是**场内**成因（扫单 / 本所逆选），外部领先价对它没有预警能力。这与
-[28 号立项依据 (d)](../28-maker-external-skew-design.md)"残余毒性、其余是场内流量"的
+[29 号立项依据 (d)](../29-maker-external-skew-design.md)"残余毒性、其余是场内流量"的
 预判方向一致，本文把它从定性警告量化成了边界。
 
 ## 发现 5：立项依据 (b) 三样本复现
@@ -98,7 +98,7 @@ capture +2.8 bps  −  markout@30s 7.8 bps  −  手续费 ≈1 bps  ≈  −6 b
 
 | 口径 | 量级 | 占当前净亏 |
 |---|---|---|
-| 现实（λ=0.5，[28 号 (c)](../28-maker-external-skew-design.md) 反事实） | +0.27 / 35h | ~16% |
+| 现实（λ=0.5，[29 号 (c)](../29-maker-external-skew-design.md) 反事实） | +0.27 / 35h | ~16% |
 | 理想（其余 90% 的 markout 全部消除） | +0.6 ~ 1.1 / 35h | 36~66% |
 | 尾部那 60~72% | **碰不到** | — |
 
@@ -354,7 +354,7 @@ mo30 的解释力（r≈0.27）明显高于其余组（0.08）—— 那批单�
 到中位。**张力是实打实的。**
 
 **因此设计上取"加宽"而非"压侧"**：uptime 统计的是 **band 内的合格深度**
-（`band_bps=30`，见 [22 号文档](../22-maker-stage3v1-guard-design.md)），压侧 = 报价消失 =
+（`band_bps=30`，见 [22 号文档](../archive/2026-07-maker/22-maker-stage3v1-guard-design.md)），压侧 = 报价消失 =
 全额 uptime 损失，而**加宽 = 报价仍在 band 内 = 不损 uptime**。band 预算也够：现状
 `spread 8 + nonlinear cap 12 = 20`，**余量 10bps**。
 

@@ -3,7 +3,7 @@
 复核对象：2026-07-16 live 事故（XAG mark/mid 偏离 6.13bps 悬停 >60s → 停机）之后拟定的
 四个方案。A 早已落地，B / C / D 一直挂在
 [18 号阶段 5 二级](../18-maker-strategy-roadmap.md)的"背离恢复迟滞、熔断豁免等剩余硬化项
-按需纳入"名下，也是 [25 号快照](../25-maker-short-term-roadmap-2026-07-27.md) 里 5-b 的
+按需纳入"名下，也是 [25 号快照](../archive/2026-07-maker/25-maker-short-term-roadmap-2026-07-27.md) 里 5-b 的
 最后一个代码项。
 
 本次按 release owner 裁决准备实现 C（熔断豁免），**实现前先核前提——前提已经不成立**。
@@ -91,5 +91,5 @@ C 关闭，不写代码。
 
 MarketState standby 期间持裸库存且不报价：既不能通过报价对冲，也不会自动退出
 （D1 定稿：halt/降级期间不自动退出）。这与 halt 期间的取舍是同一件事，已在
-[26 号文档 D1](../26-maker-stage5b-design.md) 显式接受，重启该决策需要一次实盘事件的
+[26 号文档 D1](../archive/2026-07-maker/26-maker-stage5b-design.md) 显式接受，重启该决策需要一次实盘事件的
 逐笔证据。

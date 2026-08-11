@@ -156,7 +156,7 @@ run1 的中断则是残单检测误报（场馆 open-orders 读写延迟 ≥15s�
 完整证据链：
 [markout 尾部分解](../../docs/evidence/maker-markout-tail-decomposition-2026-08-01.md)、
 [基线 PnL run1](../../docs/evidence/maker-baseline-pnl-2026-07-30.md)、
-[短期路线图](../../docs/25-maker-short-term-roadmap-2026-07-27.md)。
+[当前状态与路线](../../docs/18-maker-strategy-roadmap.md)。
 
 ## The contract
 
