@@ -518,7 +518,7 @@ guard 轮的 PnL 读数就是因为"两臂窗口活跃度不同，混淆无法�
 已填授权（2026-08-01）：
 
 ```text
-授权：external_skew 连续外部领先价偏移 live A/B（docs/28 预注册）
+授权：external_skew 连续外部领先价偏移 live A/B（docs/29 预注册）
 symbol：HYPE-USD
 baseline 臂：examples/maker-guard-hype-candidate.toml（sha256 6314a374…，原样）
 candidate 臂：examples/maker-external-skew-hype-candidate.toml（sha256 99bec5ea…，

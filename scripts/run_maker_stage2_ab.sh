@@ -114,7 +114,7 @@ fi
 #       pair), with nonlinear_skew equal in both arms (it may be enabled in
 #       both as the inherited stage-3 baseline) and guard params identical; or
 #   (g) the candidate adding exactly the pre-registered [external_skew] block
-#       (docs/28: enabled, lambda=0.5, cap_bps=8.0, dead_zone_bps=1.0) with
+#       (docs/29: enabled, lambda=0.5, cap_bps=8.0, dead_zone_bps=1.0) with
 #       every other line byte-identical and the baseline carrying no
 #       [external_skew] section at all.
 python3 - "$baseline_config" "$candidate_config" <<'PY' || exit 64
@@ -209,7 +209,7 @@ def size_skew_sections(text):
     return "".join(lines), enabled
 
 
-# (g) external_skew pair (docs/28): the candidate carries exactly the
+# (g) external_skew pair (docs/29): the candidate carries exactly the
 # pre-registered [external_skew] block and nothing else differs.
 PREREG_EXTERNAL_SKEW = {
     "enabled": "true",
