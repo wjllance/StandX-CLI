@@ -1,5 +1,6 @@
 use super::*;
 use standx_sdk::order_response::OrderResponse;
+use std::fmt;
 
 pub(super) const ORDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -513,12 +514,32 @@ pub(super) fn apply_account_events(
                 return Ok(outcome);
             }
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                return Err(anyhow::anyhow!("authenticated account stream disconnected"));
+                return Err(anyhow::Error::new(AccountStreamDisconnected));
             }
         };
         outcome.merge(apply_account_event(event, state, context)?);
     }
 }
+
+/// The authenticated account-stream receiver's channel closed while draining.
+///
+/// This is a *transport* fault, not a proof-of-safety failure: the venue is
+/// not signalling that the ledger/projection are inconsistent, only that the
+/// live events channel is gone. Recovery paths can therefore retry the whole
+/// reconnect+backfill round (bounded) on receipt, and must only fail closed
+/// once the transport budget is exhausted or a separate reconciliation check
+/// fails. Its `Display` keeps the historical message so existing log/reason
+/// strings are unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AccountStreamDisconnected;
+
+impl fmt::Display for AccountStreamDisconnected {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("authenticated account stream disconnected")
+    }
+}
+
+impl std::error::Error for AccountStreamDisconnected {}
 
 pub(super) fn account_event_invalidates_cycle(event: &AccountEvent) -> bool {
     matches!(

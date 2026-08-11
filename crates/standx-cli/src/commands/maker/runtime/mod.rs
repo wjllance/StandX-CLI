@@ -35,6 +35,8 @@ mod state;
 use cycle_flow::{commit_cycle_effect, take_cycle_work};
 #[cfg(test)]
 pub(super) use events::apply_order_responses;
+#[cfg(test)]
+pub(super) use events::AccountStreamDisconnected;
 use events::{
     absorb_account_outcome, account_event_invalidates_cycle, accounting_position_mismatch,
     apply_account_event, apply_account_events, apply_order_response,

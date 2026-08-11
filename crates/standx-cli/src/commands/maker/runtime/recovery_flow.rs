@@ -1,3 +1,4 @@
+use super::events::AccountStreamDisconnected;
 use super::*;
 use crate::commands::maker::model::StreamHealth;
 use crate::commands::maker::output::ts_now;
@@ -874,8 +875,19 @@ impl MakerRuntime {
                         );
                     }
                     let mut failed_rounds = 0_u32;
-                    let (mut events, health, handle) = loop {
-                        match reconnect_account_stream(
+                    // The whole account-stream recovery runs as one bounded
+                    // retry loop: reconnect, drain buffered events, reconcile
+                    // the venue position, and verify the maker book empty. A
+                    // *transport* fault at any post-connect step — including the
+                    // freshly reauthenticated account stream dropping again
+                    // mid-backfill, which is what the 2026-08-10 incident hit —
+                    // is retried like a connect failure rather than failing
+                    // closed. Only proof-of-safety failures (an unexplained
+                    // position gap, a residual maker book, or an event-validation
+                    // error that is not the transport disconnect) remain
+                    // terminal.
+                    'recovery: loop {
+                        let (mut events, health, handle) = match reconnect_account_stream(
                             &mut session.account_stream_epoch,
                             args.account_stream_reconnect_attempts,
                             args.account_stream_reconnect_backoff,
@@ -884,7 +896,7 @@ impl MakerRuntime {
                         )
                         .await
                         {
-                            AccountStreamReconnect::Connected(triple) => break triple,
+                            AccountStreamReconnect::Connected(triple) => triple,
                             AccountStreamReconnect::Interrupted => {
                                 self.recovery
                                     .runtime_state
@@ -957,216 +969,289 @@ impl MakerRuntime {
                                     }
                                     _ = tokio::time::sleep(Duration::from_secs(delay_secs)) => {}
                                 }
+                                continue 'recovery;
                             }
-                        }
-                    };
+                        };
 
-                    let projection = &mut session.projection;
-                    projection.reset_after_cleanup_preserving_pending_acks(
-                        session.account_stream_epoch,
-                        self.loop_state.ledger.expected_position,
-                    );
-
-                    let reconnect_outcome = match apply_account_events(
-                        &mut events,
-                        &mut AccountEventState {
-                            ledger: &mut self.loop_state.ledger,
-                            stats: &mut self.loop_state.stats,
-                            projection,
-                        },
-                        &AccountEventContext {
-                            symbol,
-                            run_order_prefix,
-                            mark: self.market.last_mark.unwrap_or(baseline_mark),
-                            cycle,
-                            output_format,
-                            excess_bps_at_fill: self
-                                .loop_state
-                                .external_excess_telemetry
-                                .current(std::time::Instant::now()),
-                        },
-                    ) {
-                        Ok(outcome) => outcome,
-                        Err(error) => {
-                            handle.abort();
-                            break 'phase recovery_failed_exit(
-                                &mut self.recovery.runtime_state,
-                                recovery_token,
-                                format!(
-                                    "account stream reconnect event validation failed: {error}"
-                                ),
-                            );
-                        }
-                    };
-                    self.loop_state.account_balance_refresh_requested |=
-                        reconnect_outcome.balance_changed;
-                    let mut reconnect_fills = reconnect_outcome.fills;
-                    let positions = match client.get_positions(Some(symbol)).await {
-                        Ok(positions) => positions,
-                        Err(error) => {
-                            handle.abort();
-                            break 'phase recovery_failed_exit(
-                                &mut self.recovery.runtime_state,
-                                recovery_token,
-                                format!("account stream reconnect snapshot failed: {error}"),
-                            );
-                        }
-                    };
-                    let mut observed = match position_for_symbol(&positions, symbol) {
-                        Ok(position) => position,
-                        Err(error) => {
-                            handle.abort();
-                            break 'phase recovery_failed_exit(
-                                &mut self.recovery.runtime_state,
-                                recovery_token,
-                                error.to_string(),
-                            );
-                        }
-                    };
-
-                    if (observed - self.loop_state.ledger.expected_position).abs() > qty_tolerance {
-                        // WS events can lag REST settlement across a reconnect: give
-                        // a bounded window to explain the gap with REST trades
-                        // (mirrors the in-cycle freeze-path reconciliation) before
-                        // failing closed.
-                        let mut gap_closed = false;
-                        for delay in [500_u64, 1_000, 1_500] {
-                            // The maker book is verified empty at this point, so
-                            // aborting the convergence wait on Ctrl+C is safe.
-                            tokio::select! {
-                                _ = ctrl_c_latched(&mut self.ctrl_c_rx) => {
-                                    handle.abort();
-                                    break 'phase stop_requested_exit(
-                                        &mut self.recovery.runtime_state,
-                                        RuntimeStopReason::CtrlC,
-                                    );
-                                }
-                                _ = tokio::time::sleep(Duration::from_millis(delay)) => {}
-                            }
-                            match apply_account_events(
-                                &mut events,
-                                &mut AccountEventState {
-                                    ledger: &mut self.loop_state.ledger,
-                                    stats: &mut self.loop_state.stats,
-                                    projection,
-                                },
-                                &AccountEventContext {
-                                    symbol,
-                                    run_order_prefix,
-                                    mark: self.market.last_mark.unwrap_or(baseline_mark),
-                                    cycle,
-                                    output_format,
-                                    excess_bps_at_fill: self
-                                        .loop_state
-                                        .external_excess_telemetry
-                                        .current(std::time::Instant::now()),
-                                },
-                            ) {
-                                Ok(outcome) => {
-                                    reconnect_fills += outcome.fills;
-                                    self.loop_state.account_balance_refresh_requested |=
-                                        outcome.balance_changed;
-                                }
-                                Err(error) => {
-                                    handle.abort();
-                                    break 'phase recovery_failed_exit(
-                                        &mut self.recovery.runtime_state,
-                                        recovery_token,
-                                        format!(
-                                            "account stream reconnect event validation failed during REST backfill: {error}"
-                                        ),
-                                    );
-                                }
-                            }
-                            match probe_position_convergence(
-                                client,
-                                ReconcileRequest {
-                                    symbol,
-                                    session_started_at,
-                                    run_order_prefix,
-                                    qty_tolerance,
-                                    mark: self.market.last_mark.unwrap_or(baseline_mark),
-                                },
-                                &mut self.loop_state.ledger,
-                                &mut self.loop_state.stats,
-                                &mut reconnect_fills,
-                                FillEmissionContext {
-                                    cycle,
-                                    output_format,
-                                    excess_bps_at_fill: self
-                                        .loop_state
-                                        .external_excess_telemetry
-                                        .current(std::time::Instant::now()),
-                                },
-                            )
-                            .await
-                            {
-                                ConvergenceProbe::Converged { observed: obs } => {
-                                    observed = obs;
-                                    gap_closed = true;
-                                    break;
-                                }
-                                ConvergenceProbe::Pending { observed: obs } => observed = obs,
-                                ConvergenceProbe::SnapshotFailed(error) => eprintln!(
-                                    "⚠️  account stream reconnect REST trade backfill failed: {error}"
-                                ),
-                            }
-                        }
-                        if !gap_closed {
-                            handle.abort();
-                            break 'phase recovery_failed_exit(
-                                &mut self.recovery.runtime_state,
-                                recovery_token,
-                                format!(
-                                    "account stream reconnect snapshot expected {:+.8}, observed {:+.8} (REST trade backfill did not close the gap)",
-                                    self.loop_state.ledger.expected_position, observed
-                                ),
-                            );
-                        }
-                    }
-
-                    // A current-run order may surface after the first freeze
-                    // cleanup while the account stream is authenticating. Require
-                    // one final authoritative empty-book verification before the
-                    // recovered stream can resume quoting.
-                    if let Err(error) =
-                        cancel_maker_orders_with_retry(client, symbol, 3, output_format, None).await
-                    {
-                        handle.abort();
-                        break 'phase recovery_failed_exit(
-                            &mut self.recovery.runtime_state,
-                            recovery_token,
-                            format!(
-                                "account stream reconnect final maker-book verification failed: {error}"
-                            ),
+                        let projection = &mut session.projection;
+                        projection.reset_after_cleanup_preserving_pending_acks(
+                            session.account_stream_epoch,
+                            self.loop_state.ledger.expected_position,
                         );
+
+                        macro_rules! retry_transport {
+                            () => {{
+                                failed_rounds = failed_rounds.saturating_add(1);
+                                let delay_secs = maker::recovery_retry_delay_secs(
+                                    args.account_stream_reconnect_backoff,
+                                    failed_rounds,
+                                );
+                                let retry_message = format!(
+                                    "account stream reconnect round {failed_rounds} dropped mid-backfill; maker book re-verified empty; placements remain frozen; retrying in {delay_secs}s"
+                                );
+                                notifier
+                                    .risk(
+                                        RiskNotice::warning(
+                                            "account_stream",
+                                            "reconnect_retrying",
+                                            &retry_message,
+                                            symbol,
+                                            cycle,
+                                        )
+                                        .expected(self.loop_state.ledger.expected_position),
+                                        false,
+                                    )
+                                    .await;
+                                tokio::select! {
+                                    biased;
+                                    _ = ctrl_c_latched(&mut self.ctrl_c_rx) => {
+                                        self.recovery.runtime_state.handle(
+                                            MakerEvent::StopRequested(RuntimeStopReason::CtrlC),
+                                        );
+                                        break 'phase take_stop_effect(
+                                            &mut self.recovery.runtime_state,
+                                            MakerExit::PositionReconciliation,
+                                        );
+                                    }
+                                    _ = tokio::time::sleep(Duration::from_secs(delay_secs)) => {}
+                                }
+                                continue 'recovery;
+                            }};
+                        }
+
+                        let reconnect_outcome = match apply_account_events(
+                            &mut events,
+                            &mut AccountEventState {
+                                ledger: &mut self.loop_state.ledger,
+                                stats: &mut self.loop_state.stats,
+                                projection,
+                            },
+                            &AccountEventContext {
+                                symbol,
+                                run_order_prefix,
+                                mark: self.market.last_mark.unwrap_or(baseline_mark),
+                                cycle,
+                                output_format,
+                                excess_bps_at_fill: self
+                                    .loop_state
+                                    .external_excess_telemetry
+                                    .current(std::time::Instant::now()),
+                            },
+                        ) {
+                            Ok(outcome) => outcome,
+                            Err(error)
+                                if error.downcast_ref::<AccountStreamDisconnected>().is_some() =>
+                            {
+                                handle.abort();
+                                notifier
+                                    .risk(
+                                        RiskNotice::warning(
+                                            "account_stream",
+                                            "reconnect_retrying",
+                                            "account stream reconnect drained then dropped; retrying",
+                                            symbol,
+                                            cycle,
+                                        )
+                                        .expected(self.loop_state.ledger.expected_position),
+                                        false,
+                                    )
+                                    .await;
+                                retry_transport!();
+                            }
+                            Err(error) => {
+                                handle.abort();
+                                break 'phase recovery_failed_exit(
+                                    &mut self.recovery.runtime_state,
+                                    recovery_token,
+                                    format!(
+                                        "account stream reconnect event validation failed: {error}"
+                                    ),
+                                );
+                            }
+                        };
+                        self.loop_state.account_balance_refresh_requested |=
+                            reconnect_outcome.balance_changed;
+                        let mut reconnect_fills = reconnect_outcome.fills;
+                        let positions = match client.get_positions(Some(symbol)).await {
+                            Ok(positions) => positions,
+                            Err(error) => {
+                                handle.abort();
+                                break 'phase recovery_failed_exit(
+                                    &mut self.recovery.runtime_state,
+                                    recovery_token,
+                                    format!("account stream reconnect snapshot failed: {error}"),
+                                );
+                            }
+                        };
+                        let mut observed = match position_for_symbol(&positions, symbol) {
+                            Ok(position) => position,
+                            Err(error) => {
+                                handle.abort();
+                                break 'phase recovery_failed_exit(
+                                    &mut self.recovery.runtime_state,
+                                    recovery_token,
+                                    error.to_string(),
+                                );
+                            }
+                        };
+
+                        if (observed - self.loop_state.ledger.expected_position).abs()
+                            > qty_tolerance
+                        {
+                            // WS events can lag REST settlement across a reconnect: give
+                            // a bounded window to explain the gap with REST trades
+                            // (mirrors the in-cycle freeze-path reconciliation) before
+                            // failing closed.
+                            let mut gap_closed = false;
+                            for delay in [500_u64, 1_000, 1_500] {
+                                // The maker book is verified empty at this point, so
+                                // aborting the convergence wait on Ctrl+C is safe.
+                                tokio::select! {
+                                    _ = ctrl_c_latched(&mut self.ctrl_c_rx) => {
+                                        handle.abort();
+                                        break 'phase stop_requested_exit(
+                                            &mut self.recovery.runtime_state,
+                                            RuntimeStopReason::CtrlC,
+                                        );
+                                    }
+                                    _ = tokio::time::sleep(Duration::from_millis(delay)) => {}
+                                }
+                                match apply_account_events(
+                                    &mut events,
+                                    &mut AccountEventState {
+                                        ledger: &mut self.loop_state.ledger,
+                                        stats: &mut self.loop_state.stats,
+                                        projection,
+                                    },
+                                    &AccountEventContext {
+                                        symbol,
+                                        run_order_prefix,
+                                        mark: self.market.last_mark.unwrap_or(baseline_mark),
+                                        cycle,
+                                        output_format,
+                                        excess_bps_at_fill: self
+                                            .loop_state
+                                            .external_excess_telemetry
+                                            .current(std::time::Instant::now()),
+                                    },
+                                ) {
+                                    Ok(outcome) => {
+                                        reconnect_fills += outcome.fills;
+                                        self.loop_state.account_balance_refresh_requested |=
+                                            outcome.balance_changed;
+                                    }
+                                    Err(error)
+                                        if error
+                                            .downcast_ref::<AccountStreamDisconnected>()
+                                            .is_some() =>
+                                    {
+                                        handle.abort();
+                                        retry_transport!();
+                                    }
+                                    Err(error) => {
+                                        handle.abort();
+                                        break 'phase recovery_failed_exit(
+                                            &mut self.recovery.runtime_state,
+                                            recovery_token,
+                                            format!(
+                                                "account stream reconnect event validation failed during REST backfill: {error}"
+                                            ),
+                                        );
+                                    }
+                                }
+                                match probe_position_convergence(
+                                    client,
+                                    ReconcileRequest {
+                                        symbol,
+                                        session_started_at,
+                                        run_order_prefix,
+                                        qty_tolerance,
+                                        mark: self.market.last_mark.unwrap_or(baseline_mark),
+                                    },
+                                    &mut self.loop_state.ledger,
+                                    &mut self.loop_state.stats,
+                                    &mut reconnect_fills,
+                                    FillEmissionContext {
+                                        cycle,
+                                        output_format,
+                                        excess_bps_at_fill: self
+                                            .loop_state
+                                            .external_excess_telemetry
+                                            .current(std::time::Instant::now()),
+                                    },
+                                )
+                                .await
+                                {
+                                    ConvergenceProbe::Converged { observed: obs } => {
+                                        observed = obs;
+                                        gap_closed = true;
+                                        break;
+                                    }
+                                    ConvergenceProbe::Pending { observed: obs } => observed = obs,
+                                    ConvergenceProbe::SnapshotFailed(error) => eprintln!(
+                                        "⚠️  account stream reconnect REST trade backfill failed: {error}"
+                                    ),
+                                }
+                            }
+                            if !gap_closed {
+                                handle.abort();
+                                break 'phase recovery_failed_exit(
+                                    &mut self.recovery.runtime_state,
+                                    recovery_token,
+                                    format!(
+                                        "account stream reconnect snapshot expected {:+.8}, observed {:+.8} (REST trade backfill did not close the gap)",
+                                        self.loop_state.ledger.expected_position, observed
+                                    ),
+                                );
+                            }
+                        }
+
+                        // A current-run order may surface after the first freeze
+                        // cleanup while the account stream is authenticating. Require
+                        // one final authoritative empty-book verification before the
+                        // recovered stream can resume quoting.
+                        if let Err(error) =
+                            cancel_maker_orders_with_retry(client, symbol, 3, output_format, None)
+                                .await
+                        {
+                            handle.abort();
+                            break 'phase recovery_failed_exit(
+                                &mut self.recovery.runtime_state,
+                                recovery_token,
+                                format!(
+                                    "account stream reconnect final maker-book verification failed: {error}"
+                                ),
+                            );
+                        }
+                        session.account_events = events;
+                        session.account_stream_health = health;
+                        session.account_stream_handle = handle;
+                        self.loop_state.counters.total_fills += reconnect_fills;
+                        resume_quoting_after_recovery(
+                            &mut RecoveryIo {
+                                runtime_state: &mut self.recovery.runtime_state,
+                                notifier,
+                                client,
+                                session: Some(&mut *session),
+                                resting: &mut self.loop_state.resting,
+                                inventory_exit_pending: &mut self.loop_state.inventory_exit_pending,
+                                next_cycle_is_recovery: &mut self.loop_state.next_cycle_is_recovery,
+                                symbol,
+                                cycle,
+                                output_format,
+                            },
+                            ResumeSpec {
+                                recovery_token,
+                                observed,
+                                continuity: OrderResponseContinuity::Preserved,
+                                clear_resting: false,
+                                recovered_note: None,
+                                notice: RiskNotice::resolved("account_stream", "reconnected", "account stream reauthenticated; buffered events and REST trades reconciled against the venue position", symbol, cycle).expected(self.loop_state.ledger.expected_position).observed(observed),
+                            },
+                        )
+                        .await;
+                        break 'recovery;
                     }
-                    session.account_events = events;
-                    session.account_stream_health = health;
-                    session.account_stream_handle = handle;
-                    self.loop_state.counters.total_fills += reconnect_fills;
-                    resume_quoting_after_recovery(
-                        &mut RecoveryIo {
-                            runtime_state: &mut self.recovery.runtime_state,
-                            notifier,
-                            client,
-                            session: Some(&mut *session),
-                            resting: &mut self.loop_state.resting,
-                            inventory_exit_pending: &mut self.loop_state.inventory_exit_pending,                            next_cycle_is_recovery: &mut self.loop_state.next_cycle_is_recovery,
-                            symbol,
-                            cycle,
-                            output_format,
-                        },
-                        ResumeSpec {
-                            recovery_token,
-                            observed,
-                            continuity: OrderResponseContinuity::Preserved,
-                            clear_resting: false,
-                            recovered_note: None,
-                            notice: RiskNotice::resolved("account_stream", "reconnected", "account stream reauthenticated; buffered events and REST trades reconciled against the venue position", symbol, cycle).expected(self.loop_state.ledger.expected_position).observed(observed),
-                        },
-                    )
-                    .await;
                     return LoopDirective::Restart;
                 }
             }

@@ -303,3 +303,93 @@ async fn accounting_invariant_mismatch_becomes_fail_safe_exit() {
 }
 
 // ---- Fault-injection conformance tests for the shared recovery helpers ----
+
+// A dropped account-stream channel must surface as the typed, downcast-able
+// transport error (account-stream-disconnect retry), never as a generic
+// validation failure. This is the contract `recovery_flow` relies on to decide
+// between a *bounded retry* (transport) and a *fail-closed* exit (safety).
+// Regression for the 2026-08-10 incident: mid-backfill disconnect was being
+// misclassified as event-validation failure and failed the whole run.
+#[test]
+fn apply_account_events_disconnect_is_typed_transport_error() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AccountEvent>(16);
+    drop(tx); // the authenticated stream channel closed
+
+    let mut ledger = MakerLedger::new(0.0);
+    let mut stats = MakerStats::default();
+    let mut projection = MakerAccountProjection::new(1, "sxmk-test-", 0.0, 0.005, 0.00005);
+    let mut state = AccountEventState {
+        ledger: &mut ledger,
+        stats: &mut stats,
+        projection: &mut projection,
+    };
+    let context = AccountEventContext {
+        symbol: "BTC-USD",
+        run_order_prefix: "sxmk-test-",
+        mark: 100.0,
+        cycle: 1,
+        output_format: OutputFormat::Quiet,
+        excess_bps_at_fill: None,
+    };
+
+    let error = apply_account_events(&mut rx, &mut state, &context)
+        .expect_err("a dropped receiver must error");
+
+    // 1. It is the typed transport error, not an untyped validation error.
+    assert!(
+        error.downcast_ref::<AccountStreamDisconnected>().is_some(),
+        "disconnect must downcast to AccountStreamDisconnected, got: {error}"
+    );
+    // 2. Display preserves the historical message so log/reason strings are unchanged.
+    assert_eq!(
+        error.to_string(),
+        "authenticated account stream disconnected"
+    );
+    // 3. Other error types are NOT treated as the transport error (so real
+    //    validation failures still fail closed).
+    let unrelated = anyhow::anyhow!("event validation failed");
+    assert!(unrelated
+        .downcast_ref::<AccountStreamDisconnected>()
+        .is_none());
+}
+
+// Disconnect mid-drain: a channel that yields events then disconnects must
+// still surface the typed transport error (not silently succeed with partial
+// events), so the recovery loop re-runs the backfill round rather than resuming
+// quoting on a stream that is already gone.
+#[test]
+fn apply_account_events_disconnects_mid_drain() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    tx.try_send(AccountEvent::Connected { epoch: 1 }).unwrap();
+    tx.try_send(AccountEvent::Position(position_update(
+        "BTC-USD",
+        Some(OrderSide::Buy),
+        "0.5",
+    )))
+    .unwrap();
+    drop(tx); // stream drops after buffering events
+
+    let mut ledger = MakerLedger::new(0.0);
+    let mut stats = MakerStats::default();
+    let mut projection = MakerAccountProjection::new(1, "sxmk-test-", 0.0, 0.005, 0.00005);
+    let mut state = AccountEventState {
+        ledger: &mut ledger,
+        stats: &mut stats,
+        projection: &mut projection,
+    };
+    let context = AccountEventContext {
+        symbol: "BTC-USD",
+        run_order_prefix: "sxmk-test-",
+        mark: 100.0,
+        cycle: 1,
+        output_format: OutputFormat::Quiet,
+        excess_bps_at_fill: None,
+    };
+
+    let error = apply_account_events(&mut rx, &mut state, &context)
+        .expect_err("an early disconnect after buffered events must error");
+    assert!(
+        error.downcast_ref::<AccountStreamDisconnected>().is_some(),
+        "mid-drain disconnect must be typed as transport fault, got: {error}"
+    );
+}
