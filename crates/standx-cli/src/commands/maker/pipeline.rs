@@ -178,6 +178,8 @@ pub(super) struct CycleState<'a> {
     /// Stage 3 v1 nonlinear price-skew strength (disabled ≡ legacy linear).
     pub(super) nonlinear_skew: standx_maker::NonlinearSkewConfig,
     pub(super) external_skew: standx_maker::ExternalSkewConfig,
+    /// In-venue touch-mid center offset (default disabled).
+    pub(super) microprice: standx_maker::MicroPriceConfig,
     pub(super) external_skew_previous_shift_bps: &'a mut f64,
     pub(super) external_excess_telemetry: &'a mut ExternalExcessTelemetry,
     pub(super) guard_controller: &'a mut standx_maker::GuardController,

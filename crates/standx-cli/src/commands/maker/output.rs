@@ -253,6 +253,8 @@ pub(super) struct CycleOutput<'a> {
     pub(super) external_basis_bps: Option<f64>,
     /// Continuous external-price component of the quote-center shift.
     pub(super) external_skew_shift_bps: f64,
+    /// In-venue touch-mid component of the quote-center shift (0 when disabled).
+    pub(super) micro_price_shift_bps: f64,
     /// Legacy inventory-only quote-center shift in bps; covers linear and
     /// nonlinear skew but deliberately excludes the additive external field.
     pub(super) skew_shift_bps: f64,
@@ -287,6 +289,7 @@ pub(super) fn emit_maker_cycle(output: CycleOutput<'_>) {
         guard_decision,
         external_basis_bps,
         external_skew_shift_bps,
+        micro_price_shift_bps,
         skew_shift_bps,
         exit_status,
         cfg,
@@ -407,6 +410,7 @@ pub(super) fn emit_maker_cycle(output: CycleOutput<'_>) {
                         guard_decision,
                         external_basis_bps,
                         external_skew_shift_bps,
+                        micro_price_shift_bps,
                         skew_shift_bps,
                     ),
                     exit_status,
@@ -607,6 +611,7 @@ fn with_guard_fields(
     decision: &maker::GuardDecision,
     external_basis_bps: Option<f64>,
     external_skew_shift_bps: f64,
+    micro_price_shift_bps: f64,
     skew_shift_bps: f64,
 ) -> serde_json::Value {
     let object = summary
@@ -635,6 +640,10 @@ fn with_guard_fields(
     object.insert(
         "external_skew_shift_bps".to_string(),
         serde_json::json!((external_skew_shift_bps * 100.0).round() / 100.0),
+    );
+    object.insert(
+        "micro_price_shift_bps".to_string(),
+        serde_json::json!((micro_price_shift_bps * 100.0).round() / 100.0),
     );
     object.insert(
         "skew_shift_bps".to_string(),
@@ -1572,6 +1581,7 @@ mod tests {
             &decision,
             Some(-14.2),
             3.25,
+            1.75,
             4.804,
         );
 
@@ -1583,6 +1593,7 @@ mod tests {
         assert_eq!(json["external_divergence_bps"], 7.82);
         assert_eq!(json["external_basis_bps"], -14.2);
         assert_eq!(json["external_skew_shift_bps"], 3.25);
+        assert_eq!(json["micro_price_shift_bps"], 1.75);
         assert_eq!(json["skew_shift_bps"], 4.8);
 
         // Inactive guard serializes nulls, never drops the keys.
@@ -1592,6 +1603,7 @@ mod tests {
             None,
             0.0,
             0.0,
+            0.0,
         );
         assert_eq!(idle["guard_enabled"], false);
         assert_eq!(idle["guard_active"], false);
@@ -1599,6 +1611,7 @@ mod tests {
         assert!(idle["external_divergence_bps"].is_null());
         assert!(idle["external_basis_bps"].is_null());
         assert_eq!(idle["external_skew_shift_bps"], 0.0);
+        assert_eq!(idle["micro_price_shift_bps"], 0.0);
         assert_eq!(idle["skew_shift_bps"], 0.0);
     }
 

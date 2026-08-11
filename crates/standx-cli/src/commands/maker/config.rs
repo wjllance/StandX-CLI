@@ -114,6 +114,29 @@ impl ExternalSkewFileConfig {
     }
 }
 
+/// Continuous in-venue touch-mid center offset (`[microprice]`). TOML-only so
+/// frozen A/B arm files remain the single source of truth.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MicroPriceFileConfig {
+    pub enabled: Option<bool>,
+    pub lambda: Option<f64>,
+    pub cap_bps: Option<f64>,
+    pub dead_zone_bps: Option<f64>,
+}
+
+impl MicroPriceFileConfig {
+    pub(super) fn into_domain(self) -> standx_maker::MicroPriceConfig {
+        let defaults = standx_maker::MicroPriceConfig::default();
+        standx_maker::MicroPriceConfig {
+            enabled: self.enabled.unwrap_or(defaults.enabled),
+            lambda: self.lambda.unwrap_or(defaults.lambda),
+            cap_bps: self.cap_bps.unwrap_or(defaults.cap_bps),
+            dead_zone_bps: self.dead_zone_bps.unwrap_or(defaults.dead_zone_bps),
+        }
+    }
+}
+
 /// External-price defensive guard (`[external_guard]`). Field defaults match
 /// [`standx_maker::GuardConfig`] so partial files stay valid.
 #[derive(Debug, Clone, Deserialize)]
@@ -168,6 +191,7 @@ pub(super) struct MakerFileConfig {
     pub size_skew: Option<SizeSkewFileConfig>,
     pub nonlinear_skew: Option<NonlinearSkewFileConfig>,
     pub external_skew: Option<ExternalSkewFileConfig>,
+    pub microprice: Option<MicroPriceFileConfig>,
     pub external_guard: Option<ExternalGuardFileConfig>,
     pub stop_loss: Option<f64>,
     pub alert_loss: Option<f64>,
@@ -301,6 +325,10 @@ pub(super) fn merge(
         .external_skew
         .map(|config| config.into_domain())
         .unwrap_or_default();
+    let microprice = file
+        .microprice
+        .map(|config| config.into_domain())
+        .unwrap_or_default();
     let external_guard_basis_half_life_secs = file
         .external_guard
         .as_ref()
@@ -338,6 +366,7 @@ pub(super) fn merge(
         size_skew,
         nonlinear_skew,
         external_skew,
+        microprice,
         external_guard,
         external_guard_basis_half_life_secs,
         stop_loss: choose(stop_loss, file.stop_loss, 0.0),
@@ -407,6 +436,7 @@ pub(super) struct MakerRunArgs {
     pub(super) size_skew: standx_maker::SizeSkewConfig,
     pub(super) nonlinear_skew: standx_maker::NonlinearSkewConfig,
     pub(super) external_skew: standx_maker::ExternalSkewConfig,
+    pub(super) microprice: standx_maker::MicroPriceConfig,
     pub(super) external_guard: standx_maker::GuardConfig,
     pub(super) external_guard_basis_half_life_secs: u64,
     pub(super) stop_loss: f64,

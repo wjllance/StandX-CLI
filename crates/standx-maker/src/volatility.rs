@@ -529,6 +529,7 @@ mod tests {
                 nonlinear_skew: Default::default(),
                 external_skew: Default::default(),
                 external_excess_bps: None,
+                micro_price: Default::default(),
                 guard: Default::default(),
                 wind_down: false,
                 qty_tolerance: 0.0005,
