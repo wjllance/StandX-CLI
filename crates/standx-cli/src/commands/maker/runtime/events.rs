@@ -514,7 +514,14 @@ pub(super) fn apply_account_events(
                 return Ok(outcome);
             }
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                return Err(anyhow::Error::new(AccountStreamDisconnected));
+                // Only the fill count is carried today. `exit_fill_observed`,
+                // `position_observations`, `effective_request_ids`,
+                // `fill_order_ids`, and `requires_order_reconciliation` are
+                // deliberately still dropped here; carrying exit-fill state
+                // could change inventory-exit behavior.
+                return Err(anyhow::Error::new(AccountStreamDisconnected {
+                    fills_applied: outcome.fills,
+                }));
             }
         };
         outcome.merge(apply_account_event(event, state, context)?);
@@ -529,9 +536,13 @@ pub(super) fn apply_account_events(
 /// reconnect+backfill round (bounded) on receipt, and must only fail closed
 /// once the transport budget is exhausted or a separate reconciliation check
 /// fails. Its `Display` keeps the historical message so existing log/reason
-/// strings are unchanged.
+/// strings are unchanged. The accumulated outcome is dropped with this error,
+/// so a caller that retries must still credit these already-emitted fills or
+/// `total_fills` will silently undercount the emitted `fill` lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AccountStreamDisconnected;
+pub(crate) struct AccountStreamDisconnected {
+    pub(crate) fills_applied: u64,
+}
 
 impl fmt::Display for AccountStreamDisconnected {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

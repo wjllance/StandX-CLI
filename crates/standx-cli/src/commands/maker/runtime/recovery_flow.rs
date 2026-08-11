@@ -876,6 +876,7 @@ impl MakerRuntime {
                     }
                     let mut failed_rounds = 0_u32;
                     let mut gap_transport_retries = 0_u32;
+                    let mut reconnect_fills = 0_u64;
                     // The whole account-stream recovery runs as one two-tier
                     // retry loop: reconnect, drain buffered events, reconcile
                     // the venue position, and verify the maker book empty. A
@@ -1064,6 +1065,11 @@ impl MakerRuntime {
                                 if error.downcast_ref::<AccountStreamDisconnected>().is_some() =>
                             {
                                 handle.abort();
+                                // These fills were already booked and emitted,
+                                // so they must survive the aborted round.
+                                reconnect_fills += error
+                                    .downcast_ref::<AccountStreamDisconnected>()
+                                    .map_or(0, |disconnect| disconnect.fills_applied);
                                 // No safety claim is outstanding here: the venue
                                 // position has not been read yet this round, so
                                 // there is no gap to defer. That is the
@@ -1088,7 +1094,7 @@ impl MakerRuntime {
                         };
                         self.loop_state.account_balance_refresh_requested |=
                             reconnect_outcome.balance_changed;
-                        let mut reconnect_fills = reconnect_outcome.fills;
+                        reconnect_fills += reconnect_outcome.fills;
                         let positions = match client.get_positions(Some(symbol)).await {
                             Ok(positions) => positions,
                             Err(error) => {
@@ -1163,6 +1169,9 @@ impl MakerRuntime {
                                             .is_some() =>
                                     {
                                         handle.abort();
+                                        reconnect_fills += error
+                                            .downcast_ref::<AccountStreamDisconnected>()
+                                            .map_or(0, |disconnect| disconnect.fills_applied);
                                         match maker::backfill_transport_verdict(
                                             true,
                                             gap_transport_retries,

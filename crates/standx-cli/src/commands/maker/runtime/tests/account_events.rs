@@ -336,10 +336,12 @@ fn apply_account_events_disconnect_is_typed_transport_error() {
         .expect_err("a dropped receiver must error");
 
     // 1. It is the typed transport error, not an untyped validation error.
-    assert!(
-        error.downcast_ref::<AccountStreamDisconnected>().is_some(),
-        "disconnect must downcast to AccountStreamDisconnected, got: {error}"
-    );
+    let disconnect = error
+        .downcast_ref::<AccountStreamDisconnected>()
+        .unwrap_or_else(|| {
+            panic!("disconnect must downcast to AccountStreamDisconnected: {error}")
+        });
+    assert_eq!(disconnect.fills_applied, 0);
     // 2. Display preserves the historical message so log/reason strings are unchanged.
     assert_eq!(
         error.to_string(),
@@ -351,6 +353,67 @@ fn apply_account_events_disconnect_is_typed_transport_error() {
     assert!(unrelated
         .downcast_ref::<AccountStreamDisconnected>()
         .is_none());
+}
+
+// Without the carried count, a retried recovery round loses a fill that was
+// already booked and printed, so the stopped summary's `total_fills` drifts
+// below the emitted `fill` lines.
+#[test]
+fn apply_account_events_disconnect_carries_already_applied_fill_count() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    tx.try_send(AccountEvent::Order(OrderUpdate {
+        seq: 1,
+        order_id: 7,
+        cl_ord_id: Some("sxmk-test-x00000001".to_string()),
+        symbol: "BTC-USD".to_string(),
+        side: OrderSide::Sell,
+        qty: "0.2".to_string(),
+        fill_qty: "0.2".to_string(),
+        fill_avg_price: "100".to_string(),
+        price: "100".to_string(),
+        status: standx_sdk::models::OrderStatus::Filled,
+        reduce_only: true,
+        updated_at: "2026-07-14T00:00:00Z".to_string(),
+    }))
+    .unwrap();
+    tx.try_send(AccountEvent::Trade(
+        standx_sdk::account_stream::TradeUpdate {
+            seq: 2,
+            trade_id: 11,
+            order_id: 7,
+            symbol: "BTC-USD".to_string(),
+            side: OrderSide::Sell,
+            price: "100".to_string(),
+            qty: "0.2".to_string(),
+            trade_ts: "2026-07-14T00:00:00Z".to_string(),
+        },
+    ))
+    .unwrap();
+    drop(tx);
+
+    let mut ledger = MakerLedger::new(0.0);
+    let mut stats = MakerStats::default();
+    let mut projection = MakerAccountProjection::new(1, "sxmk-test-", 0.0, 0.005, 0.00005);
+    let mut state = AccountEventState {
+        ledger: &mut ledger,
+        stats: &mut stats,
+        projection: &mut projection,
+    };
+    let context = AccountEventContext {
+        symbol: "BTC-USD",
+        run_order_prefix: "sxmk-test-",
+        mark: 100.0,
+        cycle: 1,
+        output_format: OutputFormat::Quiet,
+        excess_bps_at_fill: None,
+    };
+
+    let error = apply_account_events(&mut rx, &mut state, &context)
+        .expect_err("disconnect after a buffered fill must carry its count");
+    let disconnect = error
+        .downcast_ref::<AccountStreamDisconnected>()
+        .expect("disconnect must remain a typed transport error");
+    assert_eq!(disconnect.fills_applied, 1);
 }
 
 // Disconnect mid-drain: a channel that yields events then disconnects must
@@ -388,8 +451,8 @@ fn apply_account_events_disconnects_mid_drain() {
 
     let error = apply_account_events(&mut rx, &mut state, &context)
         .expect_err("an early disconnect after buffered events must error");
-    assert!(
-        error.downcast_ref::<AccountStreamDisconnected>().is_some(),
-        "mid-drain disconnect must be typed as transport fault, got: {error}"
-    );
+    let disconnect = error
+        .downcast_ref::<AccountStreamDisconnected>()
+        .unwrap_or_else(|| panic!("mid-drain disconnect must be typed: {error}"));
+    assert_eq!(disconnect.fills_applied, 0);
 }
