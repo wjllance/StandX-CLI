@@ -64,12 +64,13 @@ transport 故障可重跑；证明安全的失败（位差不收敛、事件数�
    （替代裸 `anyhow!("authenticated account stream disconnected")`），
    恢复期可用 `error.downcast_ref::<AccountStreamDisconnected>()` 精确识别 transport 故障，
    而不是靠字符串匹配。
-2. **`recover_account_stream_phase` 重构**为有界 `'recovery` 外层循环：
+2. **`recover_account_stream_phase` 重构**为两级 `'recovery` 外层循环：
    - 每次轮次 =（reconnect → reset → drain → get_positions → 收敛窗口 → 空簿验证）
-   - `apply_account_events` 返回 `AccountStreamDisconnected`（或 REST snapshot 失败）：
-     abort 当前 handle → 递增 `failed_rounds` → 用
-     `maker::recovery_retry_delay_secs(backoff, failed_rounds)` 退避 → 回到 reconnect，
-     上限复用 `args.account_stream_reconnect_attempts`（已配置为 3）。
+   - `apply_account_events` 返回 `AccountStreamDisconnected`：
+     abort 当前 handle → 用纯策略分成两级：尚无未解释位差时保持冻结、无限重试；
+     已观察到位差后，transport 重试由 `args.account_stream_reconnect_attempts`
+     限定，预算耗尽即 fail-closed，避免断流无限推迟位差结论。每次 transport
+     重试进入退避前都重新验证 maker book 为空，残单直接 terminal。
    - **位差不收敛 / 事件校验 error（非断流）/ cleanup 残单** → 保持现状立即
      `recovery_failed_exit` 停机。
 3. **空簿验证**：每轮重连后、以及最终 resume 前的 `cancel_maker_orders_with_retry`
@@ -89,7 +90,7 @@ transport 故障可重跑；证明安全的失败（位差不收敛、事件数�
 ## 5. 测试清单
 
 - [x] typed 错误识别：`AccountStreamDisconnected` 可被 downcast、`Display` 保持原字符串（`tests/account_events.rs`：`apply_account_events_disconnect_is_typed_transport_error`、`apply_account_events_disconnects_mid_drain` 均已落地通过）。
-- [ ] 纯策略函数：给定 transport 故障 + 剩余轮次 → Retry；给定证明安全失败 → Terminal。（后续工作）
+- [x] 纯策略函数：给定 transport 故障 + 剩余轮次 → Retry；给定证明安全失败 → Terminal。
 - [ ] （mockito）reconnect 成功后 drain 遇断流 → 触发第二次 reconnect，未停机。（后续工作）
 - [ ] （mockito）位差不收敛 → 仍 fail-closed 停机（回归保护）。（后续工作）
 - [x] 既有 runtime 全量测试（`cargo test --workspace --offline` 通过：278+205+88 等全绿）+ clippy（无新告警）+ fmt（clean）。

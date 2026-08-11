@@ -69,7 +69,10 @@ pub use performance::{
     PerformanceFill, PerformanceLedger, PerformanceSummary, QuoteQualityInterval, QuoteTimeSummary,
     MARKOUT_WINDOWS_MS,
 };
-pub use recovery::{recovery_retry_delay_secs, MAX_RECOVERY_RETRY_BACKOFF_SECS};
+pub use recovery::{
+    backfill_transport_verdict, recovery_retry_delay_secs, BackfillTransportVerdict,
+    MAX_RECOVERY_RETRY_BACKOFF_SECS,
+};
 pub use replay::{
     run_replay, ReplayCycle, ReplayCycleOutcome, ReplayError, ReplayEvent, ReplayResult,
     ReplaySettings,
