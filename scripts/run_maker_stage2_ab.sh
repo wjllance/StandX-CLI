@@ -246,6 +246,8 @@ def external_skew_sections(text):
                 while out and (not out[-1].strip()
                                or out[-1].lstrip().startswith("#")):
                     out.pop()
+            else:
+                out.append(line)
             continue
         if section == "external_skew":
             match = re.fullmatch(r"([a-z_]+)\s*=\s*(\S+)(?:\s+#.*)?", body)

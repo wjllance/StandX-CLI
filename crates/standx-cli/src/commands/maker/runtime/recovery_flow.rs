@@ -875,17 +875,17 @@ impl MakerRuntime {
                         );
                     }
                     let mut failed_rounds = 0_u32;
-                    // The whole account-stream recovery runs as one bounded
+                    let mut gap_transport_retries = 0_u32;
+                    // The whole account-stream recovery runs as one two-tier
                     // retry loop: reconnect, drain buffered events, reconcile
                     // the venue position, and verify the maker book empty. A
-                    // *transport* fault at any post-connect step — including the
-                    // freshly reauthenticated account stream dropping again
-                    // mid-backfill, which is what the 2026-08-10 incident hit —
-                    // is retried like a connect failure rather than failing
-                    // closed. Only proof-of-safety failures (an unexplained
-                    // position gap, a residual maker book, or an event-validation
-                    // error that is not the transport disconnect) remain
-                    // terminal.
+                    // *transport* fault before any safety claim is outstanding
+                    // remains retryable while the maker is frozen. Once a
+                    // position gap is observed, transport retries are bounded so
+                    // stream flapping cannot defer the fail-closed verdict. Other
+                    // proof-of-safety failures (a residual maker book or an
+                    // event-validation error that is not the transport
+                    // disconnect) remain terminal.
                     'recovery: loop {
                         let (mut events, health, handle) = match reconnect_account_stream(
                             &mut session.account_stream_epoch,
@@ -981,6 +981,27 @@ impl MakerRuntime {
 
                         macro_rules! retry_transport {
                             () => {{
+                                // The maker book must be verified empty before idling in
+                                // backoff; any residual order is a terminal cleanup failure.
+                                if let Err(error) = cancel_maker_orders_with_retry(
+                                    client,
+                                    symbol,
+                                    3,
+                                    output_format,
+                                    None,
+                                )
+                                .await
+                                {
+                                    break 'phase stop_requested_exit(
+                                        &mut self.recovery.runtime_state,
+                                        RuntimeStopReason::CleanupFailure {
+                                            target: RecoveryTarget::AccountStream,
+                                            reason: format!(
+                                                "account-stream backfill retry cleanup failed: {error}"
+                                            ),
+                                        },
+                                    );
+                                }
                                 failed_rounds = failed_rounds.saturating_add(1);
                                 let delay_secs = maker::recovery_retry_delay_secs(
                                     args.account_stream_reconnect_backoff,
@@ -1043,19 +1064,15 @@ impl MakerRuntime {
                                 if error.downcast_ref::<AccountStreamDisconnected>().is_some() =>
                             {
                                 handle.abort();
-                                notifier
-                                    .risk(
-                                        RiskNotice::warning(
-                                            "account_stream",
-                                            "reconnect_retrying",
-                                            "account stream reconnect drained then dropped; retrying",
-                                            symbol,
-                                            cycle,
-                                        )
-                                        .expected(self.loop_state.ledger.expected_position),
-                                        false,
-                                    )
-                                    .await;
+                                // No safety claim is outstanding here: the venue
+                                // position has not been read yet this round, so
+                                // there is no gap to defer. That is the
+                                // `gap_outstanding == false` tier of
+                                // `maker::backfill_transport_verdict`, which is
+                                // unconditionally `Retry` — a frozen, flat maker
+                                // is not stopped for stream availability alone.
+                                // The bounded tier is applied at the convergence
+                                // window below, where a gap *is* outstanding.
                                 retry_transport!();
                             }
                             Err(error) => {
@@ -1146,7 +1163,27 @@ impl MakerRuntime {
                                             .is_some() =>
                                     {
                                         handle.abort();
-                                        retry_transport!();
+                                        match maker::backfill_transport_verdict(
+                                            true,
+                                            gap_transport_retries,
+                                            args.account_stream_reconnect_attempts,
+                                        ) {
+                                            maker::BackfillTransportVerdict::Retry => {
+                                                gap_transport_retries =
+                                                    gap_transport_retries.saturating_add(1);
+                                                retry_transport!();
+                                            }
+                                            maker::BackfillTransportVerdict::Terminal => {
+                                                break 'phase recovery_failed_exit(
+                                                    &mut self.recovery.runtime_state,
+                                                    recovery_token,
+                                                    format!(
+                                                        "account stream reconnect snapshot expected {:+.8}, observed {:+.8}; the stream dropped during {} bounded backfill retries without explaining the gap",
+                                                        self.loop_state.ledger.expected_position, observed, gap_transport_retries
+                                                    ),
+                                                );
+                                            }
+                                        }
                                     }
                                     Err(error) => {
                                         handle.abort();

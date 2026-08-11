@@ -20,6 +20,31 @@ pub fn recovery_retry_delay_secs(base_secs: u64, failed_rounds: u32) -> u64 {
         .min(MAX_RECOVERY_RETRY_BACKOFF_SECS)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackfillTransportVerdict {
+    Retry,
+    Terminal,
+}
+
+/// Decide whether a backfill transport fault can retry without deferring safety.
+///
+/// Stream availability alone is not a reason to stop a frozen, flat maker, so
+/// transport faults remain retryable while no safety claim is outstanding. An
+/// unexplained position mismatch must fail closed, however, so a flapping stream
+/// cannot defer that verdict indefinitely once the bounded gap retry budget is
+/// consumed.
+pub fn backfill_transport_verdict(
+    gap_outstanding: bool,
+    gap_retries_used: u32,
+    budget: u32,
+) -> BackfillTransportVerdict {
+    if !gap_outstanding || gap_retries_used < budget {
+        BackfillTransportVerdict::Retry
+    } else {
+        BackfillTransportVerdict::Terminal
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -41,5 +66,45 @@ mod tests {
     #[test]
     fn zero_base_has_zero_delay() {
         assert_eq!(recovery_retry_delay_secs(0, 1), 0);
+    }
+
+    #[test]
+    fn backfill_transport_without_gap_retries_past_budget() {
+        assert_eq!(
+            backfill_transport_verdict(false, 4, 3),
+            BackfillTransportVerdict::Retry
+        );
+    }
+
+    #[test]
+    fn backfill_transport_with_gap_retries_below_budget() {
+        assert_eq!(
+            backfill_transport_verdict(true, 2, 3),
+            BackfillTransportVerdict::Retry
+        );
+    }
+
+    #[test]
+    fn backfill_transport_with_gap_is_terminal_at_budget() {
+        assert_eq!(
+            backfill_transport_verdict(true, 3, 3),
+            BackfillTransportVerdict::Terminal
+        );
+    }
+
+    #[test]
+    fn backfill_transport_with_gap_is_terminal_past_budget() {
+        assert_eq!(
+            backfill_transport_verdict(true, 4, 3),
+            BackfillTransportVerdict::Terminal
+        );
+    }
+
+    #[test]
+    fn backfill_transport_with_gap_and_zero_budget_is_immediately_terminal() {
+        assert_eq!(
+            backfill_transport_verdict(true, 0, 0),
+            BackfillTransportVerdict::Terminal
+        );
     }
 }
