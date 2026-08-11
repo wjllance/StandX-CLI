@@ -296,6 +296,7 @@ pub(super) async fn maker_cycle(
         size_skew_controller,
         nonlinear_skew,
         external_skew,
+        microprice,
         external_skew_previous_shift_bps,
         external_excess_telemetry,
         guard_controller,
@@ -695,6 +696,7 @@ pub(super) async fn maker_cycle(
             nonlinear_skew,
             external_skew,
             external_excess_bps,
+            micro_price: microprice,
             guard: guard_decision,
             wind_down,
             qty_tolerance,
@@ -702,6 +704,7 @@ pub(super) async fn maker_cycle(
         halted,
     );
     let external_skew_shift_bps = plan.external_skew_shift_bps;
+    let micro_price_shift_bps = plan.micro_price_shift_bps;
     let inventory_skew_shift_bps = legacy_inventory_skew_shift_bps(mark, &plan);
     if external_skew_transitioned(*external_skew_previous_shift_bps, external_skew_shift_bps) {
         emit_external_skew_transition(
@@ -1119,6 +1122,7 @@ pub(super) async fn maker_cycle(
         guard_decision: &guard_decision,
         external_basis_bps,
         external_skew_shift_bps,
+        micro_price_shift_bps,
         skew_shift_bps: inventory_skew_shift_bps,
         exit_status,
         cfg,
@@ -1171,6 +1175,7 @@ mod tests {
             inventory_ref_center: 100.0,
             ref_center: 100.04,
             external_skew_shift_bps: 4.0,
+            micro_price_shift_bps: 0.0,
         };
 
         assert_eq!(legacy_inventory_skew_shift_bps(100.0, &plan), 0.0);

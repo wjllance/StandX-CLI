@@ -277,6 +277,7 @@ impl MakerRuntime {
                         size_skew_controller: &mut self.loop_state.size_skew_controller,
                         nonlinear_skew: self.loop_state.nonlinear_skew,
                         external_skew: self.loop_state.external_skew,
+                        microprice: self.loop_state.microprice,
                         external_skew_previous_shift_bps: &mut self
                             .loop_state
                             .external_skew_previous_shift_bps,
