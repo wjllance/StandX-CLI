@@ -3,7 +3,7 @@
 判定对象：external_guard 以冻结参数 enter=10bps / exit=5bps 单开 vs
 skew 生产基线的纯配置 A/B（不重锁，编排器白名单 case (f)）。
 立项与预注册判据见
-[24-maker-guard-spinoff-design.md](../24-maker-guard-spinoff-design.md)；
+[24-maker-guard-spinoff-design.md](../archive/2026-07-maker/24-maker-guard-spinoff-design.md)；
 定位声明沿用：**成本有界的尾部保险——判定只看成本侧与信号质量，
 PnL/markout 改善不作为晋级条件**。
 
@@ -78,6 +78,6 @@ sha256 `6314a37462e3bfda2cb21f14e503fae4d2997dca449f329de80e7ab22be4b9fc`）。
   记录）。后续任何实验启动前的 FLAT 复核会发现它。
   **已处置（2026-07-28，owner 确认）**：手动平仓完成，账户回到 FLAT；处置方式与
   成交明细未留档（金额约 $5.8，不影响本轮判定的任何指标）。后续实验的 FLAT 前置
-  仍按 [23 号手册 preflight](../23-maker-stage3v1-live-ab-runbook.md) 实测
+  仍按 [23 号手册 preflight](../archive/2026-07-maker/23-maker-stage3v1-live-ab-runbook.md) 实测
   `standx -o json account positions` + `account orders`，不依赖本记录。
 - token 有效期覆盖全程，无中断；OpenObserve 上传连续。

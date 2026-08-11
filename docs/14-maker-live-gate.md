@@ -13,6 +13,21 @@ maker by itself.
 - Replay scenarios cover: crossed touch, stale/crossed market data, volatility halt, position-limit pressure, delayed order visibility, stream loss, and inventory exit.
 - No telemetry, logs, PR body, or alert output contains credentials or webhook secrets.
 
+## Cleanup terminal-state rule
+
+- For a correlated cancel, a terminal order-response `success` is the preferred proof that venue
+  processing completed. A gateway `accepted` frame only proves admission and is not terminal.
+- When the response stream is unavailable, closes, times out, or never reaches terminal success,
+  cleanup queries that exact `order_id` through REST and accepts only a terminal venue status.
+- An open-orders list may help discover candidates but cannot by itself prove that one order was
+  cancelled or remains live: the venue has exhibited list read-after-write lag.
+- If neither correlated WS success nor authoritative per-order REST status can settle the order,
+  cleanup remains fail-closed. It must not render the maker book empty, resume quoting, or report a
+  clean shutdown from an unconfirmed list snapshot.
+
+The completed design and incident history are retained in the
+[cleanup residual archive](archive/2026-07-maker/29-maker-cleanup-residual-verification.md).
+
 ## Paper and connectivity evidence
 
 - Paper mode completes a recorded multi-hour session without panic or invariant failure.

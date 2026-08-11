@@ -83,7 +83,8 @@ BackfillPending → VerificationPending → Ready / Stop`），CLI 退化为薄�
 ## 修订记录（2026-07-27）：C-lite 触发条件命中
 
 本节补记 2026-07-16 起落地的行情降级/恢复对本 ADR 决策 3 的影响——触发条件当时即已
-命中，但 ADR 一直未修订（该缺口在 [20 号短期路线图](../20-maker-short-term-roadmap-2026-07.md)
+命中，但 ADR 一直未修订（该缺口在
+[20 号短期路线图](../archive/2026-07-maker/20-maker-short-term-roadmap-2026-07.md)
 里挂了 P2 至今）。
 
 ### 触发事实

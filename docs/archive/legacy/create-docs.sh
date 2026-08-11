@@ -1,5 +1,8 @@
 #!/bin/bash
 # create-docs.sh - 批量创建文档的辅助脚本
+# ARCHIVED: this early helper only describes docs 01-11 and no longer reflects
+# the repository documentation layout. Keep it for history; do not use it to
+# generate or validate the current docs index.
 
 echo "StandX CLI 文档目录已创建"
 echo ""

@@ -3,7 +3,7 @@
 ## Decision
 
 - Status: `implemented_pending_gate`
-- 范围：设计文档 [22-maker-stage3v1-guard-design.md](../22-maker-stage3v1-guard-design.md)
+- 范围：设计文档 [22-maker-stage3v1-guard-design.md](../archive/2026-07-maker/22-maker-stage3v1-guard-design.md)
   的完整实现——非线性 price skew（`[nonlinear_skew]`）+ 外部价防御门
   （`[external_guard]`），一个 release、两个独立开关。
 - 立项与判据修订（release owner 2026-07-22）：两机制合并为一个候选；

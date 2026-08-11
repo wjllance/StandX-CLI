@@ -1,7 +1,12 @@
 # 阶段 3 v1 组合候选设计：非线性 price skew + 外部价防御门（2026-07-22）
 
+> **归档记录**：组合候选已经判定 `rejected_split_branch`，后续拆出的
+> `nonlinear_skew` 与 `external_guard` 分别完成独立判定。本文只保留设计与证据链，不能作为
+> 当前实现或 live 授权依据；当前状态见
+> [../../18-maker-strategy-roadmap.md](../../18-maker-strategy-roadmap.md)。
+
 一次发布、两个独立开关、一次 canary 重锁。本文档是实现与验收的唯一设计依据；
-判据预注册于本文档"验收判据"节，与 [18](18-maker-strategy-roadmap.md) 阶段 3
+判据预注册于本文档"验收判据"节，与 [18](18-maker-strategy-roadmap-full-2026-07.md) 阶段 3
 验收标准的差异（uptime 绝对门槛）由 release owner 2026-07-22 裁决。
 
 ## 动机与证据链
@@ -10,10 +15,10 @@
   降 40–62%、≥70% 仓时间清零）但双边 uptime 降 43–80pp。死因是结构性的：
   激活阈值落在仓位常住区（激活率 45–79%）+ 释放迟滞闩锁（candidate #3 钉
   +0.2 约 3h，uptime 18%）。见
-  [maker-stage3-ab-judgment-2026-07-22.md](evidence/maker-stage3-ab-judgment-2026-07-22.md)。
+  [maker-stage3-ab-judgment-2026-07-22.md](../../evidence/maker-stage3-ab-judgment-2026-07-22.md)。
 - lag 44.5h 长录 midPx 重切：HL midPx 领先 StandX mark，可测量跟随占 61%、
   条件 lag 中位 2.6s（p25 1.8s）、16–32bps 跳幅档 0 次 already-ahead。见
-  [lag-recorder-hype-result-2026-07-22.md](evidence/lag-recorder-hype-result-2026-07-22.md)。
+  [lag-recorder-hype-result-2026-07-22.md](../../evidence/lag-recorder-hype-result-2026-07-22.md)。
 - 组合理由：两机制治同一亏损链的不同环节（防御门治首刀、skew 治首刀后的
   逆势累积），canary 重锁按发布计费，合并省一轮 gate；独立开关保证组合被拒
   时拆单机制重跑是纯配置 A/B（按路线图规则不重锁）。

@@ -142,9 +142,9 @@ pub struct DesiredQuote {
 /// Stage 5-b separates the two normal exit policies so evidence never has to
 /// infer an exit's origin from context. Emergency risk exit is deliberately
 /// *not* a variant: no such policy exists (a stop-loss or account floor stops
-/// and hands the residual position off, it never trades), and inventing one
-/// without evidence is exactly what
-/// [docs/26](../../../docs/26-maker-stage5b-design.md) declines to do.
+/// and hands the residual position off, it never trades). The current safety
+/// policy deliberately rejects inventing such a path without evidence; see the
+/// [maker roadmap](../../../docs/18-maker-strategy-roadmap.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitKind {
     /// Threshold-driven inventory trim: normal operation, opt-in through

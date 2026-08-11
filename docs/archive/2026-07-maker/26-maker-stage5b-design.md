@@ -1,13 +1,18 @@
 # 阶段 5-b（安全轨二级）立项：分级退出政策的 typed 分离与残余仓位交接
 
+> **归档记录**：本轮四项主体已经实现，本文保留设计与复审过程。当前运行语义见
+> [../../13-maker.md](../../13-maker.md)，长期安全政策见
+> [../../18-maker-strategy-roadmap.md](../../18-maker-strategy-roadmap.md)；本文不能作为新的
+> live 授权。
+
 **状态：本轮四项范围已实现（2026-07-27，`implemented`），离线验证全绿；未合并、无 live
 动作。剩余 5-b 条目（Divergence B/C/D 等硬化项）见"不在本轮范围"。实现摘要见文末
 [实现记录](#实现记录2026-07-27)。**
 
 2026-07-27 立项（release owner 裁决：阶段 3 与阶段 3-guard 关闭后，主线推进 5-b）。
-上游：[18-maker-strategy-roadmap.md 阶段 5](18-maker-strategy-roadmap.md)、
+上游：[18-maker-strategy-roadmap.md 阶段 5](18-maker-strategy-roadmap-full-2026-07.md)、
 [25-maker-short-term-roadmap-2026-07-27.md](25-maker-short-term-roadmap-2026-07-27.md)、
-[adr/0001-maker-recovery-supervision.md](adr/0001-maker-recovery-supervision.md)。
+[adr/0001-maker-recovery-supervision.md](../../adr/0001-maker-recovery-supervision.md)。
 
 **定位**：5-b 是**扩大规模（加 size / max_position / 多 symbol）的代码级前置**，不是
 alpha 候选。它不改变任何默认 live 行为、不消耗 live 时间片、不追求 PnL 改善；产出是
@@ -27,7 +32,7 @@ alpha 候选。它不改变任何默认 live 行为、不消耗 live 时间片�
 
 前三项在 18 号验收标准里标注为"针对已落地行为、验收方式为复核"的条目
 （短暂背离宽限、超阈值冻结、cleanup 未确认不恢复）已由
-[ADR 0001](adr/0001-maker-recovery-supervision.md) 与 `market_data.rs` 状态机覆盖，
+[ADR 0001](../../adr/0001-maker-recovery-supervision.md) 与 `market_data.rs` 状态机覆盖，
 本轮只补引用不动代码。
 
 ## 政策定稿（本文的两个决策）
@@ -190,6 +195,6 @@ python3 -m py_compile scripts/openobserve_dashboard.py
   `account_floor_stop` 的单测覆盖，没有端到端断言订单写入量为 0 的集成测试——那需要一个
   带可注入余额的 live 会话夹具（`OrderCommandSender` 私有构造器的老问题）。
 - 18 号阶段 5 验收清单里的前三项（背离宽限、超阈值冻结、cleanup 未确认不恢复）仍以
-  [ADR 0001](adr/0001-maker-recovery-supervision.md) 与 `market_data.rs` 状态机的既有
+  [ADR 0001](../../adr/0001-maker-recovery-supervision.md) 与 `market_data.rs` 状态机的既有
   证据复核为准，本轮未新增代码。
 - Divergence B/C/D 与自动 flatten / 紧急退出：见"不在本轮范围"。

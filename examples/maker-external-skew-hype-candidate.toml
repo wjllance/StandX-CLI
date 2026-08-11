@@ -80,7 +80,7 @@ exit_bps = 5.0
 max_age_ms = 5000
 basis_half_life_secs = 300
 
-# Candidate arm (docs/28): continuous external-price center offset.
+# Candidate arm (docs/29): continuous external-price center offset.
 # Band red line: spread(8) + nonlinear.cap(12) + external.cap(8) = 28 <= band(30).
 [external_skew]
 enabled = true

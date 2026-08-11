@@ -1,8 +1,11 @@
 # Maker 短期迭代路线图（2026-07-20 快照）
 
+> **归档记录**：本文已失效并被当前状态页取代，不能作为当前实施顺序或 live 授权依据。
+> 当前结论见 [../../18-maker-strategy-roadmap.md](../../18-maker-strategy-roadmap.md)。
+
 > **已失效（2026-07-22）**：阶段 3 v0 A/B 判定完成（rejected，uptime 代价
 > 过大），触发文末失效条件第一条。判定报告见
-> [evidence/maker-stage3-ab-judgment-2026-07-22.md](evidence/maker-stage3-ab-judgment-2026-07-22.md)。
+> [evidence/maker-stage3-ab-judgment-2026-07-22.md](../../evidence/maker-stage3-ab-judgment-2026-07-22.md)。
 > 后续按 18 号文档重排；本快照保留为历史记录。
 >
 > **已被取代（2026-07-27）**：接任快照为
@@ -11,7 +14,7 @@
 > 更新：ADR 0001 已修订、`maker-recovery-dedup` 已确认落在 main 可封存。
 
 本文档是未来 2–4 周的执行层快照，回答"下一步做什么、按什么顺序、什么条件下改变计划"。
-长期阶段定义、验收口径和轨道原则见 [18-maker-strategy-roadmap.md](18-maker-strategy-roadmap.md)，
+长期阶段定义、验收口径和轨道原则见 [18-maker-strategy-roadmap.md](18-maker-strategy-roadmap-full-2026-07.md)，
 本文不重复也不修改它们；两者冲突时以 18 号文档为准。
 
 ## 现状盘点（2026-07-20）
@@ -32,9 +35,9 @@
 
 这是本期唯一以"晋级/否决"为产出的工作，其余全部为并行支线。步骤：
 
-1. **Gate 重验**：策略代码已合并，按 [14-maker-live-gate.md](14-maker-live-gate.md)
+1. **Gate 重验**：策略代码已合并，按 [14-maker-live-gate.md](../../14-maker-live-gate.md)
    完成一次受监督 canary 重验并留证。
-2. **授权**：按 [19-maker-stage2-live-ab-runbook.md](19-maker-stage2-live-ab-runbook.md)
+2. **授权**：按 [19-maker-stage2-live-ab-runbook.md](../../19-maker-stage2-live-ab-runbook.md)
    记录精确授权文本，风险预算沿用 canary 口径（单 symbol、一档、最小量）。
 3. **执行**：baseline（冻结静态配置）与 candidate（size skew 开启）交替 4h 臂，
    wind-down 换臂；比较窗口必须同时覆盖平静与趋势时段，趋势时段不足则延长采集而不是提前判定。

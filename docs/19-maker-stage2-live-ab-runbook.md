@@ -1,5 +1,10 @@
 # Maker Stage 2 v0 live canary and A/B runbook
 
+> **Current operational base, not a strategy verdict.** The repository still uses the
+> stage2-named orchestrator and deployment assets, so this runbook remains in the main docs.
+> Every live run must record a fresh authorization against its exact commit, binary/config
+> hashes, symbol, exposure and time window. Earlier authorization records do not carry forward.
+
 This runbook merges the renewed live gate with Stage 2 rollout. It does not
 record a pass by itself. The named online operator is **the release owner**. Live work
 must not begin until the release record contains this exact authorization:
@@ -8,7 +13,8 @@ must not begin until the release record contains this exact authorization:
 
 That text authorizes only XAG-USD, `size=0.01`, one level and
 `max_position=0.2`. It does not authorize another symbol, larger exposure,
-active inventory exit or automatic flatten.
+active inventory exit or automatic flatten. It must be recorded anew for each authorized run;
+its presence in this runbook is a scope template, not standing permission.
 
 ## Frozen artifacts and preflight
 

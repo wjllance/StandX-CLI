@@ -70,7 +70,7 @@ FLAT，本次 run 尾部全部结清。
 
 净 PnL 全程单调恶化（19h 时点 -1.11 → 35.9h -1.86），capture 稳定为正、
 markout 稳定为负，未见 regime 性翻转。亏因分解与机制分析见
-[28 号设计文档立项依据](../28-maker-external-skew-design.md)（19h 时点：
+[29 号设计文档立项依据](../29-maker-external-skew-design.md)（19h 时点：
 capture +5.0bps vs markout@30s -5.8bps，逆向选择系统性存在）。
 
 ## 观察（非结论）
@@ -80,7 +80,7 @@ capture +5.0bps vs markout@30s -5.8bps，逆向选择系统性存在）。
 - 截断事故本身暴露的运维缺口（与策略读数无关，另行列账）：
   - ~~freeze cleanup 撤单连续失败 6 次的原因待查~~ **已查明**：撤单第一时间成功，
     是验证路径的读-写滞后误报（见上节）；改进已单独立项：
-    [29-maker-cleanup-residual-verification.md](../29-maker-cleanup-residual-verification.md)
+    [29-maker-cleanup-residual-verification.md](../archive/2026-07-maker/29-maker-cleanup-residual-verification.md)
     （WS success 主判据 + 按单查询兜底 + 列表宽限，fail-closed 语义不变）；
   - ~~无人值守告警链路有效性未证实~~ **已证实有效**：deadman/critical 两条
     OpenObserve push 告警于停机后送达飞书（owner 2026-07-30 确认收到）；
@@ -91,5 +91,5 @@ capture +5.0bps vs markout@30s -5.8bps，逆向选择系统性存在）。
 
 读数为负且非噪声边缘（35.9h、527 笔、方向单调）：按 27 号手册"读数明确为负 →
 扩规模会按比例放大损耗；先回 18 号文档找下一个 alpha 候选，不扩"。
-候选队列现状：external_skew（[28 号设计](../28-maker-external-skew-design.md)，
+候选队列现状：external_skew（[29 号设计](../29-maker-external-skew-design.md)，
 草案待裁决，离线证据已附）→ microprice（阻塞在 depth 观测字段）。

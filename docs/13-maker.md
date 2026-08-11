@@ -221,7 +221,7 @@ center = mark × (1 − skew_bps × clamp(position / max_position, ±1) / 1e4)
 退出"与"旧 run 缺字段"可以区分：`exit_kind` 是 `inventory_trim`（阈值 trim）或
 `wind_down`（监督者收尾），`exit_suppressed` 是 `volatility_halt` 或
 `market_data_inactive`——波动熔断期间两种退出都被抑制（不存在"熔断期紧急退出"策略，
-见 [docs/26](26-maker-stage5b-design.md) D1），抑制不再是静默的。
+见 [18 号当前安全政策](18-maker-strategy-roadmap.md)），抑制不再是静默的。
 `inventory_exit_submitted` 事件行也带上了 `exit_kind`。
 
 行情降级进入 standby 时，除了每 60 秒一条 `risk_notification(kind=market_data,

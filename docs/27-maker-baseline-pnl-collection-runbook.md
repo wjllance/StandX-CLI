@@ -1,15 +1,19 @@
 # 冻结基线 PnL 绝对读数采集手册（单臂长跑，2–3 天）
 
-立项：[25-maker-short-term-roadmap-2026-07-27.md](25-maker-short-term-roadmap-2026-07-27.md)
-候选 2。上游口径见 [18-maker-strategy-roadmap.md](18-maker-strategy-roadmap.md)，
+> **当前操作规则，不是持续授权。** 下文已填写的历史授权和运行记录只证明对应时间窗获准，
+> 不能复用于新 run。每次新采集都必须重新填写 commit、配置哈希、风险边界、窗口、操作人和
+> 授权时间。当前两轮约 36 小时 HYPE 读数均为负，因此本手册目前只允许继续补证，不能据此
+> 扩大规模。
+
+当前立项与优先级见 [18-maker-strategy-roadmap.md](18-maker-strategy-roadmap.md)，
 应急处置沿用 [19-maker-stage2-live-ab-runbook.md](19-maker-stage2-live-ab-runbook.md)。
 
 ## 这不是什么
 
 **这不是 A/B，不是晋级实验，没有预注册判据，没有 accepted/rejected 分支。**
 
-阶段 3（skew）与阶段 3-guard 都是在"PnL 不作晋级条件"的前提下 accepted 的，所以到今天
-为止**没有任何证据说明当前冻结基线在自身规模上是否赚钱**。本次采集只回答一个问题：
+阶段 3（skew）与阶段 3-guard 都是在"PnL 不作晋级条件"的前提下 accepted 的。后续两轮
+约 36 小时读数均为负，已证明对应窗口并不赚钱；新的采集仍只回答一个问题：
 
 > 冻结基线连续跑 2–3 天，净 PnL / markout / uptime 的**绝对读数**是多少？
 
@@ -27,7 +31,7 @@
   `external_guard(enter=10, exit=5, max_age_ms=5000, basis_half_life_secs=300)`。
 - **阶段 5-b 的账户硬熔断本轮保持关闭**（`stop_equity_below` / `stop_margin_below`
   不设置 = 0）。理由：本轮不扩规模，风险预算沿用 canary 口径，`stop_loss=5.0` 已是会话级
-  刹车；硬熔断的取值指引见 [23 号手册的硬熔断小节](23-maker-stage3v1-live-ab-runbook.md)，
+  刹车；硬熔断的当前语义见 [13-maker.md](13-maker.md) 的“账户硬熔断”与“残余仓位交接”，
   扩规模授权时才开。
 - 代码：合并 5-b 后的 main（`469550a` 或更新），`cargo build --release`。5-b 是纯类型/
   输出变更 + 默认关能力，不改变报价与退出语义，因此**不需要重新 canary**（编排器白名单
@@ -135,7 +139,8 @@ emergency cancel 操作人：release owner（BossX）
 两次 fail-closed 均为误报，停机时 FLAT 且挂单簿已清。根因与修复见
 [maker-baseline-pnl-2026-07-30-run2-truncated.md](evidence/maker-baseline-pnl-2026-07-30-run2-truncated.md)。
 
-风险预算沿用 canary 口径（[18 号"风险预算"](18-maker-strategy-roadmap.md)）：已知最坏
+风险预算沿用当前 [live gate](14-maker-live-gate.md) 和
+[19 号 runbook](19-maker-stage2-live-ab-runbook.md) 的最小敞口、精确授权口径：已知最坏
 路径是趋势市库存满仓后 stop-loss 停机持仓，损失上界约
 `max_position × 不利变动幅度 + 退出成本`。本轮不扩规模，因此不触发安全轨二级的额外前置。
 

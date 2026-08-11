@@ -968,7 +968,7 @@ add_side_factor = 0.5
             "/../../examples/maker-external-skew-hype-candidate.toml"
         ));
         let suffix = concat!(
-            "\n# Candidate arm (docs/28): continuous external-price center offset.\n",
+            "\n# Candidate arm (docs/29): continuous external-price center offset.\n",
             "# Band red line: spread(8) + nonlinear.cap(12) + external.cap(8) = 28 <= band(30).\n",
             "[external_skew]\n",
             "enabled = true\n",

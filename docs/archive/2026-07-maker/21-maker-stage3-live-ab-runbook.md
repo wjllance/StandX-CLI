@@ -1,7 +1,12 @@
 # Maker Stage 3 v0 live canary and A/B runbook
 
+> **Archived runbook**: Stage 3 v0 was rejected and this authorization window is closed.
+> The quoted authorization below is historical evidence and must never be reused. Follow the
+> current [live gate](../../14-maker-live-gate.md) and record a new exact authorization for any
+> future live action.
+
 本手册把 renewed live gate 应用到阶段 3 v0（size skew，退化为加仓侧压制）。
-流程与 [19-maker-stage2-live-ab-runbook.md](19-maker-stage2-live-ab-runbook.md)
+流程与 [19-maker-stage2-live-ab-runbook.md](../../19-maker-stage2-live-ab-runbook.md)
 相同，本文只记录阶段 3 的差异与本次授权；未提及的章节（应急处置、webhook
 探针、bounded canary 判定顺序）以 19 号手册为准，symbol 一律替换为 HYPE-USD。
 
@@ -12,7 +17,7 @@ release record contains this exact authorization:
 
 该文本仅授权 HYPE-USD、`size=0.1`、一档、`max_position=1.0`。不授权其他
 symbol、更大敞口、主动库存退出或自动平仓。判定标准（预注册）见
-[18-maker-strategy-roadmap.md](18-maker-strategy-roadmap.md) 阶段 3 验收标准。
+[18-maker-strategy-roadmap.md](18-maker-strategy-roadmap-full-2026-07.md) 阶段 3 验收标准。
 
 ## Frozen artifacts and preflight
 

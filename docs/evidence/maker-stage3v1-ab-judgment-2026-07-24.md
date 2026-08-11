@@ -3,10 +3,10 @@
 判定对象：阶段 3 v1 组合候选——非线性 price skew（`[nonlinear_skew]`
 boost=3.0 cap=12.0）+ 外部价防御门（`[external_guard]` enter=6 exit=3
 max_age=5000ms basis_half_life=300s），一个 release、两个独立开关。
-判据预注册于 [22-maker-stage3v1-guard-design.md](../22-maker-stage3v1-guard-design.md)
+判据预注册于 [22-maker-stage3v1-guard-design.md](../archive/2026-07-maker/22-maker-stage3v1-guard-design.md)
 "验收判据"节（uptime ≥80% 绝对值系 release owner 2026-07-22 裁决修订）；
 执行手册与授权见
-[23-maker-stage3v1-live-ab-runbook.md](../23-maker-stage3v1-live-ab-runbook.md)；
+[23-maker-stage3v1-live-ab-runbook.md](../archive/2026-07-maker/23-maker-stage3v1-live-ab-runbook.md)；
 gate 与启动记录见
 [maker-stage3v1-canary-2026-07-22.md](maker-stage3v1-canary-2026-07-22.md)。
 
@@ -194,7 +194,7 @@ guard 状态机（模拟器先经实测校验：enter6/exit3 下模拟激活率�
   FLAT + orders=[]，live 健康。
 - **教训与流程修订**：① 启动 A/B 前置必须包含 token 剩余有效期检查
   （`standx auth status`，剩余 < 实验窗口长度时先重新登录）——已补入
-  [23-maker-stage3v1-live-ab-runbook.md](../23-maker-stage3v1-live-ab-runbook.md)；
+  [23-maker-stage3v1-live-ab-runbook.md](../archive/2026-07-maker/23-maker-stage3v1-live-ab-runbook.md)；
   ② token 预警提前量 ~15 分钟对无人值守窗口太短，7 天期 token 应在
   启动前主动刷新而非依赖预警；③ cleanup 依赖有效认证——auth 失效路径
   下 fail-closed 只能保证"不再开新仓"，残余单撤除依赖操作人，runbook

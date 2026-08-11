@@ -1,16 +1,20 @@
 # Guard 独立立项（阶段 3-guard）：enter=10/exit=5 防御门纯配置 A/B 设计与判据预注册
 
+> **归档记录**：本候选已 accepted，阶段已经关闭。本文保留预注册判据和当时的授权记录，
+> 不能授权新的 live 运行；当前机制状态见
+> [../../18-maker-strategy-roadmap.md](../../18-maker-strategy-roadmap.md)。
+
 **状态：accepted（2026-07-27，release owner 裁决）——guard 并入 HYPE
 生产基线（与 skew 共存），阶段 3-guard 关闭。判定报告见
-[maker-guard-spinoff-ab-judgment-2026-07-27.md](evidence/maker-guard-spinoff-ab-judgment-2026-07-27.md)。**
+[maker-guard-spinoff-ab-judgment-2026-07-27.md](../../evidence/maker-guard-spinoff-ab-judgment-2026-07-27.md)。**
 
 2026-07-25 立项（release owner 裁决链：v1 组合 rejected_split_branch →
 拆单 skew accepted → guard 以冻结参数独立立项重验）。
 上游文档：[22-maker-stage3v1-guard-design.md](22-maker-stage3v1-guard-design.md)
 （机制设计、红线、fail-open）、
-[maker-stage3v1-ab-judgment-2026-07-24.md](evidence/maker-stage3v1-ab-judgment-2026-07-24.md)
+[maker-stage3v1-ab-judgment-2026-07-24.md](../../evidence/maker-stage3v1-ab-judgment-2026-07-24.md)
 （组合判定与反事实回放数据）、
-[maker-stage3v1-skew-ab-judgment-2026-07-25.md](evidence/maker-stage3v1-skew-ab-judgment-2026-07-25.md)
+[maker-stage3v1-skew-ab-judgment-2026-07-25.md](../../evidence/maker-stage3v1-skew-ab-judgment-2026-07-25.md)
 （skew accepted，构成本轮基线）。
 
 ## 立项依据

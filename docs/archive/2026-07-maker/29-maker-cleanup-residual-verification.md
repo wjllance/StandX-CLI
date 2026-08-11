@@ -1,10 +1,14 @@
 # Cleanup 残余判定硬化立项：WS order-response 主判据 + 按单查询兜底（2026-07-30 草案）
 
+> **归档记录**：Phase 1 与 Phase 2 已完成。本文保留事故、设计和验收证据，不能作为
+> 当前实现或 live 授权依据；当前 cleanup 门槛见
+> [../../14-maker-live-gate.md](../../14-maker-live-gate.md)。
+
 状态：**Phase 1 + Phase 2 已完成**（Phase 1 已合入 main `ccccdc7`；Phase 2 见下）。
 安全轨硬化项（5-b 后续），非 alpha 候选，不占用 live 时间片
 （纯代码 + 离线验证 + 受监督 canary），可与任何采集/实验并行。
 
-触发事故：[基线 PnL 采集截断报告](evidence/maker-baseline-pnl-2026-07-30.md)
+触发事故：[基线 PnL 采集截断报告](../../evidence/maker-baseline-pnl-2026-07-30.md)
 （run `baseline-pnl-20260728T081712Z`，2026-07-29T19:09:57Z fail-safe，exit 75）。
 
 ## 事故定性与损失
@@ -136,7 +140,7 @@ order-response 并无异常记录），撤单的场馆权威确认本就可用�
 
 - `cargo test --workspace --offline` 全绿 + 上述新增用例；
 - clippy / fmt 按 AGENTS.md 门禁；
-- **受监督 canary 一次**（[14 号文档](14-maker-live-gate.md)）：cleanup 位于
+- **受监督 canary 一次**（[14 号文档](../../14-maker-live-gate.md)）：cleanup 位于
   停机路径，offline 测不到场馆滞后，需在 canary 的完整 start→stop→cleanup
   循环里观察一次真实残余判定（重点：停机时 cleanup 日志出现"单查确认
   canceled"路径而非裸列表判定）。
