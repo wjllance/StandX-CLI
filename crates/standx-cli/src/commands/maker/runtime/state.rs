@@ -173,6 +173,7 @@ impl MakerRuntime {
         let nonlinear_skew = args.nonlinear_skew;
         nonlinear_skew.validate(&cfg)?;
         let external_skew = args.external_skew;
+        let microprice = args.microprice;
         super::super::config::validate_external_skew(
             external_skew,
             &cfg,
@@ -180,7 +181,13 @@ impl MakerRuntime {
             nonlinear_skew,
             args.external_guard,
         )?;
-        let microprice = args.microprice;
+        super::super::config::validate_microprice(
+            microprice,
+            external_skew,
+            &cfg,
+            &args.adaptive_spread,
+            nonlinear_skew,
+        )?;
         let guard_basis_half_life_secs = args.external_guard_basis_half_life_secs;
         let guard_controller = maker::GuardController::new(args.external_guard)?;
         let (external_feed, external_updates, external_feed_handle) = if args.external_guard.enabled

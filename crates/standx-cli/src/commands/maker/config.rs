@@ -501,6 +501,72 @@ pub(super) fn validate_external_skew(
         ));
     }
 
+    let budget_bps =
+        center_shift_band_budget_bps(base, adaptive_spread, nonlinear, external.cap_bps);
+    if budget_bps > base.band_bps {
+        return Err(anyhow::anyhow!(
+            "external skew violates band red line: spread_bps + ladder + inventory cap + cap_bps = {budget_bps} must be <= band_bps {}",
+            base.band_bps
+        ));
+    }
+    Ok(())
+}
+
+/// Validate the CLI-owned scalar and composition constraints for
+/// `[microprice]`. Invalid scalars are rejected even while disabled; an enabled
+/// shift must share the ladder band budget with any enabled external shift.
+pub(super) fn validate_microprice(
+    microprice: standx_maker::MicroPriceConfig,
+    external: standx_maker::ExternalSkewConfig,
+    base: &standx_maker::MakerConfig,
+    adaptive_spread: &standx_maker::AdaptiveSpreadConfig,
+    nonlinear: standx_maker::NonlinearSkewConfig,
+) -> Result<()> {
+    if !microprice.lambda.is_finite()
+        || !microprice.cap_bps.is_finite()
+        || !microprice.dead_zone_bps.is_finite()
+    {
+        return Err(anyhow::anyhow!("microprice values must be finite"));
+    }
+    if microprice.lambda < 0.0 {
+        return Err(anyhow::anyhow!("microprice lambda must be >= 0"));
+    }
+    if microprice.cap_bps <= 0.0 {
+        return Err(anyhow::anyhow!("microprice cap_bps must be > 0"));
+    }
+    if microprice.dead_zone_bps < 0.0 {
+        return Err(anyhow::anyhow!("microprice dead_zone_bps must be >= 0"));
+    }
+    if !microprice.enabled {
+        return Ok(());
+    }
+
+    let external_cap_bps = if external.enabled {
+        external.cap_bps
+    } else {
+        0.0
+    };
+    let budget_bps = center_shift_band_budget_bps(
+        base,
+        adaptive_spread,
+        nonlinear,
+        external_cap_bps + microprice.cap_bps,
+    );
+    if budget_bps > base.band_bps {
+        return Err(anyhow::anyhow!(
+            "microprice violates band red line: spread_bps + ladder + inventory cap + external cap_bps + cap_bps = {budget_bps} must be <= band_bps {}",
+            base.band_bps
+        ));
+    }
+    Ok(())
+}
+
+fn center_shift_band_budget_bps(
+    base: &standx_maker::MakerConfig,
+    adaptive_spread: &standx_maker::AdaptiveSpreadConfig,
+    nonlinear: standx_maker::NonlinearSkewConfig,
+    center_shift_cap_bps: f64,
+) -> f64 {
     let ladder_bps = f64::from(base.levels.saturating_sub(1)) * base.level_step_bps;
     // `skew_center_with` falls back to the legacy linear curve when nonlinear
     // skew is off, and that curve saturates at `base.skew_bps`.
@@ -518,14 +584,7 @@ pub(super) fn validate_external_skew(
     } else {
         base.spread_bps
     };
-    let budget_bps = spread_cap_bps + ladder_bps + inventory_cap_bps + external.cap_bps;
-    if budget_bps > base.band_bps {
-        return Err(anyhow::anyhow!(
-            "external skew violates band red line: spread_bps + ladder + inventory cap + cap_bps = {budget_bps} must be <= band_bps {}",
-            base.band_bps
-        ));
-    }
-    Ok(())
+    spread_cap_bps + ladder_bps + inventory_cap_bps + center_shift_cap_bps
 }
 
 #[cfg(test)]
@@ -964,6 +1023,112 @@ add_side_factor = 0.5
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn microprice_validation_rejects_invalid_scalars_even_when_disabled() {
+        let base = external_skew_validation_base();
+        for microprice in [
+            standx_maker::MicroPriceConfig {
+                lambda: f64::NAN,
+                ..Default::default()
+            },
+            standx_maker::MicroPriceConfig {
+                lambda: f64::INFINITY,
+                ..Default::default()
+            },
+            standx_maker::MicroPriceConfig {
+                lambda: -0.5,
+                ..Default::default()
+            },
+            standx_maker::MicroPriceConfig {
+                cap_bps: f64::NAN,
+                ..Default::default()
+            },
+            standx_maker::MicroPriceConfig {
+                cap_bps: f64::INFINITY,
+                ..Default::default()
+            },
+            standx_maker::MicroPriceConfig {
+                cap_bps: 0.0,
+                ..Default::default()
+            },
+            standx_maker::MicroPriceConfig {
+                dead_zone_bps: f64::NAN,
+                ..Default::default()
+            },
+            standx_maker::MicroPriceConfig {
+                dead_zone_bps: f64::INFINITY,
+                ..Default::default()
+            },
+            standx_maker::MicroPriceConfig {
+                dead_zone_bps: -1.0,
+                ..Default::default()
+            },
+        ] {
+            assert!(validate_microprice(
+                microprice,
+                Default::default(),
+                &base,
+                &Default::default(),
+                Default::default(),
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn microprice_validation_enforces_combined_external_and_micro_band_red_line() {
+        let external = standx_maker::ExternalSkewConfig {
+            enabled: true,
+            cap_bps: 8.0,
+            ..Default::default()
+        };
+        let nonlinear = standx_maker::NonlinearSkewConfig {
+            enabled: true,
+            boost: 3.0,
+            cap_bps: 12.0,
+        };
+        let exact_edge = standx_maker::MicroPriceConfig {
+            enabled: true,
+            cap_bps: 2.0,
+            ..Default::default()
+        };
+        assert!(validate_microprice(
+            exact_edge,
+            external,
+            &external_skew_validation_base(),
+            &Default::default(),
+            nonlinear,
+        )
+        .is_ok());
+
+        let over_edge = standx_maker::MicroPriceConfig {
+            cap_bps: 2.5,
+            ..exact_edge
+        };
+        let error = validate_microprice(
+            over_edge,
+            external,
+            &external_skew_validation_base(),
+            &Default::default(),
+            nonlinear,
+        )
+        .expect_err("combined external and micro caps must consume band budget");
+        assert!(error.to_string().contains("band red line"), "{error}");
+
+        let disabled_external = standx_maker::ExternalSkewConfig {
+            enabled: false,
+            ..external
+        };
+        assert!(validate_microprice(
+            over_edge,
+            disabled_external,
+            &external_skew_validation_base(),
+            &Default::default(),
+            nonlinear,
+        )
+        .is_ok());
     }
 
     #[test]
