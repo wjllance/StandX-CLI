@@ -40,14 +40,23 @@ impl Default for MicroPriceConfig {
 
 /// Return the signed quote-center offset for this cycle, in basis points.
 ///
-/// Failure is open: disabled configuration and missing/non-finite inputs all
-/// return zero, so this signal can never become a stop-quoting source.
+/// Failure is open: disabled or invalid configuration and missing/non-finite
+/// inputs all return zero, so this signal can never become a stop-quoting source.
 /// `mid_bias_bps` is the signed in-venue touch-mid minus the mark anchor, in
 /// bps of mark. A negative bias (book sitting below our anchor) yields a
 /// negative shift; positive bias a positive shift, so the ladder follows the
 /// venue's own screen rather than a possibly stale StandX mark.
 pub fn micro_price_shift_bps(cfg: MicroPriceConfig, mid_bias_bps: Option<f64>) -> f64 {
     if !cfg.enabled {
+        return 0.0;
+    }
+    if !cfg.lambda.is_finite()
+        || cfg.lambda < 0.0
+        || !cfg.cap_bps.is_finite()
+        || cfg.cap_bps <= 0.0
+        || !cfg.dead_zone_bps.is_finite()
+        || cfg.dead_zone_bps < 0.0
+    {
         return 0.0;
     }
     let Some(mid_bias_bps) = mid_bias_bps.filter(|value| value.is_finite()) else {
@@ -87,6 +96,50 @@ mod tests {
         assert_eq!(micro_price_shift_bps(cfg, Some(f64::NAN)), 0.0);
         assert_eq!(micro_price_shift_bps(cfg, Some(f64::INFINITY)), 0.0);
         assert_eq!(micro_price_shift_bps(cfg, Some(f64::NEG_INFINITY)), 0.0);
+    }
+
+    #[test]
+    fn invalid_config_fails_open_without_panicking() {
+        for cfg in [
+            MicroPriceConfig {
+                lambda: f64::NAN,
+                ..enabled_cfg()
+            },
+            MicroPriceConfig {
+                lambda: f64::INFINITY,
+                ..enabled_cfg()
+            },
+            MicroPriceConfig {
+                lambda: -0.5,
+                ..enabled_cfg()
+            },
+            MicroPriceConfig {
+                cap_bps: f64::NAN,
+                ..enabled_cfg()
+            },
+            MicroPriceConfig {
+                cap_bps: f64::INFINITY,
+                ..enabled_cfg()
+            },
+            MicroPriceConfig {
+                cap_bps: -1.0,
+                ..enabled_cfg()
+            },
+            MicroPriceConfig {
+                dead_zone_bps: f64::NAN,
+                ..enabled_cfg()
+            },
+            MicroPriceConfig {
+                dead_zone_bps: f64::INFINITY,
+                ..enabled_cfg()
+            },
+            MicroPriceConfig {
+                dead_zone_bps: -1.0,
+                ..enabled_cfg()
+            },
+        ] {
+            assert_eq!(micro_price_shift_bps(cfg, Some(4.0)), 0.0);
+        }
     }
 
     #[test]
