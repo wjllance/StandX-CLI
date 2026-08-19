@@ -114,9 +114,15 @@ fi
 #       pair), with nonlinear_skew equal in both arms (it may be enabled in
 #       both as the inherited stage-3 baseline) and guard params identical; or
 #   (g) the candidate adding exactly the pre-registered [external_skew] block
-#       (docs/29: enabled, lambda=0.5, cap_bps=8.0, dead_zone_bps=1.0) with
+#       (docs/28: enabled, lambda=0.5, cap_bps=8.0, dead_zone_bps=1.0) with
 #       every other line byte-identical and the baseline carrying no
-#       [external_skew] section at all.
+#       [external_skew] section at all; or
+#   (h) the [microprice] pair (docs/31): after promote-to-baseline, BOTH arms
+#       carry the pre-registered [microprice] block (enabled, lambda=0.5,
+#       cap_bps=6.0, dead_zone_bps=0.5) on top of the pre-registered
+#       [external_skew] block, and every other line byte-identical. (Also
+#       accepts the pre-promote layout: baseline carrying only [external_skew]
+#       and candidate adding [microprice] on top.)
 python3 - "$baseline_config" "$candidate_config" <<'PY' || exit 64
 from pathlib import Path
 import re
@@ -209,7 +215,7 @@ def size_skew_sections(text):
     return "".join(lines), enabled
 
 
-# (g) external_skew pair (docs/29): the candidate carries exactly the
+# (g) external_skew pair (docs/28): the candidate carries exactly the
 # pre-registered [external_skew] block and nothing else differs.
 PREREG_EXTERNAL_SKEW = {
     "enabled": "true",
@@ -246,8 +252,6 @@ def external_skew_sections(text):
                 while out and (not out[-1].strip()
                                or out[-1].lstrip().startswith("#")):
                     out.pop()
-            else:
-                out.append(line)
             continue
         if section == "external_skew":
             match = re.fullmatch(r"([a-z_]+)\s*=\s*(\S+)(?:\s+#.*)?", body)
@@ -264,6 +268,19 @@ def external_skew_sections(text):
     return "".join(out), (fields if seen else None)
 
 
+# (h) microprice pair (docs/31): baseline AND candidate both carry the
+#     pre-registered [external_skew] block and the pre-registered
+#     [microprice] block (promote-to-baseline layout), and everything else
+#     is byte-identical. This is the "both-arms-additive" pattern after
+#     candidate was promoted to the new default baseline.
+PREREG_MICROPRICE = {
+    "enabled": "true",
+    "lambda": "0.5",
+    "cap_bps": "6.0",
+    "dead_zone_bps": "0.5",
+}
+
+
 baseline_stripped, baseline_es = external_skew_sections(baseline)
 candidate_stripped, candidate_es = external_skew_sections(candidate)
 external_skew_pair = (
@@ -272,8 +289,87 @@ external_skew_pair = (
     and candidate_stripped == baseline_stripped
 )
 
+# (h) microprice pair: both arms have the pre-registered [external_skew],
+#     and the candidate additionally has the pre-registered [microprice].
+#     We strip BOTH sections in a single pass and compare the remainders.
+#     Must be single-pass because each stripper drops ALL section headers
+#     (see external_skew_sections contract), so chaining them would drop
+#     the [external_skew] header before the second pass could find it.
+def strip_es_and_mp(text):
+    """Strip [external_skew] and [microprice] from text in one pass.
+    Returns (stripped_text, es_fields, mp_fields).
+    es_fields / mp_fields is None when that section is not present."""
+    lines = text.splitlines(keepends=True)
+    out = []
+    es_fields = {}
+    mp_fields = {}
+    es_seen = False
+    mp_seen = False
+    section = None
+    for line in lines:
+        body = line.strip()
+        header = re.fullmatch(r"\[([^][]+)]", body)
+        if header:
+            section = header.group(1).strip()
+            if section == "external_skew":
+                if es_seen:
+                    raise SystemExit("stage2 config repeats [external_skew]")
+                es_seen = True
+                while out and (not out[-1].strip()
+                               or out[-1].lstrip().startswith("#")):
+                    out.pop()
+                continue
+            if section == "microprice":
+                if mp_seen:
+                    raise SystemExit("stage2 config repeats [microprice]")
+                mp_seen = True
+                while out and (not out[-1].strip()
+                               or out[-1].lstrip().startswith("#")):
+                    out.pop()
+                continue
+            # Non-target section header: keep it in output.
+            out.append(line)
+            continue
+        if section == "external_skew":
+            match = re.fullmatch(r"([a-z_]+)\s*=\s*(\S+)(?:\s+#.*)?", body)
+            if match:
+                if match.group(1) in es_fields:
+                    raise SystemExit(
+                        f"stage2 [external_skew] repeats {match.group(1)}")
+                es_fields[match.group(1)] = match.group(2)
+            elif body and not body.startswith("#"):
+                raise SystemExit(
+                    f"stage2 [external_skew] unparsable line: {body!r}")
+            continue
+        if section == "microprice":
+            match = re.fullmatch(r"([a-z_]+)\s*=\s*(\S+)(?:\s+#.*)?", body)
+            if match:
+                if match.group(1) in mp_fields:
+                    raise SystemExit(
+                        f"stage2 [microprice] repeats {match.group(1)}")
+                mp_fields[match.group(1)] = match.group(2)
+            elif body and not body.startswith("#"):
+                raise SystemExit(
+                    f"stage2 [microprice] unparsable line: {body!r}")
+            continue
+        out.append(line)
+    return (
+        "".join(out),
+        es_fields if es_seen else None,
+        mp_fields if mp_seen else None,
+    )
+
+baseline_both, baseline_both_es, baseline_both_mp = strip_es_and_mp(baseline)
+candidate_both, candidate_both_es, candidate_both_mp = strip_es_and_mp(candidate)
+microprice_pair = (
+    candidate_both_mp == PREREG_MICROPRICE
+    and baseline_both_es == PREREG_EXTERNAL_SKEW
+    and candidate_both_es == PREREG_EXTERNAL_SKEW
+    and candidate_both == baseline_both
+)
+
 adaptive_toggle_only = baseline.replace("enabled = false", "enabled = true") == candidate
-if external_skew_pair:
+if external_skew_pair or microprice_pair:
     pass
 elif adaptive_toggle_only:
     pass
@@ -349,13 +445,15 @@ elif "enabled = false" in baseline and "enabled = false" in candidate:
                 "stage2 arm configs differ outside adaptive_spread.enabled / "
                 "spread_bps / size_skew.enabled / "
                 "nonlinear_skew.enabled(+external_guard.enabled) / "
-                "the pre-registered [external_skew] block"
+                "the pre-registered [external_skew] block / "
+                "the pre-registered [microprice] block (on top of [external_skew])"
             )
 else:
     raise SystemExit(
         "stage2 arm configs differ outside adaptive_spread.enabled / "
         "spread_bps / size_skew.enabled / "
-        "the pre-registered [external_skew] block"
+        "the pre-registered [external_skew] block / "
+        "the pre-registered [microprice] block (on top of [external_skew])"
     )
 PY
 
