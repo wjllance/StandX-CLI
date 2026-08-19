@@ -326,5 +326,14 @@ microprice 不在白名单里，直接跑会被拦（exit 64）。
 - 新 baseline 定为 candidate 内容（含 `[microprice]`），哈希 `933a05012c9d`。
 - 旧 baseline（无 microprice，`ed8f270451ee`）存档：`examples/maker-microprice-hype-baseline.arch-20260819.toml`。
 - 镜像/编排器 env 未动，等下一轮实验时随新 candidate 一起重建。
+- `examples/maker-microprice-hype-candidate.toml` 已删除：promote 之后它与新
+  baseline 逐字节相同，留着只会让人误起一个两臂一样的 A/B（编排器现在也会直接
+  拒绝逐字节相同的两臂）。下一轮定下新方向时再建。
+
+> **本文档 1/3/4 节里的路径是开跑当时的。** promote 之后，那一轮实际跑的两臂
+> 对应到现在的文件是：
+> baseline = `examples/maker-microprice-hype-baseline.arch-20260819.toml`（`ed8f270451ee`），
+> candidate = `examples/maker-microprice-hype-baseline.toml`（`933a05012c9d`）。
+> 这一对仍然能通过编排器的 (h) 门禁，实验可复现。
 
 **下一轮候选方向**（见第8节，Lance 有下一步想法待验证，具体新 candidate 待定）：depth-microprice / 主动快撤 / spread 不对称；band 收窄测窄带是否仍改善。

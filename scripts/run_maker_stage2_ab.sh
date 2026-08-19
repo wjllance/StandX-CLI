@@ -114,15 +114,19 @@ fi
 #       pair), with nonlinear_skew equal in both arms (it may be enabled in
 #       both as the inherited stage-3 baseline) and guard params identical; or
 #   (g) the candidate adding exactly the pre-registered [external_skew] block
-#       (docs/28: enabled, lambda=0.5, cap_bps=8.0, dead_zone_bps=1.0) with
+#       (docs/29: enabled, lambda=0.5, cap_bps=8.0, dead_zone_bps=1.0) with
 #       every other line byte-identical and the baseline carrying no
 #       [external_skew] section at all; or
-#   (h) the [microprice] pair (docs/31): after promote-to-baseline, BOTH arms
-#       carry the pre-registered [microprice] block (enabled, lambda=0.5,
-#       cap_bps=6.0, dead_zone_bps=0.5) on top of the pre-registered
-#       [external_skew] block, and every other line byte-identical. (Also
-#       accepts the pre-promote layout: baseline carrying only [external_skew]
-#       and candidate adding [microprice] on top.)
+#   (h) the [microprice] pair (docs/31): the baseline carries the
+#       pre-registered [external_skew] block, the candidate carries that same
+#       block PLUS the pre-registered [microprice] block (enabled,
+#       lambda=0.5, cap_bps=6.0, dead_zone_bps=0.5), and every other line is
+#       byte-identical. Note there is deliberately no "both arms carry
+#       [microprice]" variant: once the baseline's own [microprice] is held
+#       to the pre-registered values too, that layout can only ever match
+#       byte-identical arms, which the degenerate-pair check below rejects.
+#       A promoted baseline therefore needs a new pre-registered case for
+#       whatever the next candidate adds on top of it.
 python3 - "$baseline_config" "$candidate_config" <<'PY' || exit 64
 from pathlib import Path
 import re
@@ -132,6 +136,15 @@ import sys
 # variant pass as "identical" while being invalid TOML downstream.
 baseline = Path(sys.argv[1]).read_bytes().decode("utf-8")
 candidate = Path(sys.argv[2]).read_bytes().decode("utf-8")
+
+# Degenerate pair: identical arms carry no independent variable, so the run
+# can only ever measure zero. Fail before any whitelist case can wave it
+# through (the adaptive-toggle case would, for a config with no
+# "enabled = false" line at all).
+if baseline == candidate:
+    raise SystemExit(
+        "stage2 arm configs are byte-identical: an A/B needs two arms that "
+        "differ by exactly one pre-registered change")
 
 TOP = "top"
 TIER0 = "tier0"
@@ -215,7 +228,7 @@ def size_skew_sections(text):
     return "".join(lines), enabled
 
 
-# (g) external_skew pair (docs/28): the candidate carries exactly the
+# (g) external_skew pair (docs/29): the candidate carries exactly the
 # pre-registered [external_skew] block and nothing else differs.
 PREREG_EXTERNAL_SKEW = {
     "enabled": "true",
@@ -252,6 +265,8 @@ def external_skew_sections(text):
                 while out and (not out[-1].strip()
                                or out[-1].lstrip().startswith("#")):
                     out.pop()
+            else:
+                out.append(line)
             continue
         if section == "external_skew":
             match = re.fullmatch(r"([a-z_]+)\s*=\s*(\S+)(?:\s+#.*)?", body)
@@ -268,11 +283,9 @@ def external_skew_sections(text):
     return "".join(out), (fields if seen else None)
 
 
-# (h) microprice pair (docs/31): baseline AND candidate both carry the
-#     pre-registered [external_skew] block and the pre-registered
-#     [microprice] block (promote-to-baseline layout), and everything else
-#     is byte-identical. This is the "both-arms-additive" pattern after
-#     candidate was promoted to the new default baseline.
+# (h) microprice pair (docs/31): both arms carry the pre-registered
+#     [external_skew] block and only the candidate adds the pre-registered
+#     [microprice] block.
 PREREG_MICROPRICE = {
     "enabled": "true",
     "lambda": "0.5",
@@ -291,10 +304,8 @@ external_skew_pair = (
 
 # (h) microprice pair: both arms have the pre-registered [external_skew],
 #     and the candidate additionally has the pre-registered [microprice].
-#     We strip BOTH sections in a single pass and compare the remainders.
-#     Must be single-pass because each stripper drops ALL section headers
-#     (see external_skew_sections contract), so chaining them would drop
-#     the [external_skew] header before the second pass could find it.
+#     Stripped in a single pass so the remainder keeps every non-target
+#     section header, exactly as external_skew_sections leaves it.
 def strip_es_and_mp(text):
     """Strip [external_skew] and [microprice] from text in one pass.
     Returns (stripped_text, es_fields, mp_fields).
@@ -362,7 +373,8 @@ def strip_es_and_mp(text):
 baseline_both, baseline_both_es, baseline_both_mp = strip_es_and_mp(baseline)
 candidate_both, candidate_both_es, candidate_both_mp = strip_es_and_mp(candidate)
 microprice_pair = (
-    candidate_both_mp == PREREG_MICROPRICE
+    baseline_both_mp is None
+    and candidate_both_mp == PREREG_MICROPRICE
     and baseline_both_es == PREREG_EXTERNAL_SKEW
     and candidate_both_es == PREREG_EXTERNAL_SKEW
     and candidate_both == baseline_both
