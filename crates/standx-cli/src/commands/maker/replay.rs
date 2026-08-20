@@ -3,6 +3,8 @@
 use crate::cli::OutputFormat;
 use anyhow::{Context, Result};
 use serde::Deserialize;
+#[cfg(test)]
+use standx_maker::DesiredQuote;
 use standx_maker::{
     run_replay, Action, AdaptiveSpreadConfig, ExecutionCosts, FillRole, MakerConfig,
     MarketSnapshot, PerformanceFill, ReplayCycle, ReplayEvent, ReplayResult, ReplaySettings,
@@ -601,6 +603,65 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first.cycles.len(), 2);
         assert_eq!(first.performance.passive_fills, 1);
+        assert_eq!(
+            first.cycles[0].plan.as_ref().unwrap().actions,
+            vec![
+                Action::Place(DesiredQuote {
+                    side: OrderSide::Buy,
+                    level: 0,
+                    price: 99.95,
+                    qty: 1.0,
+                }),
+                Action::Place(DesiredQuote {
+                    side: OrderSide::Sell,
+                    level: 0,
+                    price: 100.05,
+                    qty: 1.0,
+                }),
+            ]
+        );
+        assert_eq!(
+            first.cycles[1].plan.as_ref().unwrap().actions,
+            vec![
+                Action::Place(DesiredQuote {
+                    side: OrderSide::Buy,
+                    level: 0,
+                    price: 100.04,
+                    qty: 1.0,
+                }),
+                Action::Place(DesiredQuote {
+                    side: OrderSide::Sell,
+                    level: 0,
+                    price: 100.16,
+                    qty: 1.0,
+                }),
+            ]
+        );
+        assert!(first.cycles.iter().all(|cycle| {
+            cycle
+                .plan
+                .as_ref()
+                .is_some_and(|plan| plan.quote_geometry.len() == 2)
+        }));
+        // The expected bytes below are pinned literals that predate the
+        // observation-only `quote_geometry` field. Asserting against them is
+        // what proves geometry did not perturb the action sequence; comparing
+        // a geometry-cleared clone against itself would prove nothing.
+        let action_bytes: Vec<Vec<u8>> = first
+            .cycles
+            .iter()
+            .flat_map(|cycle| cycle.plan.as_ref().unwrap().actions.iter())
+            .map(|action| serde_json::to_vec(&action_json(action)).unwrap())
+            .collect();
+        assert_eq!(
+            action_bytes,
+            vec![
+                br#"{"kind":"place","level":0,"price":99.95,"qty":1.0,"side":"buy"}"#.to_vec(),
+                br#"{"kind":"place","level":0,"price":100.05,"qty":1.0,"side":"sell"}"#.to_vec(),
+                br#"{"kind":"place","level":0,"price":100.04,"qty":1.0,"side":"buy"}"#.to_vec(),
+                br#"{"kind":"place","level":0,"price":100.16,"qty":1.0,"side":"sell"}"#.to_vec(),
+            ]
+        );
     }
 
     #[test]

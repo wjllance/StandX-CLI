@@ -157,6 +157,83 @@ fn basic_two_sided() {
     assert_eq!(find(&quotes, OrderSide::Buy, 0).qty, 0.01);
 }
 
+#[test]
+fn cycle_plan_actions_are_identical_with_geometry_sidecar_present() {
+    let c = cfg();
+    let market = MarketSnapshot {
+        mark: 100.1,
+        best_bid: Some(100.0),
+        best_ask: Some(100.2),
+    };
+    let generated = compute_desired_quotes_with_geometry(
+        &c,
+        market.mark,
+        market.best_bid,
+        market.best_ask,
+        0.0,
+        SizeSkewDecision::INACTIVE,
+        NonlinearSkewConfig::default(),
+        0.0,
+        GuardDecision::INACTIVE,
+    );
+    let desired = cap_desired_exposure(&c, 0.0, &generated.quotes, &[]);
+    let actions_without_geometry = reconcile(
+        &c,
+        market.mark,
+        0.0,
+        market.best_bid,
+        market.best_ask,
+        &desired,
+        &[],
+        0,
+        NonlinearSkewConfig::default(),
+        0.0,
+    );
+    let plan = plan_cycle(
+        &c,
+        CycleInput {
+            cycle: 0,
+            market,
+            position: 0.0,
+            resting: &[],
+            pending_slots: &[],
+            market_data_mode: MarketDataMode::Active,
+            active_exit_enabled: false,
+            inventory_exit_pct: 0.0,
+            inventory_exit_qty: 0.0,
+            size_skew: SizeSkewDecision::INACTIVE,
+            nonlinear_skew: NonlinearSkewConfig::default(),
+            external_skew: Default::default(),
+            external_excess_bps: None,
+            micro_price: Default::default(),
+            guard: GuardDecision::INACTIVE,
+            wind_down: false,
+            qty_tolerance: 0.0005,
+        },
+        false,
+    );
+
+    assert!(!plan.quote_geometry.is_empty());
+    assert_eq!(plan.actions, actions_without_geometry);
+    assert_eq!(
+        plan.actions,
+        vec![
+            Action::Place(DesiredQuote {
+                side: OrderSide::Buy,
+                level: 0,
+                price: 99.99,
+                qty: 0.01,
+            }),
+            Action::Place(DesiredQuote {
+                side: OrderSide::Sell,
+                level: 0,
+                price: 100.21,
+                qty: 0.01,
+            }),
+        ]
+    );
+}
+
 // 2. Spread wider than band: clamp to band edges, not dropped.
 #[test]
 fn band_clamp() {
@@ -194,6 +271,24 @@ fn rounding_reenters_band() {
     let buy = find(&quotes, OrderSide::Buy, 0);
     assert!(buy.price >= 99.8, "price {} left the band", buy.price);
     assert_eq!(buy.price, 100.0);
+
+    let generated = compute_desired_quotes_with_geometry(
+        &c,
+        100.0,
+        None,
+        None,
+        0.0,
+        SizeSkewDecision::INACTIVE,
+        NonlinearSkewConfig::default(),
+        0.0,
+        GuardDecision::INACTIVE,
+    );
+    let buy = generated
+        .geometry
+        .iter()
+        .find(|quote| quote.side == OrderSide::Buy && quote.level == 0)
+        .unwrap();
+    assert_eq!(buy.outcome, QuoteGeometryOutcome::ClampedToBand);
 }
 
 // 5. No-cross clamp on both sides.
@@ -214,6 +309,72 @@ fn no_cross_clamp() {
     let quotes = desired(&cfg(), 100.0, Some(100.15), Some(100.20), 0.0);
     let sell = find(&quotes, OrderSide::Sell, 0);
     assert_eq!(sell.price, 100.16);
+}
+
+#[test]
+fn geometry_distinguishes_touch_clamp_and_infeasible_interval() {
+    let c = cfg();
+    let generated = compute_desired_quotes_with_geometry(
+        &c,
+        100.0,
+        Some(99.83),
+        Some(99.85),
+        0.0,
+        SizeSkewDecision::INACTIVE,
+        NonlinearSkewConfig::default(),
+        0.0,
+        GuardDecision::INACTIVE,
+    );
+    let buy = generated
+        .geometry
+        .iter()
+        .find(|quote| quote.side == OrderSide::Buy && quote.level == 0)
+        .unwrap();
+    assert_eq!(buy.outcome, QuoteGeometryOutcome::ClampedToTouch);
+    assert_eq!(buy.final_price, Some(99.84));
+    assert!((buy.distance_to_touch_bps.unwrap() - 1.0).abs() < 1e-9);
+
+    // When the no-cross ceiling exactly coincides with the band ceiling, the
+    // touch is still a binding bound and must win the diagnostic label.
+    let coincident = compute_desired_quotes_with_geometry(
+        &c,
+        100.0,
+        Some(100.19),
+        Some(100.21),
+        0.0,
+        SizeSkewDecision::INACTIVE,
+        NonlinearSkewConfig::default(),
+        100.0,
+        GuardDecision::INACTIVE,
+    );
+    let buy = coincident
+        .geometry
+        .iter()
+        .find(|quote| quote.side == OrderSide::Buy && quote.level == 0)
+        .unwrap();
+    assert_eq!(buy.outcome, QuoteGeometryOutcome::ClampedToTouch);
+
+    // The buy interval is [99.80, 99.78]: the band floor is above the
+    // post-only ceiling (`best_ask - tick`), so the level is unplaceable.
+    let infeasible = compute_desired_quotes_with_geometry(
+        &c,
+        100.0,
+        Some(99.77),
+        Some(99.79),
+        0.0,
+        SizeSkewDecision::INACTIVE,
+        NonlinearSkewConfig::default(),
+        0.0,
+        GuardDecision::INACTIVE,
+    );
+    let buy = infeasible
+        .geometry
+        .iter()
+        .find(|quote| quote.side == OrderSide::Buy && quote.level == 0)
+        .unwrap();
+    assert_eq!(buy.outcome, QuoteGeometryOutcome::DroppedInfeasible);
+    assert_eq!(buy.final_price, None);
+    assert_eq!(buy.distance_to_touch_bps, None);
 }
 
 #[test]
@@ -286,6 +447,188 @@ fn reconcile_hold_within_refresh() {
     if let Action::Hold { age_cycles, .. } = &actions[0] {
         assert_eq!(*age_cycles, 7);
     }
+}
+
+#[test]
+fn cycle_plan_reports_resting_quote_distance_to_current_touch() {
+    let c = cfg();
+    let rest = [resting(OrderSide::Buy, 0, 99.85, 100.0)];
+    let plan = plan_cycle(
+        &c,
+        CycleInput {
+            cycle: 7,
+            market: MarketSnapshot {
+                mark: 100.0,
+                best_bid: Some(99.89),
+                best_ask: Some(99.92),
+            },
+            position: 0.0,
+            resting: &rest,
+            pending_slots: &[],
+            market_data_mode: MarketDataMode::Active,
+            active_exit_enabled: false,
+            inventory_exit_pct: 0.0,
+            inventory_exit_qty: 0.0,
+            size_skew: Default::default(),
+            nonlinear_skew: Default::default(),
+            external_skew: Default::default(),
+            external_excess_bps: None,
+            micro_price: Default::default(),
+            guard: Default::default(),
+            wind_down: false,
+            qty_tolerance: 0.0005,
+        },
+        false,
+    );
+
+    assert!(plan.actions.iter().any(|action| matches!(
+        action,
+        Action::Hold {
+            side: OrderSide::Buy,
+            level: 0,
+            price: 99.85,
+            ..
+        }
+    )));
+    assert_eq!(plan.quote_geometry.len(), 2);
+    let buy = plan
+        .quote_geometry
+        .iter()
+        .find(|quote| quote.side == OrderSide::Buy && quote.level == 0)
+        .unwrap();
+    assert_eq!(buy.outcome, QuoteGeometryOutcome::Placed);
+    assert_eq!(buy.final_price, Some(99.85));
+    assert!((buy.distance_to_touch_bps.unwrap() - 7.0).abs() < 1e-9);
+
+    // The newly generated buy would be pinned one tick below the ask, but the
+    // older quote is still safely held. Geometry must describe the actual
+    // resting price (5 bps away), not the hypothetical replacement (1 bp).
+    let closing_touch = plan_cycle(
+        &c,
+        CycleInput {
+            cycle: 8,
+            market: MarketSnapshot {
+                mark: 100.0,
+                best_bid: Some(99.88),
+                best_ask: Some(99.90),
+            },
+            position: 0.0,
+            resting: &rest,
+            pending_slots: &[],
+            market_data_mode: MarketDataMode::Active,
+            active_exit_enabled: false,
+            inventory_exit_pct: 0.0,
+            inventory_exit_qty: 0.0,
+            size_skew: Default::default(),
+            nonlinear_skew: Default::default(),
+            external_skew: Default::default(),
+            external_excess_bps: None,
+            micro_price: Default::default(),
+            guard: Default::default(),
+            wind_down: false,
+            qty_tolerance: 0.0005,
+        },
+        false,
+    );
+    assert!(closing_touch.actions.iter().any(|action| matches!(
+        action,
+        Action::Hold {
+            side: OrderSide::Buy,
+            level: 0,
+            price: 99.85,
+            ..
+        }
+    )));
+    let buy = closing_touch
+        .quote_geometry
+        .iter()
+        .find(|quote| quote.side == OrderSide::Buy && quote.level == 0)
+        .unwrap();
+    assert_eq!(buy.outcome, QuoteGeometryOutcome::Placed);
+    assert_eq!(buy.final_price, Some(99.85));
+    assert!((buy.distance_to_touch_bps.unwrap() - 5.0).abs() < 1e-9);
+    assert_eq!(closing_touch.quote_geometry.len(), 2);
+}
+
+#[test]
+fn cycle_plan_preserves_replacement_geometry_and_reports_cancel_only_resting() {
+    let c = cfg();
+    let rest = [resting(OrderSide::Buy, 0, 99.90, 100.0)];
+    let input = CycleInput {
+        cycle: 8,
+        market: MarketSnapshot {
+            mark: 100.0,
+            best_bid: Some(99.88),
+            best_ask: Some(99.90),
+        },
+        position: 0.0,
+        resting: &rest,
+        pending_slots: &[],
+        market_data_mode: MarketDataMode::Active,
+        active_exit_enabled: false,
+        inventory_exit_pct: 0.0,
+        inventory_exit_qty: 0.0,
+        size_skew: Default::default(),
+        nonlinear_skew: Default::default(),
+        external_skew: Default::default(),
+        external_excess_bps: None,
+        micro_price: Default::default(),
+        guard: Default::default(),
+        wind_down: false,
+        qty_tolerance: 0.0005,
+    };
+
+    let running = plan_cycle(&c, input, false);
+    assert!(running.actions.iter().any(|action| matches!(
+        action,
+        Action::Cancel {
+            side: OrderSide::Buy,
+            level: 0,
+            price: 99.90,
+            reason: CancelReason::WouldCross,
+            ..
+        }
+    )));
+    assert!(running.actions.iter().any(
+        |action| matches!(action, Action::Place(quote) if quote.side == OrderSide::Buy && quote.level == 0 && quote.price == 99.89)
+    ));
+    let buy = running
+        .quote_geometry
+        .iter()
+        .find(|quote| quote.side == OrderSide::Buy && quote.level == 0)
+        .unwrap();
+    assert_eq!(buy.outcome, QuoteGeometryOutcome::ClampedToTouch);
+    assert_eq!(buy.final_price, Some(99.89));
+    assert!((buy.distance_to_touch_bps.unwrap() - 1.0).abs() < 1e-9);
+    assert_eq!(running.quote_geometry.len(), 2);
+
+    let infeasible = plan_cycle(
+        &c,
+        CycleInput {
+            market: MarketSnapshot {
+                mark: 100.0,
+                best_bid: Some(99.77),
+                best_ask: Some(99.79),
+            },
+            ..input
+        },
+        false,
+    );
+    let buy = infeasible
+        .quote_geometry
+        .iter()
+        .find(|quote| quote.side == OrderSide::Buy && quote.level == 0)
+        .unwrap();
+    assert_eq!(buy.outcome, QuoteGeometryOutcome::DroppedInfeasible);
+    assert_eq!(buy.final_price, None);
+    assert_eq!(infeasible.quote_geometry.len(), 2);
+
+    let halted = plan_cycle(&c, input, true);
+    assert_eq!(halted.quote_geometry.len(), 1);
+    let buy = &halted.quote_geometry[0];
+    assert_eq!(buy.outcome, QuoteGeometryOutcome::Placed);
+    assert_eq!(buy.final_price, Some(99.90));
+    assert_eq!(buy.distance_to_touch_bps, Some(0.0));
 }
 
 // 9. Drift beyond refresh -> Cancel(mark_moved) + Place, cancel first.

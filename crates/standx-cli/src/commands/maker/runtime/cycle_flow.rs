@@ -94,6 +94,7 @@ impl MakerRuntime {
         let performance_epoch_ms = self.loop_state.performance_epoch_ms;
         let market_data_health_started = self.market.health_started;
         let feed = &self.market.feed;
+        let market_telemetry = &self.market.telemetry;
         let exit = 'execute: {
             // Work phase raced against Ctrl+C so a slow API call can be
             // interrupted (mirrors run_watch_loop).
@@ -211,6 +212,13 @@ impl MakerRuntime {
                 } else {
                     maker::MarketDataMode::Active
                 };
+                let market_telemetry_snapshot = match market_telemetry.as_ref() {
+                    Some(telemetry) => telemetry
+                        .read()
+                        .await
+                        .snapshot(std::time::Instant::now(), market.book_received_at),
+                    None => super::super::feed::MarketTelemetrySnapshot::default(),
+                };
                 // Normalize the leader feed against THIS cycle's mark. A
                 // missing/stale sample yields None and the guard fails open.
                 let cycle_external_divergence = match self.loop_state.external_feed.as_ref() {
@@ -246,6 +254,7 @@ impl MakerRuntime {
                         recovery: recovery_cycle,
                         market_fallback_reason,
                         ws_snapshot: market.ws_snapshot.as_ref(),
+                        market_telemetry: &market_telemetry_snapshot,
                         max_divergence_bps: args.max_divergence_bps,
                         inventory_exit_pct: args.inventory_exit_pct,
                         inventory_exit_qty: args.inventory_exit_qty,
