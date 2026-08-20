@@ -140,6 +140,12 @@ pub(super) struct RecoveryIo<'a> {
     pub(super) session: Option<&'a mut LiveSession>,
     pub(super) resting: &'a mut Vec<RestingQuote>,
     pub(super) inventory_exit_pending: &'a mut bool,
+    /// Stage 8 (docs/33) Alo/Ioc exit-order tracking, reset alongside
+    /// `inventory_exit_pending` whenever the account projection itself is
+    /// reset (verified cleanup): the cache would otherwise outlive the venue
+    /// state it describes.
+    pub(super) inventory_exit_order:
+        &'a mut Option<super::super::cycle::InventoryExitOrderTracking>,
     pub(super) next_cycle_is_recovery: &'a mut bool,
     pub(super) symbol: &'a str,
     pub(super) cycle: u64,
@@ -367,6 +373,7 @@ pub(super) async fn freeze_and_cleanup_for_recovery(
         session.projection.finish_verified_cleanup(spec.continuity);
     }
     *io.inventory_exit_pending = false;
+    *io.inventory_exit_order = None;
     if spec.abort_account_stream_handle {
         if let Some(session) = io.session.as_deref_mut() {
             session.account_stream_handle.abort();
@@ -561,6 +568,7 @@ impl MakerRuntime {
                         session: self.live_session.as_mut(),
                         resting: &mut self.loop_state.resting,
                         inventory_exit_pending: &mut self.loop_state.inventory_exit_pending,
+                        inventory_exit_order: &mut self.loop_state.inventory_exit_order,
                         next_cycle_is_recovery: &mut self.loop_state.next_cycle_is_recovery,
                         symbol,
                         cycle,
@@ -839,6 +847,7 @@ impl MakerRuntime {
                             session: Some(&mut *session),
                             resting: &mut self.loop_state.resting,
                             inventory_exit_pending: &mut self.loop_state.inventory_exit_pending,
+                            inventory_exit_order: &mut self.loop_state.inventory_exit_order,
                             next_cycle_is_recovery: &mut self.loop_state.next_cycle_is_recovery,
                             symbol,
                             cycle,
@@ -1281,6 +1290,7 @@ impl MakerRuntime {
                                 session: Some(&mut *session),
                                 resting: &mut self.loop_state.resting,
                                 inventory_exit_pending: &mut self.loop_state.inventory_exit_pending,
+                                inventory_exit_order: &mut self.loop_state.inventory_exit_order,
                                 next_cycle_is_recovery: &mut self.loop_state.next_cycle_is_recovery,
                                 symbol,
                                 cycle,
@@ -1368,6 +1378,7 @@ impl MakerRuntime {
                             session: Some(&mut *session),
                             resting: &mut self.loop_state.resting,
                             inventory_exit_pending: &mut self.loop_state.inventory_exit_pending,
+                            inventory_exit_order: &mut self.loop_state.inventory_exit_order,
                             next_cycle_is_recovery: &mut self.loop_state.next_cycle_is_recovery,
                             symbol,
                             cycle,
@@ -1638,6 +1649,7 @@ impl MakerRuntime {
                                 session: Some(&mut *session),
                                 resting: &mut self.loop_state.resting,
                                 inventory_exit_pending: &mut self.loop_state.inventory_exit_pending,
+                                inventory_exit_order: &mut self.loop_state.inventory_exit_order,
                                 next_cycle_is_recovery: &mut self.loop_state.next_cycle_is_recovery,
                                 symbol,
                                 cycle,

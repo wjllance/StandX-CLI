@@ -16,6 +16,15 @@ pub struct QuoteSlot {
     pub level: u32,
 }
 
+/// Sentinel `level` reserved for a reduce-only inventory-exit order (Market,
+/// or the Alo/Ioc execution-cost path from docs/33). Deliberately distinct
+/// from `account_projection`'s `UNKNOWN_ADOPTED_LEVEL` (`u32::MAX`): an exit
+/// order is a *known*, deliberately-tracked order and must never collide with
+/// the sentinel used for a genuinely unrecognized adopted order, or the two
+/// would become indistinguishable wherever code filters or reconciles by
+/// level (`reconcile`'s Stale-cancel path, the maker-book-clear gate, ...).
+pub const EXIT_ORDER_LEVEL: u32 = u32::MAX - 1;
+
 /// Build the bounded client-order ID for a normal quote.
 pub fn quote_client_order_id(
     run_order_prefix: &str,

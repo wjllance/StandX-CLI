@@ -64,6 +64,11 @@ symbol、敞口、配置和时间窗，不能复用于新的 live 运行。
    合格双边报价时间来制造表面收益。
 5. `performance.markout_*` 从成交价起算并包含 capture；离线分析常从成交时 mark 起算，
    不包含 capture。两种口径不得混用。
+6. **费率已用场馆事实核实（2026-08-20，`standx market symbols`）：maker `0.0001` = 1bps，
+   taker `0.0004` = 4bps，当前 11 个 symbol 全部一致，无 symbol 差异、无已知返佣。**
+   逐笔口径里的 `fee 1` 因此是实测值而非假设值。直接推论：任何走 taker 的路径每次付
+   4bps，是 maker 侧的 4 倍——`OrderType::Market` 的库存退出因此是当前最贵的单笔动作，
+   换成 ALO 挂单离场每次省约 3bps。
 
 因此，在收益读数转正前：
 
@@ -78,8 +83,8 @@ symbol、敞口、配置和时间窗，不能复用于新的 live 运行。
    方向；新增字段只用于日志和离线分析。
 2. **重放 `post_suppressed` 分支**：它使用 maker 自有库存帽状态，不依赖迟到的成交结果
    标签；先用 replay 证明不会把一种毒性换成另一种，再考虑立项。
-3. **核对费率与返佣事实**：确认当前账户、symbol 和规模的真实 maker fee/rebate，不能用
-   假设值补齐经济缺口。
+3. **降低退出执行成本**：库存退出目前发 `OrderType::Market`，每次付 4bps taker。改为
+   ALO 挂单优先、亏损越阈值才 IOC 兜底，每次省约 3bps。纯成本项，不改变风险方向。
 4. **裁决 `external_skew`**：如决定继续，使用
    [29-maker-external-skew-design.md](29-maker-external-skew-design.md) 的冻结单候选和预注册
    判据，并重新记录授权；未裁决前保持默认关闭。

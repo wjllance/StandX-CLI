@@ -137,6 +137,37 @@ impl MicroPriceFileConfig {
     }
 }
 
+/// Execution-cost path for the `InventoryTrim` exit (`[inventory_exit]`,
+/// stage 8 / docs/33): ALO-first with an IOC fallback, in place of the legacy
+/// reduce-only Market order. TOML-only, disabled by default — off means byte-
+/// identical behavior to before this section existed.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct InventoryExitFileConfig {
+    pub alo_enabled: Option<bool>,
+    pub alo_price_offset_ticks: Option<i32>,
+    pub alo_refresh_bps: Option<f64>,
+    pub alo_max_cycles: Option<u32>,
+    pub ioc_loss_bps: Option<f64>,
+    pub ioc_cross_ticks: Option<u32>,
+}
+
+impl InventoryExitFileConfig {
+    pub(super) fn into_domain(self) -> standx_maker::InventoryExitConfig {
+        let defaults = standx_maker::InventoryExitConfig::default();
+        standx_maker::InventoryExitConfig {
+            alo_enabled: self.alo_enabled.unwrap_or(defaults.alo_enabled),
+            alo_price_offset_ticks: self
+                .alo_price_offset_ticks
+                .unwrap_or(defaults.alo_price_offset_ticks),
+            alo_refresh_bps: self.alo_refresh_bps.unwrap_or(defaults.alo_refresh_bps),
+            alo_max_cycles: self.alo_max_cycles.unwrap_or(defaults.alo_max_cycles),
+            ioc_loss_bps: self.ioc_loss_bps.unwrap_or(defaults.ioc_loss_bps),
+            ioc_cross_ticks: self.ioc_cross_ticks.unwrap_or(defaults.ioc_cross_ticks),
+        }
+    }
+}
+
 /// External-price defensive guard (`[external_guard]`). Field defaults match
 /// [`standx_maker::GuardConfig`] so partial files stay valid.
 #[derive(Debug, Clone, Deserialize)]
@@ -193,6 +224,7 @@ pub(super) struct MakerFileConfig {
     pub external_skew: Option<ExternalSkewFileConfig>,
     pub microprice: Option<MicroPriceFileConfig>,
     pub external_guard: Option<ExternalGuardFileConfig>,
+    pub inventory_exit: Option<InventoryExitFileConfig>,
     pub stop_loss: Option<f64>,
     pub alert_loss: Option<f64>,
     pub alert_inventory_pct: Option<f64>,
@@ -329,6 +361,10 @@ pub(super) fn merge(
         .microprice
         .map(|config| config.into_domain())
         .unwrap_or_default();
+    let inventory_exit = file
+        .inventory_exit
+        .map(|config| config.into_domain())
+        .unwrap_or_default();
     let external_guard_basis_half_life_secs = file
         .external_guard
         .as_ref()
@@ -369,6 +405,7 @@ pub(super) fn merge(
         microprice,
         external_guard,
         external_guard_basis_half_life_secs,
+        inventory_exit,
         stop_loss: choose(stop_loss, file.stop_loss, 0.0),
         alert_loss: choose(alert_loss, file.alert_loss, 0.0),
         alert_inventory_pct: choose(alert_inventory_pct, file.alert_inventory_pct, 0.0),
@@ -439,6 +476,10 @@ pub(super) struct MakerRunArgs {
     pub(super) microprice: standx_maker::MicroPriceConfig,
     pub(super) external_guard: standx_maker::GuardConfig,
     pub(super) external_guard_basis_half_life_secs: u64,
+    /// Stage 8 (docs/33) `InventoryTrim` exit execution-cost path: default
+    /// disabled, in which case the exit is byte-identical to before this
+    /// config section existed.
+    pub(super) inventory_exit: standx_maker::InventoryExitConfig,
     pub(super) stop_loss: f64,
     pub(super) alert_loss: f64,
     pub(super) alert_inventory_pct: f64,
@@ -559,6 +600,14 @@ pub(super) fn validate_microprice(
         ));
     }
     Ok(())
+}
+
+/// Validate `[inventory_exit]` (stage 8, docs/33). Rejected even while
+/// `alo_enabled` is `false`, so a bad file never rides along silently until
+/// the day it is switched on — a live-order-path invalid-config panic while
+/// an exit is resting is exactly the `df069c5` bug class this must not repeat.
+pub(super) fn validate_inventory_exit(cfg: standx_maker::InventoryExitConfig) -> Result<()> {
+    standx_maker::validate_inventory_exit_config(&cfg).map_err(|error| anyhow::anyhow!("{error}"))
 }
 
 fn center_shift_band_budget_bps(
@@ -874,6 +923,68 @@ add_side_factor = 0.5
             "[external_skew]\nenabled = true\nunknown = 1\n"
         )
         .is_err());
+    }
+
+    /// docs/33: `[inventory_exit]` is TOML-only, off by default, and an
+    /// absent section must reproduce exactly `InventoryExitConfig::default()`
+    /// — the load-bearing fact behind "off means byte-identical behavior".
+    #[test]
+    fn inventory_exit_section_defaults_to_disabled_and_matches_domain_defaults() {
+        let config: MakerFileConfig = toml::from_str("").unwrap();
+        assert!(config.inventory_exit.is_none());
+
+        let full: MakerFileConfig = toml::from_str(
+            "[inventory_exit]\nalo_enabled = true\nalo_price_offset_ticks = 1\n\
+             alo_refresh_bps = 3.0\nalo_max_cycles = 10\nioc_loss_bps = 6.0\n\
+             ioc_cross_ticks = 4\n",
+        )
+        .unwrap();
+        let inventory_exit = full.inventory_exit.unwrap().into_domain();
+        assert!(inventory_exit.alo_enabled);
+        assert_eq!(inventory_exit.alo_price_offset_ticks, 1);
+        assert_eq!(inventory_exit.alo_refresh_bps, 3.0);
+        assert_eq!(inventory_exit.alo_max_cycles, 10);
+        assert_eq!(inventory_exit.ioc_loss_bps, 6.0);
+        assert_eq!(inventory_exit.ioc_cross_ticks, 4);
+
+        let partial: MakerFileConfig =
+            toml::from_str("[inventory_exit]\nalo_refresh_bps = 5.0\n").unwrap();
+        let domain_defaults = standx_maker::InventoryExitConfig::default();
+        let inventory_exit = partial.inventory_exit.unwrap().into_domain();
+        assert!(!inventory_exit.alo_enabled, "still off by default");
+        assert_eq!(inventory_exit.alo_refresh_bps, 5.0);
+        assert_eq!(
+            inventory_exit.alo_max_cycles,
+            domain_defaults.alo_max_cycles
+        );
+        assert_eq!(inventory_exit.ioc_loss_bps, domain_defaults.ioc_loss_bps);
+
+        assert!(toml::from_str::<MakerFileConfig>(
+            "[inventory_exit]\nalo_enabled = true\nunknown = 1\n"
+        )
+        .is_err());
+    }
+
+    /// docs/33: invalid values are rejected at startup even while
+    /// `alo_enabled` is `false` — a bad file must never ride along silently
+    /// until the day someone flips the switch.
+    #[test]
+    fn validate_inventory_exit_rejects_illegal_values_even_when_disabled() {
+        assert!(validate_inventory_exit(standx_maker::InventoryExitConfig::default()).is_ok());
+
+        let bad = standx_maker::InventoryExitConfig {
+            alo_enabled: false,
+            alo_refresh_bps: -1.0,
+            ..standx_maker::InventoryExitConfig::default()
+        };
+        let error = validate_inventory_exit(bad).unwrap_err();
+        assert!(error.to_string().contains("alo_refresh_bps"));
+
+        let bad_cycles = standx_maker::InventoryExitConfig {
+            alo_max_cycles: 0,
+            ..standx_maker::InventoryExitConfig::default()
+        };
+        assert!(validate_inventory_exit(bad_cycles).is_err());
     }
 
     fn external_skew_validation_base() -> standx_maker::MakerConfig {

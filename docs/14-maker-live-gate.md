@@ -74,6 +74,15 @@ evidence is reviewed. The explicit unlock approval was recorded on
 2026-07-10. Any strategy, venue API, credential, or risk-control change
 re-locks the gate and requires a new canary record.
 
+**2026-08-20, owner: the per-change canary requirement above is suspended for
+the near term.** It was judged too conservative for the current stage, where
+config-level parameter changes (e.g. `band_bps`) are frequent and the standing
+risk controls are unchanged. The rule is recorded as suspended rather than
+deleted so practice and this document do not silently diverge; the release
+owner reinstates it without a new decision. Everything else on this page —
+cleanup terminal-state rules, fail-closed reconciliation, and the
+`STANDX_ENABLE_LIVE_MAKER` unlock itself — still applies.
+
 The 2026-07-14 XAG-USD correlated command canary now supplies the create/cancel
 and post-check evidence required for the WS command transport change. The
 successful experiment is evidence for review, not an implicit release-owner

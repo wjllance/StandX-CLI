@@ -1121,6 +1121,84 @@ fn open_observation_adopts_pending_by_price_qty_heuristic() {
     assert!(state.pending_places().is_empty(), "the slot is consumed");
 }
 
+/// docs/33 structural problem #3: a resting `InventoryTrim` exit order is a
+/// current-run order by prefix, so it must be adopted through the ordinary
+/// pending-place match — never fall through to the unknown-order sentinel,
+/// which would risk tripping `unknown_current_run_order` and hard-stopping
+/// the bot on a scenario the old Market-only exit could never reach (it never
+/// rested long enough to be observed as a live, non-terminal order).
+#[test]
+fn resting_exit_order_adopts_by_pending_match_and_never_looks_unknown() {
+    let mut state = MakerAccountProjection::new(1, PREFIX, 0.2, 0.005, 0.00005);
+    let exit_cl_ord_id = crate::exit_client_order_id(PREFIX, 1);
+    state.apply(
+        1,
+        AccountProjectionEvent::PlaceSubmitted(ProjectionPendingPlace {
+            request_id: "exit1".to_owned(),
+            client_order_id: exit_cl_ord_id.clone(),
+            side: OrderSide::Sell,
+            price: 100.0,
+            qty: 0.2,
+            level: crate::EXIT_ORDER_LEVEL,
+            ref_center: 100.0,
+            cycle: 1,
+        }),
+    );
+
+    // The venue shows the Alo exit order resting (live, non-terminal) — the
+    // scenario a Market-only exit could never produce.
+    let outcome = state.apply(
+        1,
+        AccountProjectionEvent::OrderObserved(OrderObservation {
+            order_id: 99,
+            client_order_id: Some(exit_cl_ord_id),
+            side: OrderSide::Sell,
+            price: 100.0,
+            open_qty: 0.2,
+            terminal: false,
+        }),
+    );
+
+    assert!(outcome.applied && outcome.order_changed);
+    assert!(
+        !outcome.unknown_current_run_order,
+        "a resting exit order must adopt through its own pending place, not \
+         fall through to the unknown-order sentinel"
+    );
+    let resting = state.resting_quotes();
+    assert_eq!(resting.len(), 1);
+    assert_eq!(
+        resting[0].level,
+        crate::EXIT_ORDER_LEVEL,
+        "the exit keeps its own sentinel level, distinct from the ordinary \
+         quote ladder and from UNKNOWN_ADOPTED_LEVEL"
+    );
+    assert_ne!(
+        crate::EXIT_ORDER_LEVEL,
+        UNKNOWN_ADOPTED_LEVEL,
+        "the exit's sentinel must never collide with the unknown-order one"
+    );
+
+    // The periodic REST audit's fail-closed ownership check must also see
+    // this as a known order now that it is adopted, never as unexpected.
+    let unexpected = state.unexpected_rest_open_order_ids(
+        1,
+        &[OrderObservation {
+            order_id: 99,
+            client_order_id: Some(crate::exit_client_order_id(PREFIX, 1)),
+            side: OrderSide::Sell,
+            price: 100.0,
+            open_qty: 0.2,
+            terminal: false,
+        }],
+    );
+    assert!(
+        unexpected.is_empty(),
+        "an adopted resting exit order must never be reported as an \
+         unexpected current-run order"
+    );
+}
+
 #[test]
 fn unknown_current_run_order_adopts_with_sentinel_level() {
     let mut state = MakerAccountProjection::new(1, PREFIX, 0.0, 0.005, 0.00005);

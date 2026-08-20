@@ -664,6 +664,47 @@ mod tests {
         );
     }
 
+    /// docs/33: the `InventoryTrim` exit's *trigger* (`plan_cycle`'s
+    /// `requested_inventory_exit`/`inventory_exit`) lives entirely in
+    /// `standx-maker` and this change does not touch it — only how
+    /// `standx-cli` executes the resulting `InventoryExit` changes (Market
+    /// vs. the new Alo/Ioc path), and that execution machinery is never
+    /// reached by replay at all (replay only drives `plan_cycle`, never live
+    /// order submission). This test pins the trigger's exact output as a
+    /// regression lock: if a future change to `plan_cycle`/`reconcile` ever
+    /// perturbed the trigger, this fails independently of `alo_enabled`,
+    /// which replay has no knob for in the first place.
+    const EXIT_TRIGGER_TRACE: &str = r#"{"type":"header","schema_version":1,"symbol":"BTC-USD","git_sha":"abc","config_hash":"def","seed":7,"config":{"spread_bps":5.0,"band_bps":20.0,"level_step_bps":2.0,"refresh_bps":3.0,"levels":1,"size":1.0,"max_position":10.0,"skew_bps":0.0,"price_decimals":2,"qty_decimals":2,"min_order_qty":0.01},"settings":{"starting_position":6.0,"starting_mark":100.0,"max_divergence_bps":25.0,"require_full_touch":true,"vol_window":12,"vol_pause_bps":0.0,"active_exit_enabled":true,"inventory_exit_pct":50.0,"inventory_exit_qty":2.0}}
+{"type":"cycle","event_time_ms":0,"cycle":0,"mark":100.0,"best_bid":99.99,"best_ask":100.01,"position":6.0,"eligible_bid_qty":0.0,"eligible_ask_qty":0.0}
+{"type":"finish","event_time_ms":0}
+"#;
+
+    #[test]
+    fn inventory_trim_trigger_is_pinned_and_untouched_by_the_alo_ioc_execution_path() {
+        let trace = parse(BufReader::new(EXIT_TRIGGER_TRACE.as_bytes())).unwrap();
+        let result = run_replay(
+            &trace.config,
+            trace.settings.clone(),
+            &trace.events,
+            trace.end_time_ms,
+        )
+        .unwrap();
+        assert_eq!(result.cycles.len(), 1);
+        let plan = result.cycles[0].plan.as_ref().unwrap();
+        // Quotes are fully suppressed while an exit is outstanding (known
+        // cost 4, unrelated to and predating stage 8).
+        assert!(plan.actions.is_empty());
+        assert_eq!(
+            format!("{:?}", plan.requested_inventory_exit),
+            "Some(InventoryExit { side: Sell, qty: 2.0, kind: InventoryTrim })"
+        );
+        assert_eq!(
+            format!("{:?}", plan.inventory_exit),
+            "Some(InventoryExit { side: Sell, qty: 2.0, kind: InventoryTrim })"
+        );
+        assert_eq!(plan.exit_suppression, None);
+    }
+
     #[test]
     fn schema_v1_without_size_skew_still_parses_as_disabled() {
         let trace = parse(BufReader::new(TRACE.as_bytes())).unwrap();
