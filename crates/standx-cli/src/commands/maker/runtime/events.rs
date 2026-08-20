@@ -4,6 +4,32 @@ use std::fmt;
 
 pub(super) const ORDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// docs/33: a rejected exit order (Alo or Ioc — most notably Ioc, which this
+/// venue has never been observed to accept or reject) must never be papered
+/// over as an ordinary quote rejection. `place_rejected_async` already fires
+/// generically for any rejected place; this only swaps in a distinct,
+/// grep-able label and a louder detail line when the rejected place is the
+/// exit (`level == EXIT_ORDER_LEVEL`), identified the same prefix-based way
+/// cleanup and ownership checks already do.
+fn place_rejected_event_label(level: u32) -> (&'static str, bool) {
+    if level == maker::EXIT_ORDER_LEVEL {
+        ("inventory_exit_rejected_async", true)
+    } else {
+        ("place_rejected_async", false)
+    }
+}
+
+fn place_rejected_detail(message: &str, is_exit: bool) -> String {
+    if is_exit {
+        format!(
+            "INVENTORY EXIT ORDER REJECTED (Alo or Ioc \u{2014} verify venue \
+             acceptance of the rejected order type): {message}"
+        )
+    } else {
+        message.to_string()
+    }
+}
+
 pub(super) fn order_request_timeout_detail(timeout: &TimedOutOrderRequest) -> String {
     format!(
         "order request lifecycle timed out after {:.3}s: kind={} request_id={} waiting_for={}; refusing further live orders",
@@ -289,16 +315,18 @@ pub(super) fn apply_order_response(
             },
         );
         if let Some(place) = place {
+            let (action, is_exit) = place_rejected_event_label(place.level);
+            let detail = place_rejected_detail(&response.message, is_exit);
             output::log_maker_event(output::MakerLogEvent {
                 output_format,
                 symbol,
                 cycle,
-                action: "place_rejected_async",
+                action,
                 side: place.side,
                 level: place.level,
                 price: place.price,
                 price_decimals,
-                detail: &response.message,
+                detail: &detail,
                 exit_kind: None,
             });
         }
@@ -353,16 +381,18 @@ pub(super) fn apply_order_response(
                         request_id: request_id.to_string(),
                     },
                 );
+                let (action, is_exit) = place_rejected_event_label(place.level);
+                let detail = place_rejected_detail(&response.message, is_exit);
                 output::log_maker_event(output::MakerLogEvent {
                     output_format,
                     symbol,
                     cycle,
-                    action: "place_rejected_async",
+                    action,
                     side: place.side,
                     level: place.level,
                     price: place.price,
                     price_decimals,
-                    detail: &response.message,
+                    detail: &detail,
                     exit_kind: None,
                 });
             }
@@ -750,4 +780,30 @@ pub(super) fn accounting_position_mismatch(
     // a bare `>` comparison false and silently pass the invariant, so treat any
     // non-finite value as a mismatch.
     !delta.is_finite() || delta > qty_tolerance
+}
+
+#[cfg(test)]
+mod exit_rejection_tests {
+    use super::*;
+
+    #[test]
+    fn a_rejected_exit_place_gets_a_distinct_grep_able_label() {
+        let (action, is_exit) = place_rejected_event_label(maker::EXIT_ORDER_LEVEL);
+        assert_eq!(action, "inventory_exit_rejected_async");
+        assert!(is_exit);
+
+        let (action, is_exit) = place_rejected_event_label(0);
+        assert_eq!(action, "place_rejected_async");
+        assert!(!is_exit);
+    }
+
+    #[test]
+    fn exit_rejection_detail_is_loudly_labeled_and_preserves_the_venue_message() {
+        let detail = place_rejected_detail("insufficient margin", true);
+        assert!(detail.contains("INVENTORY EXIT ORDER REJECTED"));
+        assert!(detail.contains("insufficient margin"));
+
+        let detail = place_rejected_detail("insufficient margin", false);
+        assert_eq!(detail, "insufficient margin");
+    }
 }

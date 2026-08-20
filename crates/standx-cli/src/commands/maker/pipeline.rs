@@ -146,6 +146,9 @@ pub(super) struct CycleRequest<'a> {
     pub(super) max_divergence_bps: f64,
     pub(super) inventory_exit_pct: f64,
     pub(super) inventory_exit_qty: f64,
+    /// Stage 8 (docs/33) `InventoryTrim` exit execution-cost path. Default
+    /// disabled: the exit stays on the legacy reduce-only Market order.
+    pub(super) inventory_exit_cfg: standx_maker::InventoryExitConfig,
     /// Stage 5-b account hard floors (quote units, 0 = disarmed). Evaluated
     /// inside the cycle, before any order work, so a breached balance cannot
     /// add exposure in the very cycle that observed it.
@@ -172,6 +175,9 @@ pub(super) struct CycleState<'a> {
     pub(super) resting: &'a mut Vec<RestingQuote>,
     pub(super) account_projection: Option<&'a mut MakerAccountProjection>,
     pub(super) inventory_exit_pending: &'a mut bool,
+    /// Stage 8 (docs/33) execution-layer state for an in-flight `Alo`/`Ioc`
+    /// exit order; see the field doc on `RuntimeLoopState::inventory_exit_order`.
+    pub(super) inventory_exit_order: &'a mut Option<super::cycle::InventoryExitOrderTracking>,
     pub(super) ledger: &'a mut MakerLedger,
     pub(super) sim_position: &'a mut f64,
     pub(super) stats: &'a mut MakerStats,

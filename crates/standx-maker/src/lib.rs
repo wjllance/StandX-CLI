@@ -21,6 +21,7 @@ mod alerts;
 mod stats;
 
 pub mod account_projection;
+pub mod exit_execution;
 pub mod external_guard;
 pub mod external_skew;
 pub mod inventory;
@@ -43,6 +44,10 @@ pub use account_projection::{
     RequestLifecycle, RequestOperation, ResponseCorrelation, MAX_PENDING_ORDER_REQUESTS,
 };
 pub use alerts::{account_floor_breach, AccountFloorBreach, Alert, AlertMonitor};
+pub use exit_execution::{
+    plan_exit_order_step, validate_inventory_exit_config, ExitOrderStep, ExitPhase, ExitPhaseState,
+    InventoryExitConfig,
+};
 pub use external_guard::{
     ExternalDivergence, GuardConfig, GuardController, GuardDecision, GuardError,
 };
@@ -64,7 +69,7 @@ pub use micro_price::{micro_price_shift_bps, MicroPriceConfig};
 pub use ownership::{
     exit_client_order_id, is_current_run_client_order_id, is_maker_client_order_id,
     open_qty_adopts, pending_covers_slot, position_within_limit, quote_client_order_id, QuoteSlot,
-    MAKER_CL_ORD_ID_PREFIX,
+    EXIT_ORDER_LEVEL, MAKER_CL_ORD_ID_PREFIX,
 };
 pub use performance::{
     ExecutionCosts, FillRole, InventoryTimeSummary, MarkoutSummary, PerformanceError,

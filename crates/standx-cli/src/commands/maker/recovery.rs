@@ -2459,6 +2459,75 @@ mod live_gate_tests {
         open_final.assert_async().await;
     }
 
+    /// docs/33 structural problem #4: a resting `InventoryTrim` Alo exit
+    /// order has never traversed the fail-closed cleanup path before (the
+    /// legacy Market order never rests long enough to still be open when
+    /// cleanup runs). Ownership here is by prefix
+    /// (`is_maker_order`/`is_current_run_client_order_id`), so an exit-shaped
+    /// id (`{prefix}x{cycle:08x}`, see `exit_client_order_id`) must be
+    /// discovered and cancelled exactly like any ordinary quote id — this
+    /// proves it end to end through the same `cancel_maker_orders_with_retry`
+    /// entry point a real shutdown uses.
+    #[tokio::test]
+    async fn maker_cleanup_cancels_a_resting_exit_order() {
+        let _jwt = EnvGuard::set("STANDX_JWT", "controlled-test-jwt");
+        let exit_cl_ord_id = standx_maker::exit_client_order_id("sxmk-controlled-", 5);
+        assert_eq!(exit_cl_ord_id, "sxmk-controlled-x00000005");
+        let mut server = Server::new_async().await;
+        let open_before = server
+            .mock("GET", "/api/query_open_orders")
+            .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"code":0,"message":"ok","result":[
+                    {{"id":"99","cl_ord_id":"{exit_cl_ord_id}","symbol":"BTC-USD","side":"sell","order_type":"limit","qty":"0.05","fill_qty":"0","price":"63100","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:00Z"}}
+                ]}}"#
+            ))
+            .expect(1)
+            .create_async()
+            .await;
+        let cancel = server
+            .mock("POST", "/api/cancel_orders")
+            .match_body(Matcher::Json(serde_json::json!({ "order_id_list": [99] })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"code":0,"message":"accepted"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let query_order = server
+            .mock("GET", "/api/query_order")
+            .match_query(Matcher::UrlEncoded("order_id".into(), "99".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"id":"99","cl_ord_id":"{exit_cl_ord_id}","symbol":"BTC-USD","side":"sell","order_type":"limit","qty":"0.05","fill_qty":"0","price":"63100","status":"canceled","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:01Z"}}"#
+            ))
+            .expect(1)
+            .create_async()
+            .await;
+        let open_final = server
+            .mock("GET", "/api/query_open_orders")
+            .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"code":0,"message":"ok","result":[]}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = StandXClient::with_base_url(server.url()).unwrap();
+        cancel_maker_orders_with_retry(&client, "BTC-USD", 3, OutputFormat::Quiet, None)
+            .await
+            .unwrap();
+
+        open_before.assert_async().await;
+        cancel.assert_async().await;
+        query_order.assert_async().await;
+        open_final.assert_async().await;
+    }
+
     /// Regression: an order the venue accepted just before cleanup can surface
     /// only after the initial snapshot. It was never in the cancel batch, so the
     /// pass must fail closed and the retry must cancel it — the guarantee the

@@ -30,6 +30,16 @@ pub(super) struct RuntimeCounters {
 pub(super) struct RuntimeLoopState {
     pub(super) resting: Vec<RestingQuote>,
     pub(super) inventory_exit_pending: bool,
+    /// Execution-layer tracking for an in-flight `InventoryTrim` Alo/Ioc
+    /// exit order (stage 8, docs/33). `None` whenever no such order is being
+    /// managed — including the entire session when `alo_enabled` is `false`,
+    /// in which case this field is never read. Reset alongside
+    /// `inventory_exit_pending` at every recovery boundary: the venue-side
+    /// fact is re-derived from the account projection's authoritative
+    /// resting/pending state at `EXIT_ORDER_LEVEL` on the next cycle, so a
+    /// stale cache here can only cost one cycle of re-discovery, never a
+    /// duplicate order (see `docs/33` structural problem #2).
+    pub(super) inventory_exit_order: Option<super::super::cycle::InventoryExitOrderTracking>,
     /// Latched supervisor wind-down request (SIGUSR1): stop quoting and
     /// flatten via reduce-only exits. Sticky once set.
     pub(super) wind_down: bool,
@@ -195,6 +205,7 @@ impl MakerRuntime {
             &args.adaptive_spread,
             nonlinear_skew,
         )?;
+        super::super::config::validate_inventory_exit(args.inventory_exit)?;
         let guard_basis_half_life_secs = args.external_guard_basis_half_life_secs;
         let guard_controller = maker::GuardController::new(args.external_guard)?;
         let (external_feed, external_updates, external_feed_handle) = if args.external_guard.enabled
@@ -285,6 +296,7 @@ impl MakerRuntime {
             loop_state: RuntimeLoopState {
                 resting: Vec::new(),
                 inventory_exit_pending: false,
+                inventory_exit_order: None,
                 wind_down: false,
                 ledger,
                 performance_started,

@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `standx maker` can execute an inventory trim as a resting post-only (ALO) reduce-only order with an IOC fallback instead of a market order, behind a new default-disabled `[inventory_exit]` config section (`alo_enabled = false`). The venue charges 1bps maker and 4bps taker, so a filled ALO exit costs about 3bps less than the market exit it replaces. The exit trigger is unchanged, wind-down still exits immediately, and with the flag off the market path is used exactly as before.
+
+### Fixed
+- An inventory exit that rests on the book no longer collides with the sentinel level used for unrecognized adopted orders, so the maker's own reconciliation cannot cancel it, and its outstanding-order gate no longer blocks its own management for the order's whole resting lifetime.
+- The ALO/IOC exit path no longer aborts the cycle when only one side of the touch is present — a case reachable in paper mode, where a full touch is not required — and instead takes no exit action for that cycle and logs why.
+- `MakerStats::loss_bps` is now expressed in bps of mark, matching every other basis-point figure in the workspace.
+
+### Added
 - `standx maker` now records observation-only market microstructure on `cycle_summary`: a `book` block (up to five depth levels per side, top-of-book sizes, touch spread, mark/mid divergence), a `tape` block summarizing the newly subscribed `public_trade` channel over a five-second window, and a `geometry` block reporting per-slot quote geometry — pre-clamp and post-clamp price, which bound was binding (eligibility band vs post-only no-cross), and the distance from each quote to the opposing touch. None of these fields feed quoting, cancellation, exit, or safety decisions, and the replay action sequence is unchanged.
 
 ### Changed

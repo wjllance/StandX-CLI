@@ -29,6 +29,24 @@ use std::time::Instant;
 
 const ORDER_LATENCY_TIMEOUT_MS: u64 = 15_000;
 
+/// Execution-layer tracking for an in-flight `InventoryTrim` Alo/Ioc exit
+/// order (stage 8, docs/33-maker-exit-execution-cost-design.md).
+///
+/// Deliberately minimal: `resting_price` and the resting order's venue
+/// `order_id` are *not* cached here — they are read fresh from the account
+/// projection's `resting_quotes()` every cycle, which is the authoritative
+/// source (see docs/33 structural problem #2). Only `phase` and
+/// `cycles_in_phase` genuinely cannot be recovered from venue-observed state
+/// alone: an `Ioc` leg never rests, so nothing distinguishes "about to open
+/// the first Alo attempt" from "already escalated to Ioc" once the book goes
+/// quiet, and `cycles_in_phase` is a total-time-in-Alo budget that a
+/// `RepriceAlo` must not silently reset.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct InventoryExitOrderTracking {
+    pub(super) phase: maker::ExitPhase,
+    pub(super) cycles_in_phase: u32,
+}
+
 fn external_skew_transitioned(previous: f64, current: f64) -> bool {
     let previous_active = previous != 0.0;
     let current_active = current != 0.0;
@@ -272,6 +290,7 @@ pub(super) async fn maker_cycle(
         max_divergence_bps,
         inventory_exit_pct,
         inventory_exit_qty,
+        inventory_exit_cfg,
         stop_equity_below,
         stop_margin_below,
         wind_down,
@@ -289,6 +308,7 @@ pub(super) async fn maker_cycle(
         resting,
         mut account_projection,
         inventory_exit_pending,
+        inventory_exit_order,
         ledger,
         sim_position,
         stats,
@@ -669,25 +689,37 @@ pub(super) async fn maker_cycle(
     if guard_decision.endangered != previous_guard_side {
         emit_guard_transition(output_format, symbol, cycle, &guard_decision);
     }
-    let active_resting = if live {
-        projected_resting.as_slice()
+    // Stage 8 (docs/33 structural problem #1): the reduce-only exit order
+    // (Market, or a resting Alo/Ioc leg) is never a maker-ladder quote, so it
+    // must never reach the pure reconciler's `resting`/`pending_slots`
+    // inputs. `reconcile` cancels any resting quote with no matching desired
+    // quote at its (side, level) — and while an exit is active, `desired` is
+    // always empty (`plan_cycle` suppresses new quotes whenever
+    // `inventory_exit.is_some()`), so an un-filtered exit-level entry would
+    // be cancelled by `reconcile` as `Stale` every single cycle, racing the
+    // dedicated exit-management logic below that also owns that order's
+    // cancel/replace lifecycle. Filtering here keeps `plan_cycle` exactly as
+    // ignorant of exit execution as it always was; `final_resting` below
+    // (telemetry/uptime) intentionally still sees the exit order, since a
+    // resting Alo leg is genuine SIP-5A-eligible maker liquidity.
+    let active_resting: Vec<RestingQuote> = if live {
+        planner_resting(&projected_resting)
     } else {
-        resting.as_slice()
+        resting.clone()
     };
-    let pending_slots = account_projection
-        .as_deref()
-        .map(|projection| projection.pending_places())
-        .unwrap_or_default()
-        .iter()
-        .map(|place| (place.side, place.level))
-        .collect::<Vec<_>>();
+    let pending_slots = planner_pending_slots(
+        &account_projection
+            .as_deref()
+            .map(|projection| projection.pending_places())
+            .unwrap_or_default(),
+    );
     let plan = maker::plan_cycle(
         cfg,
         CycleInput {
             cycle,
             market,
             position,
-            resting: active_resting,
+            resting: &active_resting,
             pending_slots: &pending_slots,
             market_data_mode,
             active_exit_enabled: live,
@@ -723,6 +755,31 @@ pub(super) async fn maker_cycle(
         *inventory_exit_pending = false;
     }
     if raw_inventory_exit.is_none() {
+        *inventory_exit_pending = false;
+        // Stage 8 (docs/33): nothing is being requested anymore (flattened,
+        // or gated off by a halt/inactive market) — drop any Alo/Ioc
+        // tracking so a later new exit starts clean instead of resuming a
+        // stale phase.
+        *inventory_exit_order = None;
+    }
+    // Stage 8 (docs/33 structural problem #1, second half): `inventory_exit_pending`
+    // was designed around a reduce-only Market order, whose accept-ack and
+    // resolution are effectively the same instant — so waiting for "the ack"
+    // and waiting for "the exit to be done" were never actually different
+    // things to wait for. A resting Alo order breaks that: it gets
+    // acknowledged (and starts resting) long before it resolves, and this
+    // flag must not keep the whole exit block suppressed for that entire
+    // resting window, or the Alo/Ioc state machine below could never run its
+    // per-cycle hold/reprice/upgrade decision. So for a tracked Alo/Ioc exit
+    // specifically, treat "awaiting confirmation" as scoped to the most
+    // recent wire submission only: once the account projection shows no more
+    // open exit-level place/cancel request, that submission's ack has
+    // landed (accepted-and-resting, terminal, or rejected) and the state
+    // machine may run again. This can never fire for the legacy Market path
+    // (`inventory_exit_order` stays `None` there), so the default-off
+    // behavior is untouched byte-for-byte.
+    if inventory_exit_order.is_some() && exit_wire_submission_settled(account_projection.as_deref())
+    {
         *inventory_exit_pending = false;
     }
     // A still-unconfirmed exit must never be duplicated, but waiting for its
@@ -961,100 +1018,350 @@ pub(super) async fn maker_cycle(
     };
 
     if let Some(exit) = inventory_exit {
-        // Do not race a reduce-only market order against quote cancellations.
-        // The next cycle must observe an empty maker book before the single
-        // exit request can be submitted.
-        let account_clear = account_projection.as_deref().is_some_and(|projection| {
-            projection.resting_quotes().is_empty()
-                && projection.pending_places().is_empty()
-                && projection.pending_cancels().is_empty()
-        });
-        if account_clear {
-            ensure_live_streams_healthy(account_stream_health, order_response_health)?;
-            ensure_request_registry_capacity(account_projection.as_deref())?;
-            let cl_ord_id = maker::exit_client_order_id(run_order_prefix, cycle);
-            let commands = live_order_commands(order_commands)?;
-            let command = commands.prepare_create_order(&CreateOrderParams {
-                symbol: symbol.to_string(),
-                cl_ord_id: Some(cl_ord_id.clone()),
-                side: exit.side,
-                order_type: OrderType::Market,
-                quantity: format_decimals(exit.qty, cfg.qty_decimals),
-                price: None,
-                time_in_force: None,
-                reduce_only: true,
-                stop_price: None,
-                sl_price: None,
-                tp_price: None,
-            })?;
-            let request_id = command.request_id().to_string();
-            // Register the exit submission so its asynchronous ack correlates
-            // to a pending entry instead of counting as an unmatched response.
-            // The sentinel level keeps it out of quote-slot reservation; a
-            // reduce-only market order never rests, so its request lifecycle
-            // stays tracked until a correlated response/account event or
-            // explicit cleanup resolves it.
-            let projection = account_projection
-                .as_deref_mut()
-                .expect("live inventory exits require initialized account projection");
-            apply_request_submission(
-                projection,
-                AccountProjectionEvent::PlaceSubmitted(ProjectionPendingPlace {
-                    request_id: request_id.clone(),
-                    client_order_id: cl_ord_id,
-                    side: exit.side,
-                    price: mark,
-                    qty: exit.qty,
-                    level: u32::MAX,
-                    ref_center: mark,
-                    cycle,
-                }),
-            )?;
-            order_request_deadlines
-                .expect("live inventory exits require initialized request deadlines")
-                .record(
-                    request_id.clone(),
-                    OrderRequestKind::InventoryExit,
-                    Instant::now(),
-                );
-            register_order_latency(
-                &mut order_latency,
-                LatencyRegistration {
-                    started: latency_started,
-                    request_id: &request_id,
-                    kind: maker::LatencyRequestKind::Place,
-                    generation: projection.generation(),
-                    cycle,
-                    symbol,
-                    side: exit.side,
-                    level: u32::MAX,
-                    order_id: None,
-                    market_source,
-                    recovery,
-                },
-            );
-            let sent = commands.send_prepared(command).await;
-            observe_order_write(
-                &mut order_latency,
-                latency_started,
-                &request_id,
-                sent.is_ok(),
-            );
-            sent?;
-            *inventory_exit_pending = true;
-            exit_status.submitted = true;
-            log_maker_event(MakerLogEvent {
-                output_format,
-                symbol,
-                cycle,
-                action: "inventory_exit_submitted",
-                side: exit.side,
-                level: 0,
-                price: mark,
-                price_decimals: cfg.price_decimals,
-                detail: "reduce-only market order submitted after maker book cleared",
-                exit_kind: Some(exit.kind.as_str()),
+        if !exit_uses_alo_ioc(exit.kind, &inventory_exit_cfg) {
+            // Do not race a reduce-only market order against quote
+            // cancellations. The next cycle must observe an empty maker book
+            // before the single exit request can be submitted.
+            let account_clear = account_projection.as_deref().is_some_and(|projection| {
+                projection.resting_quotes().is_empty()
+                    && projection.pending_places().is_empty()
+                    && projection.pending_cancels().is_empty()
             });
+            if account_clear {
+                ensure_live_streams_healthy(account_stream_health, order_response_health)?;
+                ensure_request_registry_capacity(account_projection.as_deref())?;
+                let cl_ord_id = maker::exit_client_order_id(run_order_prefix, cycle);
+                let commands = live_order_commands(order_commands)?;
+                let command = commands.prepare_create_order(&CreateOrderParams {
+                    symbol: symbol.to_string(),
+                    cl_ord_id: Some(cl_ord_id.clone()),
+                    side: exit.side,
+                    order_type: OrderType::Market,
+                    quantity: format_decimals(exit.qty, cfg.qty_decimals),
+                    price: None,
+                    time_in_force: None,
+                    reduce_only: true,
+                    stop_price: None,
+                    sl_price: None,
+                    tp_price: None,
+                })?;
+                let request_id = command.request_id().to_string();
+                // Register the exit submission so its asynchronous ack correlates
+                // to a pending entry instead of counting as an unmatched response.
+                // The sentinel level keeps it out of quote-slot reservation; a
+                // reduce-only market order never rests, so its request lifecycle
+                // stays tracked until a correlated response/account event or
+                // explicit cleanup resolves it.
+                let projection = account_projection
+                    .as_deref_mut()
+                    .expect("live inventory exits require initialized account projection");
+                apply_request_submission(
+                    projection,
+                    AccountProjectionEvent::PlaceSubmitted(ProjectionPendingPlace {
+                        request_id: request_id.clone(),
+                        client_order_id: cl_ord_id,
+                        side: exit.side,
+                        price: mark,
+                        qty: exit.qty,
+                        level: maker::EXIT_ORDER_LEVEL,
+                        ref_center: mark,
+                        cycle,
+                    }),
+                )?;
+                order_request_deadlines
+                    .as_deref_mut()
+                    .expect("live inventory exits require initialized request deadlines")
+                    .record(
+                        request_id.clone(),
+                        OrderRequestKind::InventoryExit,
+                        Instant::now(),
+                    );
+                register_order_latency(
+                    &mut order_latency,
+                    LatencyRegistration {
+                        started: latency_started,
+                        request_id: &request_id,
+                        kind: maker::LatencyRequestKind::Place,
+                        generation: projection.generation(),
+                        cycle,
+                        symbol,
+                        side: exit.side,
+                        level: maker::EXIT_ORDER_LEVEL,
+                        order_id: None,
+                        market_source,
+                        recovery,
+                    },
+                );
+                let sent = commands.send_prepared(command).await;
+                observe_order_write(
+                    &mut order_latency,
+                    latency_started,
+                    &request_id,
+                    sent.is_ok(),
+                );
+                sent?;
+                *inventory_exit_pending = true;
+                exit_status.submitted = true;
+                log_maker_event(MakerLogEvent {
+                    output_format,
+                    symbol,
+                    cycle,
+                    action: "inventory_exit_submitted",
+                    side: exit.side,
+                    level: 0,
+                    price: mark,
+                    price_decimals: cfg.price_decimals,
+                    detail: "reduce-only market order submitted after maker book cleared",
+                    exit_kind: Some(exit.kind.as_str()),
+                });
+            }
+        } else {
+            // ---- Stage 8 Alo/Ioc execution-cost path (docs/33) ----
+            let ordinary_book_clear = exit_order_book_clear(account_projection.as_deref());
+            let resting_exit = resting_exit_order(account_projection.as_deref());
+            let phase_state =
+                exit_phase_state_for_cycle(inventory_exit_order.as_ref(), resting_exit.as_ref());
+
+            let exit_actionable = phase_state.is_some() || ordinary_book_clear;
+            let full_touch = best_bid.zip(best_ask);
+            if exit_actionable && full_touch.is_none() {
+                // `preflight_cycle`'s full-touch requirement is conditioned on
+                // `live` (see its call site), so a one-sided book legitimately
+                // reaches here in paper mode — which is exactly where
+                // `alo_enabled` gets tried first. Take no action for this
+                // cycle rather than pricing an exit blind or blind-cancelling
+                // a resting leg: the exit stays requested and the next
+                // coherent touch resumes the state machine. Observable so a
+                // stalled exit is never silent.
+                log_maker_event(MakerLogEvent {
+                    output_format,
+                    symbol,
+                    cycle,
+                    action: "inventory_exit_touch_incomplete",
+                    side: exit.side,
+                    level: 0,
+                    price: mark,
+                    price_decimals: cfg.price_decimals,
+                    detail: "alo/ioc exit needs a full touch; no exit action this cycle",
+                    exit_kind: Some(exit.kind.as_str()),
+                });
+            }
+            if let Some((best_bid, best_ask)) = full_touch.filter(|_| exit_actionable) {
+                let (step, next_state) = maker::plan_exit_order_step(
+                    &inventory_exit_cfg,
+                    phase_state,
+                    exit.side,
+                    best_bid,
+                    best_ask,
+                    cfg.price_tick(),
+                    stats.loss_bps(position, mark),
+                );
+                *inventory_exit_order = Some(InventoryExitOrderTracking {
+                    phase: next_state.phase,
+                    cycles_in_phase: next_state.cycles_in_phase,
+                });
+
+                if let maker::ExitOrderStep::HoldAlo = step {
+                    log_maker_event(MakerLogEvent {
+                        output_format,
+                        symbol,
+                        cycle,
+                        action: "inventory_exit_alo_held",
+                        side: exit.side,
+                        level: 0,
+                        price: resting_exit
+                            .as_ref()
+                            .map(|resting| resting.price)
+                            .unwrap_or(mark),
+                        price_decimals: cfg.price_decimals,
+                        detail: "resting Alo exit order within refresh tolerance",
+                        exit_kind: Some(exit.kind.as_str()),
+                    });
+                } else {
+                    ensure_live_streams_healthy(account_stream_health, order_response_health)?;
+
+                    if step.cancels_resting() {
+                        // `plan_exit_order_step` only returns a
+                        // cancel-then-replace step when it was handed an Alo
+                        // `ExitPhaseState`, and `exit_phase_state_for_cycle`
+                        // only ever produces `Alo` alongside a `resting_exit`
+                        // — a live venue order id is guaranteed here. Fail
+                        // closed instead of silently placing a second order
+                        // on top of an uncancelled one if that invariant is
+                        // ever broken by a future change.
+                        let resting = resting_exit.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "inventory exit reprice/upgrade decided with no resting order to cancel"
+                            )
+                        })?;
+                        let order_id_str = resting.order_id.as_deref().ok_or_else(|| {
+                            anyhow::anyhow!("resting exit order is missing its venue order id")
+                        })?;
+                        ensure_request_registry_capacity(account_projection.as_deref())?;
+                        let order_id = order_id_str.parse::<u64>().map_err(|_| {
+                            anyhow::anyhow!(
+                                "resting exit order has non-integer exchange ID '{order_id_str}'"
+                            )
+                        })?;
+                        let commands = live_order_commands(order_commands)?;
+                        let command = commands.prepare_cancel_order(order_id_str)?;
+                        let request_id = command.request_id().to_string();
+                        let projection = account_projection
+                            .as_deref_mut()
+                            .expect("live inventory exits require initialized account projection");
+                        apply_request_submission(
+                            projection,
+                            AccountProjectionEvent::CancelSubmitted(ProjectionPendingCancel {
+                                request_id: request_id.clone(),
+                                order_id,
+                                side: exit.side,
+                                level: maker::EXIT_ORDER_LEVEL,
+                                price: resting.price,
+                                cycle,
+                            }),
+                        )?;
+                        order_request_deadlines
+                            .as_deref_mut()
+                            .expect("live inventory exits require initialized request deadlines")
+                            .record(request_id.clone(), OrderRequestKind::Cancel, Instant::now());
+                        register_order_latency(
+                            &mut order_latency,
+                            LatencyRegistration {
+                                started: latency_started,
+                                request_id: &request_id,
+                                kind: maker::LatencyRequestKind::Cancel,
+                                generation: projection.generation(),
+                                cycle,
+                                symbol,
+                                side: exit.side,
+                                level: maker::EXIT_ORDER_LEVEL,
+                                order_id: Some(order_id),
+                                market_source,
+                                recovery,
+                            },
+                        );
+                        let sent = commands.send_prepared(command).await;
+                        observe_order_write(
+                            &mut order_latency,
+                            latency_started,
+                            &request_id,
+                            sent.is_ok(),
+                        );
+                        sent?;
+                    }
+
+                    if let Some(price) = step.price() {
+                        ensure_request_registry_capacity(account_projection.as_deref())?;
+                        let time_in_force = match step {
+                            maker::ExitOrderStep::UpgradeToIoc { .. }
+                            | maker::ExitOrderStep::SubmitIoc { .. } => TimeInForce::Ioc,
+                            _ => TimeInForce::Alo,
+                        };
+                        let cl_ord_id = maker::exit_client_order_id(run_order_prefix, cycle);
+                        let commands = live_order_commands(order_commands)?;
+                        let command = commands.prepare_create_order(&CreateOrderParams {
+                            symbol: symbol.to_string(),
+                            cl_ord_id: Some(cl_ord_id.clone()),
+                            side: exit.side,
+                            order_type: OrderType::Limit,
+                            quantity: format_decimals(exit.qty, cfg.qty_decimals),
+                            price: Some(format_decimals(price, cfg.price_decimals)),
+                            time_in_force: Some(time_in_force),
+                            reduce_only: true,
+                            stop_price: None,
+                            sl_price: None,
+                            tp_price: None,
+                        })?;
+                        let request_id = command.request_id().to_string();
+                        let projection = account_projection
+                            .as_deref_mut()
+                            .expect("live inventory exits require initialized account projection");
+                        apply_request_submission(
+                            projection,
+                            AccountProjectionEvent::PlaceSubmitted(ProjectionPendingPlace {
+                                request_id: request_id.clone(),
+                                client_order_id: cl_ord_id,
+                                side: exit.side,
+                                price,
+                                qty: exit.qty,
+                                level: maker::EXIT_ORDER_LEVEL,
+                                ref_center: mark,
+                                cycle,
+                            }),
+                        )?;
+                        order_request_deadlines
+                            .expect("live inventory exits require initialized request deadlines")
+                            .record(
+                                request_id.clone(),
+                                OrderRequestKind::InventoryExit,
+                                Instant::now(),
+                            );
+                        register_order_latency(
+                            &mut order_latency,
+                            LatencyRegistration {
+                                started: latency_started,
+                                request_id: &request_id,
+                                kind: maker::LatencyRequestKind::Place,
+                                generation: projection.generation(),
+                                cycle,
+                                symbol,
+                                side: exit.side,
+                                level: maker::EXIT_ORDER_LEVEL,
+                                order_id: None,
+                                market_source,
+                                recovery,
+                            },
+                        );
+                        let sent = commands.send_prepared(command).await;
+                        observe_order_write(
+                            &mut order_latency,
+                            latency_started,
+                            &request_id,
+                            sent.is_ok(),
+                        );
+                        sent?;
+                        *inventory_exit_pending = true;
+                        exit_status.submitted = true;
+                        let (action, detail) = match step {
+                            maker::ExitOrderStep::OpenAlo { .. } => (
+                                "inventory_exit_alo_opened",
+                                "Alo order rests at the touch, joining the maker queue",
+                            ),
+                            maker::ExitOrderStep::RepriceAlo { .. } => (
+                                "inventory_exit_alo_repriced",
+                                "touch drifted beyond alo_refresh_bps; cancelled and re-rested",
+                            ),
+                            maker::ExitOrderStep::UpgradeToIoc { .. } => (
+                                "inventory_exit_upgraded_ioc",
+                                "loss or alo_max_cycles threshold breached; escalated to a \
+                                 crossing Ioc order \u{2014} venue acceptance of IOC on this \
+                                 route is unverified, watch for a rejection",
+                            ),
+                            maker::ExitOrderStep::SubmitIoc { .. } => (
+                                "inventory_exit_ioc_submitted",
+                                "residual retry with a fresh crossing Ioc order \u{2014} venue \
+                                 acceptance of IOC on this route is unverified, watch for a \
+                                 rejection",
+                            ),
+                            maker::ExitOrderStep::HoldAlo => {
+                                unreachable!("Hold never reaches a price submission")
+                            }
+                        };
+                        log_maker_event(MakerLogEvent {
+                            output_format,
+                            symbol,
+                            cycle,
+                            action,
+                            side: exit.side,
+                            level: 0,
+                            price,
+                            price_decimals: cfg.price_decimals,
+                            detail,
+                            exit_kind: Some(exit.kind.as_str()),
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -1142,6 +1449,45 @@ pub(super) async fn maker_cycle(
     })
 }
 
+/// docs/33 known-cost 5 / scope limit: `WindDown` never enters the Alo/Ioc
+/// machine (an A/B arm must converge to flat deterministically, and an Alo
+/// order may never fill), and the whole machine is off by default. Both
+/// cases keep exactly the pre-stage-8 reduce-only Market path.
+/// Resting quotes handed to `plan_cycle`, with the inventory exit's own order
+/// removed.
+///
+/// The exit order is not a quote slot and `plan_cycle` has never known about
+/// exit execution: while an exit is outstanding `desired` is always empty (the
+/// planner suppresses quotes whenever `inventory_exit.is_some()`), so leaving
+/// the exit's entry in would make `reconcile` emit a `Stale` cancel for it
+/// every cycle, racing the exit logic that owns that order's lifecycle.
+///
+/// This also applies to the default-off (Market) exit, whose projection entry
+/// sits at the same sentinel. That is harmless for the same reason — quotes are
+/// suppressed for the whole time such an entry can exist — and
+/// [`planner_inputs_exclude_only_the_exit_footprint`] pins it.
+fn planner_resting(projected: &[RestingQuote]) -> Vec<RestingQuote> {
+    projected
+        .iter()
+        .filter(|quote| quote.level != maker::EXIT_ORDER_LEVEL)
+        .cloned()
+        .collect()
+}
+
+/// Pending quote slots handed to `plan_cycle`, with the inventory exit's own
+/// in-flight place removed. See [`planner_resting`].
+fn planner_pending_slots(places: &[ProjectionPendingPlace]) -> Vec<(OrderSide, u32)> {
+    places
+        .iter()
+        .filter(|place| place.level != maker::EXIT_ORDER_LEVEL)
+        .map(|place| (place.side, place.level))
+        .collect()
+}
+
+fn exit_uses_alo_ioc(kind: maker::ExitKind, cfg: &maker::InventoryExitConfig) -> bool {
+    kind == maker::ExitKind::InventoryTrim && cfg.alo_enabled
+}
+
 fn eligible_quote_qty(resting: &[RestingQuote], mark: f64, band_bps: f64) -> (f64, f64) {
     let band = mark * band_bps / 10_000.0;
     resting
@@ -1154,6 +1500,118 @@ fn eligible_quote_qty(resting: &[RestingQuote], mark: f64, band_bps: f64) -> (f6
             }
             qty
         })
+}
+
+/// docs/33 structural problem #1 (second half): whether the exit's most
+/// recent wire submission (a place or a cancel at `EXIT_ORDER_LEVEL`) has
+/// settled — accepted-and-resting, terminal, or rejected. `false` while
+/// nothing is known (no projection) so a transiently-unavailable projection
+/// can never be misread as "settled".
+///
+/// `inventory_exit_pending` predates this feature and was designed around a
+/// reduce-only Market order, whose accept-ack and resolution are effectively
+/// the same instant. A resting `Alo` order breaks that: it gets acknowledged
+/// (and starts resting) long before it resolves. Scoping "awaiting
+/// confirmation" to just the most recent submission — rather than the whole
+/// exit's lifetime — is what lets the Alo/Ioc state machine run its
+/// per-cycle hold/reprice/upgrade decision on every later cycle instead of
+/// being permanently suppressed after the first submission.
+fn exit_wire_submission_settled(projection: Option<&MakerAccountProjection>) -> bool {
+    match projection {
+        Some(projection) => {
+            !projection
+                .pending_places()
+                .iter()
+                .any(|place| place.level == maker::EXIT_ORDER_LEVEL)
+                && !projection
+                    .pending_cancels()
+                    .iter()
+                    .any(|cancel| cancel.level == maker::EXIT_ORDER_LEVEL)
+        }
+        None => false,
+    }
+}
+
+/// docs/33 structural problem #1: whether the *ordinary* maker book (every
+/// resting quote, pending place, and pending cancel other than the exit's own
+/// `EXIT_ORDER_LEVEL` entries) is clear. Excluding the exit's own footprint is
+/// what stops a resting Alo order from permanently blocking its own future
+/// reprice/upgrade — the original (pre-stage-8) gate required the *entire*
+/// book including the exit's own pending place to be empty, which a
+/// reduce-only Market order (never resting) trivially satisfied but a
+/// resting Alo order never would again.
+fn exit_order_book_clear(projection: Option<&MakerAccountProjection>) -> bool {
+    match projection {
+        Some(projection) => {
+            projection
+                .resting_quotes()
+                .iter()
+                .all(|quote| quote.level == maker::EXIT_ORDER_LEVEL)
+                && projection
+                    .pending_places()
+                    .iter()
+                    .all(|place| place.level == maker::EXIT_ORDER_LEVEL)
+                && projection
+                    .pending_cancels()
+                    .iter()
+                    .all(|cancel| cancel.level == maker::EXIT_ORDER_LEVEL)
+        }
+        None => false,
+    }
+}
+
+/// The exit's own resting order, if the venue currently shows one.
+fn resting_exit_order(projection: Option<&MakerAccountProjection>) -> Option<RestingQuote> {
+    projection?
+        .resting_quotes()
+        .into_iter()
+        .find(|quote| quote.level == maker::EXIT_ORDER_LEVEL)
+}
+
+/// docs/33 structural problem #2: derive this cycle's `ExitPhaseState` for
+/// [`maker::plan_exit_order_step`] from the CLI-local cache and the venue's
+/// authoritative resting-order truth, never from the cache alone.
+///
+/// - Local cache present and in the `Ioc` phase: `Ioc` never rests, so the
+///   venue has nothing to corroborate with — trust the cache (it is the only
+///   record of "already escalated" once the book goes quiet).
+/// - Local cache present and a matching resting order exists: the normal
+///   case, refresh `resting_price` from the venue.
+/// - Local cache present but nothing is resting: the tracked order must have
+///   resolved (filled/rejected) without being observed yet, or the cache is
+///   stale after a recovery. Report untracked so the caller re-evaluates
+///   from scratch rather than trusting a value that no longer corresponds to
+///   anything live.
+/// - No local cache but a resting order exists: rehydration after a
+///   recovery reset discarded the cache. The venue-side order is real, so
+///   assume `Alo` (the only phase that rests) and restart the per-phase
+///   cycle counter — a conservative widening of `alo_max_cycles`'s budget,
+///   never a safety issue.
+fn exit_phase_state_for_cycle(
+    tracking: Option<&InventoryExitOrderTracking>,
+    resting: Option<&RestingQuote>,
+) -> Option<maker::ExitPhaseState> {
+    match (tracking, resting) {
+        (Some(tracking), _) if tracking.phase == maker::ExitPhase::Ioc => {
+            Some(maker::ExitPhaseState {
+                phase: maker::ExitPhase::Ioc,
+                cycles_in_phase: tracking.cycles_in_phase,
+                resting_price: 0.0,
+            })
+        }
+        (Some(tracking), Some(resting)) => Some(maker::ExitPhaseState {
+            phase: tracking.phase,
+            cycles_in_phase: tracking.cycles_in_phase,
+            resting_price: resting.price,
+        }),
+        (Some(_), None) => None,
+        (None, Some(resting)) => Some(maker::ExitPhaseState {
+            phase: maker::ExitPhase::Alo,
+            cycles_in_phase: 0,
+            resting_price: resting.price,
+        }),
+        (None, None) => None,
+    }
 }
 
 #[cfg(test)]
@@ -1603,5 +2061,277 @@ mod tests {
         assert!(exit.starts_with(prefix));
         assert!(quote.len() <= 41, "{quote}");
         assert!(exit.len() <= 41, "{exit}");
+    }
+
+    const TEST_PREFIX: &str = "sxmk-cycletest-";
+
+    fn quote_place(level: u32) -> ProjectionPendingPlace {
+        ProjectionPendingPlace {
+            request_id: "req-1".to_owned(),
+            client_order_id: maker::quote_client_order_id(TEST_PREFIX, 1, OrderSide::Buy, level),
+            side: OrderSide::Buy,
+            price: 100.0,
+            qty: 0.01,
+            level,
+            ref_center: 100.0,
+            cycle: 1,
+        }
+    }
+
+    fn exit_place() -> ProjectionPendingPlace {
+        ProjectionPendingPlace {
+            request_id: "exit-req".to_owned(),
+            client_order_id: maker::exit_client_order_id(TEST_PREFIX, 1),
+            side: OrderSide::Sell,
+            price: 101.0,
+            qty: 0.05,
+            level: maker::EXIT_ORDER_LEVEL,
+            ref_center: 101.0,
+            cycle: 1,
+        }
+    }
+
+    fn observe_open(
+        projection: &mut MakerAccountProjection,
+        place: &ProjectionPendingPlace,
+        order_id: u64,
+    ) {
+        projection.apply(
+            1,
+            AccountProjectionEvent::OrderObserved(maker::OrderObservation {
+                order_id,
+                client_order_id: Some(place.client_order_id.clone()),
+                side: place.side,
+                price: place.price,
+                open_qty: place.qty,
+                terminal: false,
+            }),
+        );
+    }
+
+    /// docs/33 review finding 2: the exit-level filters on `plan_cycle`'s
+    /// inputs are NOT conditioned on `alo_enabled`, so they also apply to the
+    /// default-off Market exit, whose projection entry sits at the same
+    /// sentinel. That is a real (if inert) change to the default-off path —
+    /// inert because quotes are fully suppressed for the entire window such an
+    /// entry can exist — and it was previously unpinned by any test. Pin both
+    /// halves: only the exit footprint is dropped, and the sentinel can never
+    /// alias a real quote slot.
+    #[test]
+    fn planner_inputs_exclude_only_the_exit_footprint() {
+        // The sentinel must be unreachable as a real level, or filtering by it
+        // would silently drop a genuine quote slot.
+        assert_eq!(maker::EXIT_ORDER_LEVEL, u32::MAX - 1);
+
+        let ordinary = quote_place(0);
+        let exit = exit_place();
+        assert_eq!(exit.level, maker::EXIT_ORDER_LEVEL);
+        assert_ne!(ordinary.level, maker::EXIT_ORDER_LEVEL);
+
+        let slots = planner_pending_slots(&[ordinary.clone(), exit.clone()]);
+        assert_eq!(slots, vec![(ordinary.side, ordinary.level)]);
+
+        let as_resting = |place: &ProjectionPendingPlace| RestingQuote {
+            order_id: Some("1".to_owned()),
+            side: place.side,
+            level: place.level,
+            price: place.price,
+            qty: place.qty,
+            ref_center: place.ref_center,
+            placed_at_cycle: place.cycle,
+        };
+        let kept = planner_resting(&[as_resting(&ordinary), as_resting(&exit)]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].level, ordinary.level);
+    }
+
+    /// docs/33 structural problem #1: a resting Alo exit order must not
+    /// permanently block its own management. This proves the gate the
+    /// Alo/Ioc path uses (`exit_order_book_clear`) stays clear with only the
+    /// exit's own resting order present — unlike the original (pre-stage-8)
+    /// `account_clear` gate, which required the *entire* book empty and
+    /// would have wedged forever once an exit order could rest.
+    #[test]
+    fn exit_order_book_clear_ignores_the_exits_own_footprint_but_not_ordinary_quotes() {
+        assert!(
+            !exit_order_book_clear(None),
+            "no projection is not a clear book"
+        );
+
+        let mut projection = MakerAccountProjection::new(1, TEST_PREFIX, 0.0, 0.005, 0.00005);
+        assert!(exit_order_book_clear(Some(&projection)));
+
+        // An ordinary resting quote must still block (the maker book has not
+        // actually cleared).
+        let quote = quote_place(0);
+        projection.apply(1, AccountProjectionEvent::PlaceSubmitted(quote.clone()));
+        observe_open(&mut projection, &quote, 1);
+        assert!(!exit_order_book_clear(Some(&projection)));
+
+        // Replace it with only the exit's own resting order: the gate must
+        // now read clear, precisely the case that used to deadlock.
+        let mut projection = MakerAccountProjection::new(1, TEST_PREFIX, 0.0, 0.005, 0.00005);
+        let exit = exit_place();
+        projection.apply(1, AccountProjectionEvent::PlaceSubmitted(exit.clone()));
+        observe_open(&mut projection, &exit, 2);
+        assert!(
+            exit_order_book_clear(Some(&projection)),
+            "the exit's own resting order must not block its own gate"
+        );
+
+        // An ordinary pending place alongside the resting exit still blocks.
+        let mut still_pending = quote_place(0);
+        still_pending.request_id = "req-2".to_owned();
+        projection.apply(1, AccountProjectionEvent::PlaceSubmitted(still_pending));
+        assert!(!exit_order_book_clear(Some(&projection)));
+    }
+
+    /// docs/33 structural problem #1 (second half): the crux property that
+    /// makes the Alo/Ioc machine able to run at all past its first cycle.
+    /// Without this, `inventory_exit_pending` (set on every submission) would
+    /// keep `exit_awaiting_confirmation` true for as long as the trigger
+    /// holds — i.e. for the entire time the exit is resting — and the exit
+    /// block would never run its hold/reprice/upgrade decision again.
+    #[test]
+    fn exit_wire_submission_settles_once_the_ack_lands_not_when_the_exit_resolves() {
+        assert!(
+            !exit_wire_submission_settled(None),
+            "no projection is never settled"
+        );
+
+        let mut projection = MakerAccountProjection::new(1, TEST_PREFIX, 0.0, 0.005, 0.00005);
+        assert!(
+            exit_wire_submission_settled(Some(&projection)),
+            "nothing outstanding is trivially settled"
+        );
+
+        // Submitted, ack not yet observed: still awaiting confirmation.
+        let exit = exit_place();
+        projection.apply(1, AccountProjectionEvent::PlaceSubmitted(exit.clone()));
+        assert!(!exit_wire_submission_settled(Some(&projection)));
+
+        // The venue shows it resting: settled, even though the exit itself
+        // (the position reduction) has not happened yet — that is exactly
+        // the gap `inventory_exit_pending` alone could not express.
+        observe_open(&mut projection, &exit, 7);
+        assert!(exit_wire_submission_settled(Some(&projection)));
+    }
+
+    #[test]
+    fn resting_exit_order_finds_only_the_exit_level_entry() {
+        let mut projection = MakerAccountProjection::new(1, TEST_PREFIX, 0.0, 0.005, 0.00005);
+        assert_eq!(resting_exit_order(Some(&projection)), None);
+
+        let quote = quote_place(0);
+        projection.apply(1, AccountProjectionEvent::PlaceSubmitted(quote.clone()));
+        observe_open(&mut projection, &quote, 1);
+        assert_eq!(
+            resting_exit_order(Some(&projection)),
+            None,
+            "an ordinary resting quote is not the exit order"
+        );
+
+        let exit = exit_place();
+        projection.apply(1, AccountProjectionEvent::PlaceSubmitted(exit.clone()));
+        observe_open(&mut projection, &exit, 2);
+        let found = resting_exit_order(Some(&projection)).expect("exit order must be found");
+        assert_eq!(found.level, maker::EXIT_ORDER_LEVEL);
+        assert_eq!(found.price, 101.0);
+    }
+
+    #[test]
+    fn exit_phase_state_trusts_the_cache_for_ioc_since_it_never_rests() {
+        let tracking = InventoryExitOrderTracking {
+            phase: maker::ExitPhase::Ioc,
+            cycles_in_phase: 3,
+        };
+        let state = exit_phase_state_for_cycle(Some(&tracking), None)
+            .expect("an Ioc-phase cache must be trusted with no resting order");
+        assert_eq!(state.phase, maker::ExitPhase::Ioc);
+        assert_eq!(state.cycles_in_phase, 3);
+    }
+
+    #[test]
+    fn exit_phase_state_refreshes_resting_price_from_the_venue() {
+        let tracking = InventoryExitOrderTracking {
+            phase: maker::ExitPhase::Alo,
+            cycles_in_phase: 2,
+        };
+        let resting = RestingQuote {
+            order_id: Some("9".to_owned()),
+            side: OrderSide::Sell,
+            level: maker::EXIT_ORDER_LEVEL,
+            price: 103.5,
+            qty: 0.02,
+            ref_center: 103.5,
+            placed_at_cycle: 1,
+        };
+        let state = exit_phase_state_for_cycle(Some(&tracking), Some(&resting)).unwrap();
+        assert_eq!(state.phase, maker::ExitPhase::Alo);
+        assert_eq!(state.cycles_in_phase, 2);
+        assert_eq!(state.resting_price, 103.5);
+    }
+
+    #[test]
+    fn exit_phase_state_drops_a_stale_alo_cache_with_nothing_resting() {
+        let tracking = InventoryExitOrderTracking {
+            phase: maker::ExitPhase::Alo,
+            cycles_in_phase: 5,
+        };
+        assert_eq!(exit_phase_state_for_cycle(Some(&tracking), None), None);
+    }
+
+    /// docs/33 structural problem #2: a recovery reset discards the CLI-local
+    /// cache, but the venue can still show a resting exit order under this
+    /// run's prefix. Rehydration must recover `Alo` from that fact alone,
+    /// not silently open a duplicate order.
+    #[test]
+    fn exit_phase_state_rehydrates_alo_from_a_resting_order_with_no_local_cache() {
+        let resting = RestingQuote {
+            order_id: Some("42".to_owned()),
+            side: OrderSide::Buy,
+            level: maker::EXIT_ORDER_LEVEL,
+            price: 97.0,
+            qty: 0.03,
+            ref_center: 97.0,
+            placed_at_cycle: 10,
+        };
+        let state = exit_phase_state_for_cycle(None, Some(&resting)).unwrap();
+        assert_eq!(state.phase, maker::ExitPhase::Alo);
+        assert_eq!(state.cycles_in_phase, 0, "the per-phase budget restarts");
+        assert_eq!(state.resting_price, 97.0);
+    }
+
+    #[test]
+    fn exit_phase_state_is_untracked_with_no_cache_and_nothing_resting() {
+        assert_eq!(exit_phase_state_for_cycle(None, None), None);
+    }
+
+    /// docs/33 scope limit: `WindDown` must never enter the Alo/Ioc machine,
+    /// regardless of `alo_enabled` — an A/B arm has to converge to flat
+    /// deterministically, and an Alo order may never fill.
+    #[test]
+    fn wind_down_never_uses_alo_ioc_even_when_enabled() {
+        let enabled = maker::InventoryExitConfig {
+            alo_enabled: true,
+            ..maker::InventoryExitConfig::default()
+        };
+        let disabled = maker::InventoryExitConfig::default();
+        assert!(!exit_uses_alo_ioc(maker::ExitKind::WindDown, &enabled));
+        assert!(!exit_uses_alo_ioc(maker::ExitKind::WindDown, &disabled));
+    }
+
+    #[test]
+    fn inventory_trim_uses_alo_ioc_only_when_enabled() {
+        let enabled = maker::InventoryExitConfig {
+            alo_enabled: true,
+            ..maker::InventoryExitConfig::default()
+        };
+        let disabled = maker::InventoryExitConfig::default();
+        assert!(exit_uses_alo_ioc(maker::ExitKind::InventoryTrim, &enabled));
+        assert!(!exit_uses_alo_ioc(
+            maker::ExitKind::InventoryTrim,
+            &disabled
+        ));
     }
 }
