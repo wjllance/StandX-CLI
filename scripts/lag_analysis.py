@@ -240,6 +240,93 @@ def quantile(xs, q):
     return s[lo] + (s[hi] - s[lo]) * (pos - lo)
 
 
+def load_standx_mark_book(path, pair_window_ms=5000):
+    """Pair each StandX `mark` with the most recent `best_bid`/`best_ask`.
+
+    StandX puts `mark` on the `price` channel and `best_bid`/`best_ask` on the
+    `depth_book` channel — separate NDJSON records. Scans all StandX records in
+    time order, keeps the latest book quote, and emits one (t, mark, bid, ask)
+    row for each mark whose most recent book quote is no older than
+    `pair_window_ms`. Returns a list of (t_ms, mark, bid, ask).
+    """
+    rows = []
+    book = None  # (t, best_bid, best_ask); possibly no depth yet
+    with open(path) as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if rec.get("source") != "standx":
+                continue
+            t = rec.get("local_recv_ms")
+            if t is None:
+                continue
+            t = int(t)
+            bid = rec.get("best_bid")
+            ask = rec.get("best_ask")
+            mark = rec.get("mark")
+            if bid is not None and ask is not None:
+                book = (t, float(bid), float(ask))
+                if mark is None:
+                    continue  # pure depth update, nothing to pair yet
+            elif mark is not None:
+                mark = float(mark)
+                if book is not None and t - book[0] <= pair_window_ms:
+                    rows.append((t, mark, book[1], book[2]))
+                # else: mark too stale vs latest book -> skip
+            # else: neither a fresh book nor a mark -> ignore
+    rows.sort(key=lambda r: r[0])
+    return rows
+
+
+def mark_best_spread(rows):
+    """From (t, mark, bid, ask) rows compute mark-vs-book distances (bps).
+
+    For each row: mid=(bid+ask)/2
+      signed  = (mark/mid - 1)*1e4      # mark relative to book mid
+      touch   = min(|mark-bid|, |ask-mark|)/mark*1e4  # to near best quote
+      half    = (ask-bid)/2/mid*1e4      # maker-facing half spread
+    Returns (signed, touch, half) lists of bps.
+    """
+    signed, touch, half = [], [], []
+    for _, mark, bid, ask in rows:
+        if not (mark > 0 and bid > 0 and ask > 0):
+            continue
+        mid = (bid + ask) / 2.0
+        signed.append((mark / mid - 1.0) * 1e4)
+        touch.append(min(abs(mark - bid), abs(ask - mark)) / mark * 1e4)
+        half.append((ask - bid) / 2.0 / mid * 1e4)
+    return signed, touch, half
+
+
+def spread_summary(name, xs, tick_bps=None):
+    """Print quantiles of a bps list plus tick- and 10bps-binned counts."""
+    if not xs:
+        print(f"  {name}: no samples")
+        return
+    print(f"  {name} (n={len(xs)}):")
+    qs = {q: quantile(xs, q) for q in (0.05, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99)}
+    line = "   ".join(f"p{int(q*100)}={v:.1f}bps" for q, v in qs.items())
+    print(f"    min={min(xs):.1f}  max={max(xs):.1f}  mean={mean(xs):.1f}  {line}")
+    if tick_bps:
+        hist = {}
+        for x in xs:
+            tc = int(abs(x) // tick_bps)
+            hist[tc] = hist.get(tc, 0) + 1
+        bars = " ".join(f"{tc}t:{n}" for tc, n in sorted(hist.items()))
+        print(f"    tick histogram ({tick_bps:g}bps/tick): {bars}")
+    bins = {}
+    for x in xs:
+        b = int(abs(x) // 10)
+        bins[b] = bins.get(b, 0) + 1
+    bars = " ".join(f"[{b*10}-{(b+1)*10})bp:{n}" for b, n in sorted(bins.items()))
+    print(f"    10bps bins: {bars}")
+
+
 def fmt_stats(xs):
     return (f"median={median(xs):.0f}ms  "
             f"p25={quantile(xs, 0.25):.0f}ms  "
@@ -265,13 +352,36 @@ def main():
                     help="jump-scan window for the StandX own-feed statistic; "
                          "defaults to 3x --event-window-ms because StandX's mark "
                          "cadence is slower than the leader feed's")
+    ap.add_argument("--tick-bps", type=float, default=None,
+                    help="tick size in bps for the mark-best tick histogram "
+                         "(e.g. HYPE 0.5bp, XAU 1bp). Omit to skip tick binning.")
     args = ap.parse_args()
 
     standx, hyper = load(args.path, args.standx_field, args.leader_field)
     print(f"loaded: standx={len(standx)} (field={args.standx_field}) "
           f"hyperliquid={len(hyper)} (field={args.leader_field}) samples")
+
+    # Section 4 needs only StandX mark+book — run before the both-sources guard
+    # so XAU/XAG (no Hyperliquid leg) still get the denominator analysis.
+    print("\n== 4. StandX mark vs book (mark-best spread denominator) ==")
+    rows = load_standx_mark_book(args.path)
+    if len(rows) < 5:
+        print("  not enough paired mark+book samples; need a longer window.")
+    else:
+        n = len(rows)
+        print(f"  paired mark+book rows: {n} "
+              "(mark sampled against a book quote paired from the depth channel)")
+        signed, touch, half = mark_best_spread(rows)
+        spread_summary("  signed mark-vs-mid anchor (bps, + = mark above mid)",
+                       signed, tick_bps=args.tick_bps)
+        spread_summary("  distance mark -> near best quote (bps)",
+                       touch, tick_bps=args.tick_bps)
+        spread_summary("  maker-facing half spread (bps)",
+                       half, tick_bps=args.tick_bps)
+
     if len(standx) < 5 or len(hyper) < 5:
-        print("not enough samples on both sources; record a longer window.")
+        print("\nnot enough samples on both sources for cross-venue lag; "
+              "record a longer window.")
         return
     span_s = (min(standx[-1][0], hyper[-1][0]) - max(standx[0][0], hyper[0][0])) / 1000.0
     print(f"overlapping span: {span_s:.1f}s")
