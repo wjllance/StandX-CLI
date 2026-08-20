@@ -1,15 +1,19 @@
 # Stage 3 v1 + external_guard + external_skew + microprice A/B, HYPE-USD.
 # Baseline: nonlinear + external_guard + external_skew, NO microprice.
 # Candidate: same baseline + [microprice] enabled.
-# Band widened to 40bps to accommodate microprice cap=6.
-# Band budget: spread(8) + nonlinear.cap(12) + external.cap(8) = 28 <= 40  (baseline)
-#             spread(8) + nonlinear.cap(12) + external.cap(8) + micro.cap(6) = 34 <= 40  (candidate)
+# Band kept at 30bps (owner decision 2026-08-19): docs/30 made ±10bp two-sided
+# in-band uptime a CONSTRAINT, and widening the strategy's own cancel band moves
+# the wrong way. The band is deliberately allowed to bind.
+# Band budget: spread(8) + nonlinear.cap(12) + external.cap(8) = 28 <= 30  (baseline)
+#             spread(8) + nonlinear.cap(12) + external.cap(8) + micro.cap(6) = 34 > 30 (candidate)
+#             -> on fully stacked shifts the candidate arm's center offset IS
+#                clamped to the band edge. That truncation is accepted, not a bug.
 #
 # Safety: microprice is fail-open (missing signal -> shift=0, quoting continues).
 # Guardrails: capture drop >1bps, cancel rate +50%, position p95 up, uptime -2pp.
 
 spread_bps = 8.0
-band_bps = 40.0
+band_bps = 30.0
 size = 0.1
 levels = 1
 level_step_bps = 2.0
@@ -88,7 +92,7 @@ dead_zone_bps = 1.0
 
 # ─── Field-side mid-bias microprice shift (docs/31) ───
 # Aggressive start: cap=6, lambda=0.5, dead_zone=0.5.
-# Band widened to 40 to accommodate the larger shift range.
+# Band stays at 30, so a fully stacked shift is clamped to the band edge.
 # Fail-open: signal missing/non-finite -> shift=0.
 [microprice]
 enabled = true

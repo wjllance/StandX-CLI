@@ -1,4 +1,4 @@
-use super::feed::WsSnapshotDiagnostics;
+use super::feed::{MarketTelemetrySnapshot, WsSnapshotDiagnostics};
 use super::model::{optional_decimal, Decimal};
 use super::*;
 use standx_maker::{self as maker, Action, MakerConfig, MakerStats};
@@ -237,6 +237,8 @@ pub(super) struct CycleOutput<'a> {
     pub(super) market_source: &'static str,
     pub(super) market_fallback_reason: Option<&'static str>,
     pub(super) ws_snapshot: Option<&'a WsSnapshotDiagnostics>,
+    pub(super) market_telemetry: &'a MarketTelemetrySnapshot,
+    pub(super) quote_geometry: &'a [maker::QuoteGeometry],
     pub(super) position: f64,
     pub(super) starting_position: f64,
     pub(super) account: Option<&'a Balance>,
@@ -276,6 +278,8 @@ pub(super) fn emit_maker_cycle(output: CycleOutput<'_>) {
         market_source,
         market_fallback_reason,
         ws_snapshot,
+        market_telemetry,
+        quote_geometry,
         position,
         starting_position,
         account,
@@ -378,42 +382,52 @@ pub(super) fn emit_maker_cycle(output: CycleOutput<'_>) {
             }
             println!(
                 "{}",
-                with_exit_fields(
-                    with_guard_fields(
-                        with_size_skew_fields(
-                            with_spread_fields(
-                                serde_json::json!({
-                                    "ts": ts, "cycle": cycle, "mode": mode, "symbol": symbol,
-                                    "action": "cycle_summary",
-                                    "mark": format_decimals(mark, cfg.price_decimals),
-                                    "best_bid": best_bid, "best_ask": best_ask,
-                                    "market_source": market_source,
-                                    "market_fallback_reason": market_fallback_reason,
-                                    "ws_snapshot": ws_snapshot.map(ws_snapshot_json),
-                                    "position": position,
-                                    "starting_position": starting_position,
-                                    "account": account.map(account_json),
-                                    "holds": holds, "places": places, "cancels": cancels,
-                                    "fills": fills.len(),
-                                    "pnl": (pnl * 1e6).round() / 1e6,
-                                    "fills_total": stats.fills(),
-                                    "uptime_pct": (stats.uptime_pct() * 10.0).round() / 10.0,
-                                    "avg_capture_bps": (stats.avg_spread_capture_bps() * 100.0).round() / 100.0,
-                                    "performance": performance.map(performance_json),
-                                    "halted": halt_vol_bps.is_some(),
-                                    "vol_bps": halt_vol_bps.map(|v| (v * 100.0).round() / 100.0),
-                                }),
-                                spread_decision,
+                with_geometry_fields(
+                    with_book_fields(
+                        with_exit_fields(
+                            with_guard_fields(
+                                with_size_skew_fields(
+                                    with_spread_fields(
+                                        serde_json::json!({
+                                        "ts": ts, "cycle": cycle, "mode": mode, "symbol": symbol,
+                                        "action": "cycle_summary",
+                                        "mark": format_decimals(mark, cfg.price_decimals),
+                                        "best_bid": best_bid, "best_ask": best_ask,
+                                        "market_source": market_source,
+                                        "market_fallback_reason": market_fallback_reason,
+                                        "ws_snapshot": ws_snapshot.map(ws_snapshot_json),
+                                        "position": position,
+                                        "starting_position": starting_position,
+                                        "account": account.map(account_json),
+                                        "holds": holds, "places": places, "cancels": cancels,
+                                        "fills": fills.len(),
+                                        "pnl": (pnl * 1e6).round() / 1e6,
+                                        "fills_total": stats.fills(),
+                                        "uptime_pct": (stats.uptime_pct() * 10.0).round() / 10.0,
+                                        "avg_capture_bps": (stats.avg_spread_capture_bps() * 100.0).round() / 100.0,
+                                        "performance": performance.map(performance_json),
+                                        "halted": halt_vol_bps.is_some(),
+                                        "vol_bps": halt_vol_bps.map(|v| (v * 100.0).round() / 100.0),
+                                            }),
+                                        spread_decision,
+                                    ),
+                                    size_skew_decision,
+                                ),
+                                guard_decision,
+                                external_basis_bps,
+                                external_skew_shift_bps,
+                                micro_price_shift_bps,
+                                skew_shift_bps,
                             ),
-                            size_skew_decision,
+                            exit_status,
                         ),
-                        guard_decision,
-                        external_basis_bps,
-                        external_skew_shift_bps,
-                        micro_price_shift_bps,
-                        skew_shift_bps,
+                        market_telemetry,
+                        mark,
+                        best_bid,
+                        best_ask,
                     ),
-                    exit_status,
+                    quote_geometry,
+                    mark,
                 )
             );
         }
@@ -544,6 +558,123 @@ pub(super) fn emit_maker_cycle(output: CycleOutput<'_>) {
             }
         }
     }
+}
+
+/// Additive Part-A fields. The bounded source snapshot is observation-only;
+/// calculations here cannot feed back into planning, guards, or reconciliation.
+fn with_book_fields(
+    mut summary: serde_json::Value,
+    telemetry: &MarketTelemetrySnapshot,
+    mark: f64,
+    best_bid: Option<f64>,
+    best_ask: Option<f64>,
+) -> serde_json::Value {
+    let bid_qty_top = telemetry
+        .book
+        .bid_levels
+        .as_ref()
+        .and_then(|levels| levels.first())
+        .filter(|(price, _)| best_bid == Some(*price))
+        .map(|(_, qty)| *qty);
+    let ask_qty_top = telemetry
+        .book
+        .ask_levels
+        .as_ref()
+        .and_then(|levels| levels.first())
+        .filter(|(price, _)| best_ask == Some(*price))
+        .map(|(_, qty)| *qty);
+    let spread_bps = best_bid
+        .zip(best_ask)
+        .filter(|_| mark.is_finite() && mark > 0.0)
+        .and_then(|(bid, ask)| {
+            let spread = (ask - bid) / mark * 1e4;
+            spread.is_finite().then_some(spread)
+        });
+    let mark_mid_divergence_bps = best_bid
+        .zip(best_ask)
+        .filter(|_| mark.is_finite() && mark > 0.0)
+        .and_then(|(bid, ask)| {
+            let divergence = maker::mark_mid_divergence_bps(mark, bid, ask);
+            divergence.is_finite().then_some(divergence)
+        });
+    let object = summary
+        .as_object_mut()
+        .expect("cycle summary JSON must be an object");
+    object.insert(
+        "book".to_string(),
+        serde_json::json!({
+            "bid_levels": telemetry.book.bid_levels,
+            "ask_levels": telemetry.book.ask_levels,
+            "bid_qty_top": bid_qty_top,
+            "ask_qty_top": ask_qty_top,
+            "spread_bps": spread_bps,
+            "mark_mid_divergence_bps": mark_mid_divergence_bps,
+            "age_ms": telemetry.book.age_ms,
+        }),
+    );
+    object.insert(
+        "tape".to_string(),
+        serde_json::json!({
+            "count_5s": telemetry.tape.count_5s,
+            "buy_qty_5s": telemetry.tape.buy_qty_5s,
+            "sell_qty_5s": telemetry.tape.sell_qty_5s,
+            "unknown_qty_5s": telemetry.tape.unknown_qty_5s,
+            "last_trade_age_ms": telemetry.tape.last_trade_age_ms,
+        }),
+    );
+    summary
+}
+
+/// Additive Part-B quote-geometry diagnostics. These values are produced by
+/// the pure planner and are never fed back into quote or safety decisions.
+fn with_geometry_fields(
+    mut summary: serde_json::Value,
+    geometry: &[maker::QuoteGeometry],
+    mark: f64,
+) -> serde_json::Value {
+    let min_distance_to_touch_bps = geometry
+        .iter()
+        .filter_map(|quote| quote.distance_to_touch_bps)
+        .filter(|distance| distance.is_finite())
+        .reduce(f64::min);
+    let count = |outcome| {
+        geometry
+            .iter()
+            .filter(|quote| quote.outcome == outcome)
+            .count()
+    };
+    let quotes: Vec<_> = geometry
+        .iter()
+        .map(|quote| {
+            let raw_bps = maker::side_distance_to_mark_bps(quote.side, quote.raw_price, mark);
+            let final_bps = quote
+                .final_price
+                .map(|price| maker::side_distance_to_mark_bps(quote.side, price, mark));
+            serde_json::json!({
+                "side": quote.side,
+                "level": quote.level,
+                "outcome": quote.outcome.as_str(),
+                "raw_bps": raw_bps,
+                "final_bps": final_bps,
+                "dist_touch_bps": quote.distance_to_touch_bps,
+                "band_edge_bps": quote.band_edge_bps,
+            })
+        })
+        .collect();
+    let object = summary
+        .as_object_mut()
+        .expect("cycle summary JSON must be an object");
+    object.insert(
+        "geometry".to_string(),
+        serde_json::json!({
+            "min_distance_to_touch_bps": min_distance_to_touch_bps,
+            "clamped_to_touch": count(maker::QuoteGeometryOutcome::ClampedToTouch),
+            "clamped_to_band": count(maker::QuoteGeometryOutcome::ClampedToBand),
+            "dropped_infeasible": count(maker::QuoteGeometryOutcome::DroppedInfeasible),
+            "quotes": quotes,
+        }),
+    );
+    summary
 }
 
 /// Stage 5-b exit fields, additive and top-level like the other wrappers.
@@ -1543,6 +1674,149 @@ mod tests {
         assert_eq!(json["adaptive_spread_tier"], 2);
         assert_eq!(json["effective_spread_bps"], 18.0);
         assert_eq!(json["effective_refresh_bps"], 6.0);
+    }
+
+    #[test]
+    fn cycle_summary_book_and_tape_fields_are_additive_and_top_level() {
+        let base = serde_json::json!({
+            "action": "cycle_summary",
+            "vol_bps": null,
+            "best_bid": 99.9,
+            "best_ask": 100.1,
+        });
+        let original = base.clone();
+        let telemetry = MarketTelemetrySnapshot {
+            book: super::super::feed::BookTelemetrySnapshot {
+                bid_levels: Some(vec![(99.9, 2.0), (99.8, 3.0)]),
+                ask_levels: Some(vec![(100.1, 4.0), (100.2, 5.0)]),
+                age_ms: Some(125),
+            },
+            tape: super::super::feed::TapeTelemetrySnapshot {
+                count_5s: 3,
+                buy_qty_5s: 1.25,
+                sell_qty_5s: 2.5,
+                unknown_qty_5s: 0.75,
+                last_trade_age_ms: Some(50),
+            },
+        };
+
+        let json = with_book_fields(base, &telemetry, 100.0, Some(99.9), Some(100.1));
+
+        for (key, value) in original.as_object().unwrap() {
+            assert_eq!(&json[key], value, "existing field changed: {key}");
+        }
+        assert_eq!(
+            json.as_object().unwrap().len(),
+            original.as_object().unwrap().len() + 2
+        );
+        assert_eq!(
+            json["book"]["bid_levels"][0],
+            serde_json::json!([99.9, 2.0])
+        );
+        assert_eq!(
+            json["book"]["ask_levels"][0],
+            serde_json::json!([100.1, 4.0])
+        );
+        assert_eq!(json["book"]["bid_qty_top"], 2.0);
+        assert_eq!(json["book"]["ask_qty_top"], 4.0);
+        assert!((json["book"]["spread_bps"].as_f64().unwrap() - 20.0).abs() < 1e-9);
+        assert_eq!(json["book"]["mark_mid_divergence_bps"], 0.0);
+        assert_eq!(json["book"]["age_ms"], 125);
+        assert_eq!(json["tape"]["count_5s"], 3);
+        assert_eq!(json["tape"]["buy_qty_5s"], 1.25);
+        assert_eq!(json["tape"]["sell_qty_5s"], 2.5);
+        assert_eq!(json["tape"]["unknown_qty_5s"], 0.75);
+        assert_eq!(json["tape"]["last_trade_age_ms"], 50);
+        assert!(json.get("bid_levels").is_none());
+        assert!(json.get("count_5s").is_none());
+    }
+
+    #[test]
+    fn cycle_summary_book_and_tape_observation_gaps_are_null_or_zero() {
+        let json = with_book_fields(
+            serde_json::json!({"action": "cycle_summary"}),
+            &MarketTelemetrySnapshot::default(),
+            100.0,
+            None,
+            None,
+        );
+
+        assert!(json["book"]["bid_levels"].is_null());
+        assert!(json["book"]["ask_levels"].is_null());
+        assert!(json["book"]["bid_qty_top"].is_null());
+        assert!(json["book"]["ask_qty_top"].is_null());
+        assert!(json["book"]["spread_bps"].is_null());
+        assert!(json["book"]["mark_mid_divergence_bps"].is_null());
+        assert!(json["book"]["age_ms"].is_null());
+        assert_eq!(json["tape"]["count_5s"], 0);
+        assert_eq!(json["tape"]["unknown_qty_5s"], 0.0);
+        assert!(json["tape"]["last_trade_age_ms"].is_null());
+    }
+
+    #[test]
+    fn cycle_summary_geometry_fields_are_additive_and_top_level() {
+        let base = serde_json::json!({
+            "action": "cycle_summary",
+            "places": 1,
+            "best_ask": 100.0,
+        });
+        let original = base.clone();
+        let geometry = vec![
+            maker::QuoteGeometry {
+                side: OrderSide::Buy,
+                level: 0,
+                raw_price: 99.9,
+                final_price: Some(99.99),
+                outcome: maker::QuoteGeometryOutcome::ClampedToTouch,
+                distance_to_touch_bps: Some(1.0),
+                band_edge_bps: 20.0,
+            },
+            maker::QuoteGeometry {
+                side: OrderSide::Sell,
+                level: 0,
+                raw_price: 100.3,
+                final_price: Some(100.2),
+                outcome: maker::QuoteGeometryOutcome::ClampedToBand,
+                distance_to_touch_bps: Some(21.0),
+                band_edge_bps: 20.0,
+            },
+            maker::QuoteGeometry {
+                side: OrderSide::Buy,
+                level: 1,
+                raw_price: 99.8,
+                final_price: None,
+                outcome: maker::QuoteGeometryOutcome::DroppedInfeasible,
+                distance_to_touch_bps: None,
+                band_edge_bps: 20.0,
+            },
+        ];
+
+        let json = with_geometry_fields(base, &geometry, 100.0);
+
+        for (key, value) in original.as_object().unwrap() {
+            assert_eq!(&json[key], value, "existing field changed: {key}");
+        }
+        assert_eq!(
+            json.as_object().unwrap().len(),
+            original.as_object().unwrap().len() + 1
+        );
+        assert_eq!(json["geometry"]["min_distance_to_touch_bps"], 1.0);
+        assert_eq!(json["geometry"]["clamped_to_touch"], 1);
+        assert_eq!(json["geometry"]["clamped_to_band"], 1);
+        assert_eq!(json["geometry"]["dropped_infeasible"], 1);
+        assert_eq!(json["geometry"]["quotes"].as_array().unwrap().len(), 3);
+        assert_eq!(json["geometry"]["quotes"][0]["side"], "buy");
+        assert_eq!(json["geometry"]["quotes"][0]["outcome"], "clamped_to_touch");
+        assert!((json["geometry"]["quotes"][0]["raw_bps"].as_f64().unwrap() - 10.0).abs() < 1e-9);
+        assert!((json["geometry"]["quotes"][0]["final_bps"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+        assert_eq!(json["geometry"]["quotes"][0]["dist_touch_bps"], 1.0);
+        assert_eq!(json["geometry"]["quotes"][0]["band_edge_bps"], 20.0);
+        // Dropped slots still carry the band edge; only the fill-risk distance
+        // is unknowable without a resting price.
+        assert_eq!(json["geometry"]["quotes"][2]["band_edge_bps"], 20.0);
+        assert!(json["geometry"]["quotes"][2]["dist_touch_bps"].is_null());
+        assert!(json.get("clamped_to_touch").is_none());
+        assert!(json.get("quotes").is_none());
     }
 
     #[test]

@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 use crate::models::*;
 use futures_util::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{mpsc, RwLock};
@@ -118,6 +119,7 @@ pub struct StandXWebSocket {
     #[allow(dead_code)]
     symbol: Option<String>,
     verbose: bool,
+    public_trade_raw_sample_budget: Option<Arc<AtomicUsize>>,
 }
 
 impl StandXWebSocket {
@@ -161,6 +163,7 @@ impl StandXWebSocket {
             channel: String::new(),
             symbol: None,
             verbose,
+            public_trade_raw_sample_budget: None,
         })
     }
 
@@ -197,6 +200,7 @@ impl StandXWebSocket {
             channel: String::new(),
             symbol: None,
             verbose,
+            public_trade_raw_sample_budget: None,
         })
     }
 
@@ -225,7 +229,16 @@ impl StandXWebSocket {
             channel: String::new(),
             symbol: None,
             verbose: false,
+            public_trade_raw_sample_budget: None,
         })
+    }
+
+    /// Opt into a process-shared, bounded stderr sample of exact
+    /// `public_trade` frames. Parsing and typed trade delivery remain
+    /// unchanged; exhausting the budget simply disables further samples.
+    pub fn with_public_trade_raw_sample_budget(mut self, budget: Arc<AtomicUsize>) -> Self {
+        self.public_trade_raw_sample_budget = Some(budget);
+        self
     }
 
     /// Connect and start the WebSocket client
@@ -245,12 +258,22 @@ impl StandXWebSocket {
         let subscriptions = self.subscriptions.clone();
         let reconnect_attempts = self.reconnect_attempts.clone();
         let verbose = self.verbose;
+        let public_trade_raw_sample_budget = self.public_trade_raw_sample_budget.clone();
 
         let handle = tokio::spawn(async move {
             loop {
                 *state.write().await = WsState::Connecting;
 
-                match connect_and_run(&url, token.as_deref(), &subscriptions, &tx, verbose).await {
+                match connect_and_run(
+                    &url,
+                    token.as_deref(),
+                    &subscriptions,
+                    &tx,
+                    verbose,
+                    public_trade_raw_sample_budget.as_deref(),
+                )
+                .await
+                {
                     Ok(_) => {
                         *reconnect_attempts.write().await = 0;
                     }
@@ -323,6 +346,7 @@ async fn connect_and_run(
     subscriptions: &Arc<RwLock<Vec<String>>>,
     message_tx: &mpsc::Sender<WsMessage>,
     verbose: bool,
+    public_trade_raw_sample_budget: Option<&AtomicUsize>,
 ) -> Result<()> {
     let ws_url = url.to_string();
     if verbose {
@@ -500,6 +524,10 @@ async fn connect_and_run(
                                     }
                                 }
                                 "public_trade" => {
+                                    if take_public_trade_raw_sample(public_trade_raw_sample_budget)
+                                    {
+                                        eprintln!("public_trade raw sample: {text}");
+                                    }
                                     if let Ok(trade) =
                                         serde_json::from_value::<Trade>(data["data"].clone())
                                     {
@@ -598,6 +626,16 @@ async fn connect_and_run(
     Ok(())
 }
 
+fn take_public_trade_raw_sample(budget: Option<&AtomicUsize>) -> bool {
+    budget.is_some_and(|budget| {
+        budget
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,6 +643,18 @@ mod tests {
     #[test]
     fn test_ws_state() {
         assert_ne!(WsState::Connected, WsState::Disconnected);
+    }
+
+    #[test]
+    fn public_trade_raw_sample_budget_is_exact_and_bounded() {
+        let budget = AtomicUsize::new(50);
+
+        for _ in 0..50 {
+            assert!(take_public_trade_raw_sample(Some(&budget)));
+        }
+        assert!(!take_public_trade_raw_sample(Some(&budget)));
+        assert!(!take_public_trade_raw_sample(None));
+        assert_eq!(budget.load(Ordering::Relaxed), 0);
     }
 
     #[test]

@@ -41,6 +41,7 @@
 | 阶段 5-b：退出与账户风险 | implemented | typed trim/wind-down、残余仓位交接和默认关闭的账户硬熔断已落地 |
 | cleanup 残余判定硬化 | completed | WS 终态 success 优先、按单 REST status 兜底，未确认时继续 fail-closed |
 | `external_skew` | implemented, pending verdict | 默认关闭、关闭时等价；候选尚未获得 accepted 判定 |
+| `micro_price` | accepted（方向）/ 幅度未判 | A/B 于 2026-08-19 判 accepted 并提为默认基线配置（`52b0bea`）；判定成立于 band=40，band=30 下偏移会被 clamp 截断，**效果量需新窗口重测**（见 [30](30-maker-uptime-band-tightening-design.md)） |
 
 历史设计、运行手册与判定链见
 [2026-07 Maker 归档](archive/2026-07-maker/)。归档中的精确授权文本只证明当时获准的
@@ -83,7 +84,9 @@ symbol、敞口、配置和时间窗，不能复用于新的 live 运行。
    [29-maker-external-skew-design.md](29-maker-external-skew-design.md) 的冻结单候选和预注册
    判据，并重新记录授权；未裁决前保持默认关闭。
 
-盘口/流特征数据未积累到足够窗口前，不启动 microprice、OFI 或新的自动暂停机制。
+盘口/流特征数据未积累到足够窗口前，不启动 OFI 或新的自动暂停机制。microprice 已实现
+并于 2026-08-19 判 accepted（方向），但其幅度在当前 band=30 下未判；纯观测遥测见
+[32](32-maker-observation-telemetry-design.md)。
 
 ## 长期不变量
 

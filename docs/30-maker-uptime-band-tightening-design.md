@@ -49,6 +49,39 @@ band clamp）回放各参数组合，统计双边带内占比。模型校准：�
 关键读数：先动 band 收益最小（49%）且先推高撤单；spread 是最大杠杆且撤单
 不变；三步叠加恰好落在目标线上，撤单 +58%。
 
+## 变更记录：band 回到 30（2026-08-19）
+
+microprice A/B 判定 accepted 后（`52b0bea`，P(delta>0)=93.3%），被提为新默认基线的
+配置带着 `band_bps = 40.0` 进入 `examples/maker-microprice-hype-baseline.toml`——
+band 之所以被放宽到 40，是为了让 `spread(8) + nonlinear.cap(12) + external.cap(8)
++ micro.cap(6) = 34` 的叠加偏移永不触碰 band clamp（原配置注释）。
+
+那与本文的约束方向相反：本文自 2026-08-04 起把 ±10bp 双边带内 uptime 定为**约束
+条件**，根因 #1 正是「band 是场馆合格带的 3 倍」，分阶段方案是 30→12。放到 40 等于
+把策略自有撤单带放到场馆带的 4 倍。
+
+**owner 裁决 2026-08-19：band 改回 30.0**，作为本文分阶段方案的起点状态恢复。
+后果已写进配置注释：candidate 侧叠加偏移上限 34 > 30，**band clamp 会真的绑定并
+截断中心偏移**，这是接受的代价，不是 bug。
+
+副作用与边界：
+
+- 该配置改动构成新的变更点；按下节规则，下一轮开跑即新窗口，manifest 需记录
+  UTC 时间戳与新的配置 sha256，不与 band=40 期间的读数拼接判读。
+- `examples/maker-microprice-hype-baseline.arch-20260819.toml` 保持 `band_bps = 40.0`
+  不动——它是 pre-microprice 基线的**归档快照**，记录当时的实际配置。
+- `docs/handoff-microprice-ab-2026-08-13.md` 的参数表（band 40/40）同样保持不动：
+  那是已判定实验的**运行记录**，改写会伪造当时真实跑的参数。
+**owner 裁决 2026-08-19（续）：接受「机制方向已判定、幅度需重测」。**
+`52b0bea` 的 accepted 判定（P(delta>0)=93.3%）成立于 band=40、叠加偏移永不被截断的
+条件下；band=30 下 microprice 的有效偏移在叠加态会被 band clamp 削掉，因此该判定
+只结转**方向**，不结转**效果量**。band=30 下的幅度需要新窗口重测，且重测前不得
+把 +0.72bps 之类的读数用于任何规模或收益推断。
+
+- band 从 40 回到 30 会同时改变 clamp 行为，因此
+  [32-maker-observation-telemetry-design.md](32-maker-observation-telemetry-design.md)
+  的 `ClampedToBand` / `ClampedToTouch` 计数在两个 band 设定下不可直接比较。
+
 ## 分阶段方案（每步单行配置变更）
 
 每步变更 `maker-external-skew-hype-candidate.toml` 的**一行**，其余配置（含全部

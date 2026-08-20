@@ -1,4 +1,4 @@
-use super::feed::WsSnapshotDiagnostics;
+use super::feed::{MarketTelemetrySnapshot, WsSnapshotDiagnostics};
 use super::{ORDER_HISTORY_LIMIT, TRADE_LOOKBACK_LIMIT};
 use crate::cli::OutputFormat;
 use anyhow::Result;
@@ -140,6 +140,9 @@ pub(super) struct CycleRequest<'a> {
     /// Observation-only metadata from the public WS cache. This never feeds
     /// strategy, safety, or source-selection decisions.
     pub(super) ws_snapshot: Option<&'a WsSnapshotDiagnostics>,
+    /// Observation-only bounded book/tape snapshot. It is consumed solely by
+    /// cycle-summary rendering and never by maker planning or safety logic.
+    pub(super) market_telemetry: &'a MarketTelemetrySnapshot,
     pub(super) max_divergence_bps: f64,
     pub(super) inventory_exit_pct: f64,
     pub(super) inventory_exit_qty: f64,

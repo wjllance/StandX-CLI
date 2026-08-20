@@ -1,7 +1,10 @@
 use super::model::{optional_decimal, Decimal};
 use anyhow::Result;
 use standx_sdk::client::StandXClient;
+use standx_sdk::models::{OrderBook, Trade};
 use standx_sdk::websocket::{StandXWebSocket, WsMarketUpdate, WsMessage};
+use std::collections::VecDeque;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{watch, RwLock};
@@ -16,6 +19,191 @@ pub(super) struct FeedState {
     best_ask: Option<f64>,
     book_meta: Option<FeedMeta>,
     reconnect_issue: Option<WsSnapshotIssue>,
+}
+
+const BOOK_LEVEL_CAPACITY: usize = 5;
+const TRADE_TAPE_CAPACITY: usize = 256;
+const TRADE_TAPE_WINDOW: Duration = Duration::from_secs(5);
+const PUBLIC_TRADE_RAW_SAMPLE_LIMIT: usize = 50;
+
+/// Observation-only book depth and public trades. This deliberately has a
+/// different lock from [`FeedState`]: public trades may arrive much more often
+/// than maker cycles read the mark/touch cache, and telemetry must not contend
+/// with that decision-critical read path.
+pub(super) struct MarketTelemetry {
+    origin: Instant,
+    book: Option<BookObservation>,
+    tape: VecDeque<TradeObservation>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct BookObservation {
+    bid_levels: Vec<(f64, f64)>,
+    ask_levels: Vec<(f64, f64)>,
+    local_recv_ms: u64,
+    received_at: Instant,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TradeObservation {
+    local_recv_ms: u64,
+    id: u64,
+    price: f64,
+    qty: f64,
+    side: Option<String>,
+    is_taker: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct BookTelemetrySnapshot {
+    pub(super) bid_levels: Option<Vec<(f64, f64)>>,
+    pub(super) ask_levels: Option<Vec<(f64, f64)>>,
+    pub(super) age_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct TapeTelemetrySnapshot {
+    pub(super) count_5s: usize,
+    pub(super) buy_qty_5s: f64,
+    pub(super) sell_qty_5s: f64,
+    pub(super) unknown_qty_5s: f64,
+    pub(super) last_trade_age_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct MarketTelemetrySnapshot {
+    pub(super) book: BookTelemetrySnapshot,
+    pub(super) tape: TapeTelemetrySnapshot,
+}
+
+impl Default for MarketTelemetry {
+    fn default() -> Self {
+        Self::new(Instant::now())
+    }
+}
+
+impl MarketTelemetry {
+    fn new(origin: Instant) -> Self {
+        Self {
+            origin,
+            book: None,
+            tape: VecDeque::with_capacity(TRADE_TAPE_CAPACITY),
+        }
+    }
+
+    fn local_recv_ms(&self, received_at: Instant) -> u64 {
+        duration_millis(received_at.saturating_duration_since(self.origin))
+    }
+
+    fn observe_book(&mut self, book: &OrderBook, received_at: Instant) {
+        self.book = Some(BookObservation {
+            bid_levels: parse_depth_levels(&book.bids, true),
+            ask_levels: parse_depth_levels(&book.asks, false),
+            local_recv_ms: self.local_recv_ms(received_at),
+            received_at,
+        });
+    }
+
+    fn clear(&mut self) {
+        self.book = None;
+        self.tape.clear();
+    }
+
+    fn clear_book(&mut self) {
+        self.book = None;
+    }
+
+    fn observe_trade(&mut self, trade: &Trade, received_at: Instant) {
+        let (Some(price), Some(qty)) = (
+            optional_decimal(&trade.price, Decimal::Positive),
+            optional_decimal(&trade.qty, Decimal::Positive),
+        ) else {
+            return;
+        };
+        let local_recv_ms = self.tape.back().map_or_else(
+            || self.local_recv_ms(received_at),
+            |last| last.local_recv_ms.max(self.local_recv_ms(received_at)),
+        );
+        if self.tape.len() == TRADE_TAPE_CAPACITY {
+            self.tape.pop_front();
+        }
+        self.tape.push_back(TradeObservation {
+            local_recv_ms,
+            id: trade.id,
+            price,
+            qty,
+            side: trade.side.clone(),
+            is_taker: trade.is_buyer_taker,
+        });
+    }
+
+    pub(super) fn snapshot(
+        &self,
+        now: Instant,
+        expected_book_received_at: Option<Instant>,
+    ) -> MarketTelemetrySnapshot {
+        let now_ms = self.local_recv_ms(now);
+        let book = self
+            .book
+            .as_ref()
+            .filter(|book| expected_book_received_at == Some(book.received_at))
+            .map_or_else(BookTelemetrySnapshot::default, |book| {
+                BookTelemetrySnapshot {
+                    bid_levels: (!book.bid_levels.is_empty()).then(|| book.bid_levels.clone()),
+                    ask_levels: (!book.ask_levels.is_empty()).then(|| book.ask_levels.clone()),
+                    age_ms: Some(now_ms.saturating_sub(book.local_recv_ms)),
+                }
+            });
+        let mut tape = TapeTelemetrySnapshot {
+            last_trade_age_ms: self
+                .tape
+                .back()
+                .map(|trade| now_ms.saturating_sub(trade.local_recv_ms)),
+            ..TapeTelemetrySnapshot::default()
+        };
+        let window_ms = duration_millis(TRADE_TAPE_WINDOW);
+        for trade in self
+            .tape
+            .iter()
+            .filter(|trade| now_ms.saturating_sub(trade.local_recv_ms) <= window_ms)
+        {
+            tape.count_5s += 1;
+            match trade.side.as_deref().map(str::trim) {
+                Some(side) if side.eq_ignore_ascii_case("buy") => {
+                    tape.buy_qty_5s += trade.qty;
+                }
+                Some(side) if side.eq_ignore_ascii_case("sell") => {
+                    tape.sell_qty_5s += trade.qty;
+                }
+                _ => {
+                    // `is_buyer_taker` has a serde default. It is retained in
+                    // the tape but never used to invent a missing side.
+                    tape.unknown_qty_5s += trade.qty;
+                }
+            }
+        }
+        MarketTelemetrySnapshot { book, tape }
+    }
+}
+
+fn parse_depth_levels(levels: &[[String; 2]], bids: bool) -> Vec<(f64, f64)> {
+    let mut parsed: Vec<_> = levels
+        .iter()
+        .filter_map(|level| {
+            let price = optional_decimal(&level[0], Decimal::Positive)?;
+            let qty = optional_decimal(&level[1], Decimal::Positive)?;
+            Some((price, qty))
+        })
+        .collect();
+    parsed.sort_by(|left, right| {
+        if bids {
+            right.0.total_cmp(&left.0)
+        } else {
+            left.0.total_cmp(&right.0)
+        }
+    });
+    parsed.truncate(BOOK_LEVEL_CAPACITY);
+    parsed
 }
 
 #[derive(Clone)]
@@ -53,6 +241,10 @@ pub(super) struct AcquiredMarketSnapshot {
     pub(super) source: &'static str,
     pub(super) fallback_reason: Option<&'static str>,
     pub(super) ws_snapshot: Option<WsSnapshotDiagnostics>,
+    /// Exact WS book-cache version used for this acquisition. Observation
+    /// telemetry is rendered only when its independently locked depth copy
+    /// carries this same receive instant.
+    pub(super) book_received_at: Option<Instant>,
 }
 
 /// WS cache entries older than this fall back to REST for the cycle. REST
@@ -135,6 +327,12 @@ impl FeedSnapshotVersion {
 struct ChannelFreshness {
     price: Instant,
     book: Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FreshnessChannel {
+    Price,
+    Book,
 }
 
 impl ChannelFreshness {
@@ -331,22 +529,30 @@ async fn reset_feed_state(state: &RwLock<FeedState>, issue: WsSnapshotIssue) {
 }
 
 /// Spawn the resident market-feed task: one public WS connection carrying
-/// `price` + `depth_book`, written into a shared cache. The outer loop wraps
-/// the SDK's internal 5-attempt reconnect — when the stream ends (attempts
-/// exhausted or clean close), it rebuilds the connection from scratch, since
-/// subscriptions only take effect when registered before `connect_managed()`.
+/// `price` + `depth_book` + observation-only `public_trade`, written into a
+/// decision cache and a separately locked bounded telemetry store. The outer
+/// loop wraps the SDK's internal 5-attempt reconnect — when the stream ends
+/// (attempts exhausted or clean close), it rebuilds the connection from
+/// scratch, since subscriptions only take effect when registered before
+/// `connect_managed()`.
+pub(super) struct SpawnedMarketFeed {
+    pub(super) state: Arc<RwLock<FeedState>>,
+    pub(super) telemetry: Arc<RwLock<MarketTelemetry>>,
+    pub(super) updates: watch::Receiver<u64>,
+    pub(super) handle: tokio::task::JoinHandle<()>,
+}
+
 pub(super) fn spawn_market_feed(
     symbol: String,
     verbose: bool,
     endpoints: standx_sdk::StandXEndpoints,
-) -> (
-    Arc<RwLock<FeedState>>,
-    watch::Receiver<u64>,
-    tokio::task::JoinHandle<()>,
-) {
+) -> SpawnedMarketFeed {
     let state = Arc::new(RwLock::new(FeedState::default()));
+    let telemetry = Arc::new(RwLock::new(MarketTelemetry::default()));
     let (tx, rx) = watch::channel(0u64);
     let state_task = state.clone();
+    let telemetry_task = telemetry.clone();
+    let public_trade_raw_sample_budget = Arc::new(AtomicUsize::new(PUBLIC_TRADE_RAW_SAMPLE_LIMIT));
 
     let handle = tokio::spawn(async move {
         let mut seq = 0u64;
@@ -361,8 +567,10 @@ pub(super) fn spawn_market_feed(
                     continue;
                 }
             };
+            let ws = ws.with_public_trade_raw_sample_budget(public_trade_raw_sample_budget.clone());
             let _ = ws.subscribe("price", Some(&symbol)).await;
             let _ = ws.subscribe("depth_book", Some(&symbol)).await;
+            let _ = ws.subscribe("public_trade", Some(&symbol)).await;
             let (mut events, connection_handle) = match ws.connect_managed().await {
                 Ok(connection) => connection,
                 Err(e) => {
@@ -379,6 +587,7 @@ pub(super) fn spawn_market_feed(
                         let Some(msg) = message else {
                             connection_handle.abort();
                             reset_feed_state(&state_task, WsSnapshotIssue::StreamEnded).await;
+                            telemetry_task.write().await.clear();
                             seq = seq.saturating_add(1);
                             let _ = tx.send(seq);
                             eprintln!("⚠️  market feed stream ended; rebuilding connection in 10s");
@@ -387,6 +596,7 @@ pub(super) fn spawn_market_feed(
                         match &msg {
                             WsMessage::Connected => {
                                 *state_task.write().await = FeedState::default();
+                                telemetry_task.write().await.clear();
                                 freshness = ChannelFreshness::new(Instant::now());
                                 seq = seq.saturating_add(1);
                                 let _ = tx.send(seq);
@@ -394,13 +604,28 @@ pub(super) fn spawn_market_feed(
                             }
                             WsMessage::Disconnected => {
                                 reset_feed_state(&state_task, WsSnapshotIssue::StreamEnded).await;
+                                telemetry_task.write().await.clear();
                                 seq = seq.saturating_add(1);
                                 let _ = tx.send(seq);
                                 continue;
                             }
                             _ => {}
                         }
-                        let accepted = match msg {
+                        match &msg {
+                            WsMessage::Trade(trade)
+                                if trade.symbol.as_deref().map_or(
+                                    true,
+                                    |trade_symbol| trade_symbol.eq_ignore_ascii_case(&symbol),
+                                ) =>
+                            {
+                                telemetry_task
+                                    .write()
+                                    .await
+                                    .observe_trade(trade, Instant::now());
+                            }
+                            _ => {}
+                        }
+                        let accepted = match &msg {
                             WsMessage::Price(update)
                                 if update.data.symbol.eq_ignore_ascii_case(&symbol) =>
                             {
@@ -410,13 +635,13 @@ pub(super) fn spawn_market_feed(
                                 {
                                     {
                                         let mut s = state_task.write().await;
-                                        if update_is_newer(s.mark_meta.as_ref(), &update) {
+                                        if update_is_newer(s.mark_meta.as_ref(), update) {
                                             s.mark = Some(mark);
-                                            s.mark_meta = Some(update_meta(&update));
+                                            s.mark_meta = Some(update_meta(update));
                                             if s.book_meta.is_some() {
                                                 s.reconnect_issue = None;
                                             }
-                                            Some((true, received_at))
+                                            Some((FreshnessChannel::Price, received_at))
                                         } else {
                                             None
                                         }
@@ -435,28 +660,33 @@ pub(super) fn spawn_market_feed(
                                 );
                                 if let (Some(best_bid), Some(best_ask)) = parsed {
                                     let mut s = state_task.write().await;
-                                    if update_is_newer(s.book_meta.as_ref(), &update) {
+                                    if update_is_newer(s.book_meta.as_ref(), update) {
                                         s.best_bid = best_bid;
                                         s.best_ask = best_ask;
-                                        s.book_meta = Some(update_meta(&update));
+                                        s.book_meta = Some(update_meta(update));
                                         if s.mark_meta.is_some() {
                                             s.reconnect_issue = None;
                                         }
-                                        Some((false, received_at))
+                                        drop(s);
+                                        telemetry_task
+                                            .write()
+                                            .await
+                                            .observe_book(&update.data, received_at);
+                                        Some((FreshnessChannel::Book, received_at))
                                     } else {
                                         None
                                     }
                                 } else {
+                                    telemetry_task.write().await.clear_book();
                                     None
                                 }
                             }
                             _ => None,
                         };
-                        if let Some((price, received_at)) = accepted {
-                            if price {
-                                freshness.price = received_at;
-                            } else {
-                                freshness.book = received_at;
+                        if let Some((channel, received_at)) = accepted {
+                            match channel {
+                                FreshnessChannel::Price => freshness.price = received_at,
+                                FreshnessChannel::Book => freshness.book = received_at,
                             }
                             seq = seq.saturating_add(1);
                             let _ = tx.send(seq);
@@ -469,6 +699,7 @@ pub(super) fn spawn_market_feed(
                         };
                         connection_handle.abort();
                         reset_feed_state(&state_task, issue).await;
+                        telemetry_task.write().await.clear();
                         seq = seq.saturating_add(1);
                         let _ = tx.send(seq);
                         eprintln!(
@@ -483,7 +714,12 @@ pub(super) fn spawn_market_feed(
         }
     });
 
-    (state, rx, handle)
+    SpawnedMarketFeed {
+        state,
+        telemetry,
+        updates: rx,
+        handle,
+    }
 }
 
 /// One market snapshot: WS cache when fresh, REST fallback otherwise
@@ -508,6 +744,7 @@ pub(super) async fn market_snapshot(
                     source: "ws",
                     fallback_reason: None,
                     ws_snapshot,
+                    book_received_at: s.book_meta.as_ref().map(|meta| meta.received_at),
                 });
             }
             Err(issue) => {
@@ -536,6 +773,7 @@ pub(super) async fn market_snapshot(
             source,
             fallback_reason: ws_issue,
             ws_snapshot,
+            book_received_at: None,
         },
     )
 }
@@ -628,6 +866,204 @@ mod tests {
         for value in ["0", "-1", "NaN", "not-a-price"] {
             assert_eq!(parse_optional_positive_price(Some(value)), None);
         }
+    }
+
+    #[test]
+    fn depth_telemetry_is_sorted_bounded_and_does_not_replace_touch_derivation() {
+        let book = OrderBook {
+            symbol: "BTC-USD".to_string(),
+            bids: vec![
+                ["101".to_string(), "NaN".to_string()],
+                ["99".to_string(), "1".to_string()],
+                ["100".to_string(), "2".to_string()],
+                ["98".to_string(), "3".to_string()],
+                ["97".to_string(), "4".to_string()],
+                ["96".to_string(), "5".to_string()],
+                ["95".to_string(), "6".to_string()],
+            ],
+            asks: vec![
+                ["102".to_string(), "bad".to_string()],
+                ["104".to_string(), "1".to_string()],
+                ["103".to_string(), "2".to_string()],
+                ["105".to_string(), "3".to_string()],
+                ["106".to_string(), "4".to_string()],
+                ["107".to_string(), "5".to_string()],
+                ["108".to_string(), "6".to_string()],
+            ],
+            timestamp: String::new(),
+        };
+
+        // Existing touch derivation considers only price validity. Telemetry
+        // additionally requires valid quantity and must never replace it.
+        assert_eq!(book.best_bid(), Some("101"));
+        assert_eq!(book.best_ask(), Some("102"));
+        assert_eq!(
+            parse_depth_levels(&book.bids, true),
+            vec![
+                (100.0, 2.0),
+                (99.0, 1.0),
+                (98.0, 3.0),
+                (97.0, 4.0),
+                (96.0, 5.0)
+            ]
+        );
+        assert_eq!(
+            parse_depth_levels(&book.asks, false),
+            vec![
+                (103.0, 2.0),
+                (104.0, 1.0),
+                (105.0, 3.0),
+                (106.0, 4.0),
+                (107.0, 5.0)
+            ]
+        );
+
+        let malformed = vec![
+            ["NaN".to_string(), "1".to_string()],
+            ["100".to_string(), "0".to_string()],
+            ["bad".to_string(), "bad".to_string()],
+        ];
+        assert!(parse_depth_levels(&malformed, true).is_empty());
+    }
+
+    #[test]
+    fn depth_telemetry_is_null_unless_it_matches_the_acquired_book_version() {
+        let origin = Instant::now();
+        let acquired_at = origin + Duration::from_millis(10);
+        let later_update_at = origin + Duration::from_millis(20);
+        let book = OrderBook {
+            symbol: "BTC-USD".to_string(),
+            bids: vec![["99.9".to_string(), "2.0".to_string()]],
+            asks: vec![["100.1".to_string(), "3.0".to_string()]],
+            timestamp: String::new(),
+        };
+        let mut telemetry = MarketTelemetry::new(origin);
+        telemetry.observe_book(&book, later_update_at);
+
+        let mismatched = telemetry.snapshot(later_update_at, Some(acquired_at));
+        assert_eq!(mismatched.book, BookTelemetrySnapshot::default());
+
+        let matched = telemetry.snapshot(later_update_at, Some(later_update_at));
+        assert_eq!(matched.book.bid_levels, Some(vec![(99.9, 2.0)]));
+        assert_eq!(matched.book.ask_levels, Some(vec![(100.1, 3.0)]));
+        assert_eq!(matched.book.age_ms, Some(0));
+    }
+
+    #[test]
+    fn public_trade_absence_or_activity_does_not_affect_feed_freshness_or_version() {
+        let now = Instant::now();
+        let state = FeedState {
+            mark: Some(100.0),
+            mark_meta: Some(meta(1, "2026-07-14T00:00:00Z", now)),
+            best_bid: Some(99.9),
+            best_ask: Some(100.1),
+            book_meta: Some(meta(2, "2026-07-14T00:00:00Z", now)),
+            reconnect_issue: None,
+        };
+        let freshness = ChannelFreshness::new(now);
+        let version = FeedSnapshotVersion {
+            mark_received_at: state.mark_meta.as_ref().unwrap().received_at,
+            book_received_at: state.book_meta.as_ref().unwrap().received_at,
+        };
+        let mut telemetry = MarketTelemetry::new(now);
+
+        assert_eq!(telemetry.snapshot(now, None).tape.count_5s, 0);
+        assert_eq!(
+            freshness.idle_issue(now + MARKET_FEED_IDLE_AFTER - Duration::from_millis(1)),
+            None
+        );
+        let mut price_and_book_only = ChannelFreshness::new(now);
+        for seconds in [10, 20, 30] {
+            let received_at = now + Duration::from_secs(seconds);
+            price_and_book_only.price = received_at;
+            price_and_book_only.book = received_at;
+            assert_eq!(
+                price_and_book_only
+                    .idle_issue(received_at + MARKET_FEED_IDLE_AFTER - Duration::from_millis(1)),
+                None
+            );
+        }
+        assert!(coherent_ws_snapshot(&state, now + Duration::from_secs(3)).is_ok());
+
+        let trade: Trade = serde_json::from_value(serde_json::json!({
+            "id": 7,
+            "price": "100.0",
+            "qty": "1.5",
+            "side": "buy",
+            "is_taker": true
+        }))
+        .unwrap();
+        telemetry.observe_trade(&trade, now + Duration::from_millis(10));
+
+        assert_eq!(
+            telemetry
+                .snapshot(now + Duration::from_millis(10), None)
+                .tape
+                .count_5s,
+            1
+        );
+        assert_eq!(
+            version,
+            FeedSnapshotVersion {
+                mark_received_at: state.mark_meta.as_ref().unwrap().received_at,
+                book_received_at: state.book_meta.as_ref().unwrap().received_at,
+            }
+        );
+        assert_eq!(
+            freshness.idle_issue(now + MARKET_FEED_IDLE_AFTER),
+            Some(WsSnapshotIssue::PriceAndBookIdle)
+        );
+    }
+
+    #[test]
+    fn trade_without_side_stays_unknown_instead_of_using_defaulted_taker_flag() {
+        let now = Instant::now();
+        let trade: Trade = serde_json::from_value(serde_json::json!({
+            "id": 8,
+            "price": "100.0",
+            "qty": "2.5"
+        }))
+        .unwrap();
+        assert_eq!(trade.side, None);
+        assert!(!trade.is_buyer_taker);
+
+        let mut telemetry = MarketTelemetry::new(now);
+        telemetry.observe_trade(&trade, now);
+        let snapshot = telemetry.snapshot(now, None);
+
+        assert_eq!(telemetry.tape.back().unwrap().side, None);
+        assert_eq!(snapshot.tape.buy_qty_5s, 0.0);
+        assert_eq!(snapshot.tape.sell_qty_5s, 0.0);
+        assert_eq!(snapshot.tape.unknown_qty_5s, 2.5);
+    }
+
+    #[test]
+    fn trade_tape_evicts_oldest_entries_at_fixed_capacity() {
+        let now = Instant::now();
+        let mut telemetry = MarketTelemetry::new(now);
+        for id in 0..300u64 {
+            let trade = Trade {
+                id,
+                time: String::new(),
+                price: "100.0".to_string(),
+                qty: "1.0".to_string(),
+                side: Some("sell".to_string()),
+                is_buyer_taker: id % 2 == 0,
+                fee_asset: None,
+                fee_qty: None,
+                pnl: None,
+                order_id: None,
+                symbol: Some("BTC-USD".to_string()),
+                value: None,
+            };
+            telemetry.observe_trade(&trade, now + Duration::from_millis(id));
+        }
+
+        assert_eq!(telemetry.tape.len(), TRADE_TAPE_CAPACITY);
+        let first = telemetry.tape.front().unwrap();
+        let last = telemetry.tape.back().unwrap();
+        assert_eq!((first.id, first.price, first.is_taker), (44, 100.0, true));
+        assert_eq!((last.id, last.price, last.is_taker), (299, 100.0, false));
     }
 
     #[test]

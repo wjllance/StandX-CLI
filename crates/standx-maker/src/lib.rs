@@ -142,6 +142,56 @@ pub struct DesiredQuote {
     pub qty: f64,
 }
 
+/// Observation-only result of constructing one configured quote-ladder slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuoteGeometryOutcome {
+    Placed,
+    ClampedToBand,
+    ClampedToTouch,
+    DroppedInfeasible,
+    DroppedBelowMinQty,
+    DroppedDuplicate,
+    SuppressedPosition,
+    SuppressedGuard,
+}
+
+impl QuoteGeometryOutcome {
+    /// Stable snake-case label used by cycle-summary telemetry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Placed => "placed",
+            Self::ClampedToBand => "clamped_to_band",
+            Self::ClampedToTouch => "clamped_to_touch",
+            Self::DroppedInfeasible => "dropped_infeasible",
+            Self::DroppedBelowMinQty => "dropped_below_min_qty",
+            Self::DroppedDuplicate => "dropped_duplicate",
+            Self::SuppressedPosition => "suppressed_position",
+            Self::SuppressedGuard => "suppressed_guard",
+        }
+    }
+}
+
+/// Observation-only geometry for one configured quote slot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuoteGeometry {
+    pub side: OrderSide,
+    pub level: u32,
+    /// Ladder price before the eligibility-band and post-only clamps.
+    pub raw_price: f64,
+    /// Price after clamp and directional tick rounding; `None` when dropped.
+    pub final_price: Option<f64>,
+    pub outcome: QuoteGeometryOutcome,
+    /// Distance from the same-side opposing touch, in bps of mark: buys use
+    /// `(best_ask - price) / mark * 1e4`, sells use
+    /// `(price - best_bid) / mark * 1e4`; `None` when that side of the touch
+    /// is missing.
+    pub distance_to_touch_bps: Option<f64>,
+    /// Side-aware distance from mark to this side's eligibility-band edge, in
+    /// bps of mark. Emitted so offline analysis can tell at a glance whether
+    /// the band or the touch was the binding bound.
+    pub band_edge_bps: f64,
+}
+
 /// Which policy asked for an inventory-reducing order.
 ///
 /// Stage 5-b separates the two normal exit policies so evidence never has to
@@ -660,6 +710,8 @@ pub struct CyclePlan {
     /// In-venue touch-mid component actually applied to the shared quote center
     /// this cycle (0 when disabled or inside the dead zone).
     pub micro_price_shift_bps: f64,
+    /// Observation-only quote-ladder geometry. Planning never reads this field.
+    pub quote_geometry: Vec<QuoteGeometry>,
 }
 
 /// Build a deterministic quote/exit plan after the caller has synchronized
@@ -732,39 +784,54 @@ pub fn plan_cycle(cfg: &MakerConfig, input: CycleInput<'_>, halted: bool) -> Cyc
     });
     // Wind-down never places new quotes, even once flat: the session must
     // converge to flat instead of re-accumulating inventory.
-    let desired = if halted || !market_active || inventory_exit.is_some() || input.wind_down {
-        Vec::new()
-    } else {
-        let raw = compute_desired_quotes(
-            cfg,
-            input.market.mark,
-            input.market.best_bid,
-            input.market.best_ask,
-            input.position,
-            input.size_skew,
-            input.nonlinear_skew,
-            total_shift_bps,
-            input.guard,
-        );
-        cap_desired_exposure(cfg, input.position, &raw, input.pending_slots)
-    };
+    let (desired, mut quote_geometry) =
+        if halted || !market_active || inventory_exit.is_some() || input.wind_down {
+            (Vec::new(), Vec::new())
+        } else {
+            let mut generated = compute_desired_quotes_with_geometry(
+                cfg,
+                input.market.mark,
+                input.market.best_bid,
+                input.market.best_ask,
+                input.position,
+                input.size_skew,
+                input.nonlinear_skew,
+                total_shift_bps,
+                input.guard,
+            );
+            let capped =
+                cap_desired_exposure(cfg, input.position, &generated.quotes, input.pending_slots);
+            mark_exposure_suppressed(&mut generated.geometry, &capped);
+            (capped, generated.geometry)
+        };
+
+    let actions = reconcile(
+        cfg,
+        input.market.mark,
+        input.position,
+        input.market.best_bid,
+        input.market.best_ask,
+        &desired,
+        input.resting,
+        input.cycle,
+        input.nonlinear_skew,
+        total_shift_bps,
+    );
+    overlay_resting_quote_geometry(
+        &mut quote_geometry,
+        input.resting,
+        &actions,
+        input.market.mark,
+        input.market.best_bid,
+        input.market.best_ask,
+        cfg.band_bps,
+    );
 
     CyclePlan {
         requested_inventory_exit,
         inventory_exit,
         exit_suppression,
-        actions: reconcile(
-            cfg,
-            input.market.mark,
-            input.position,
-            input.market.best_bid,
-            input.market.best_ask,
-            &desired,
-            input.resting,
-            input.cycle,
-            input.nonlinear_skew,
-            total_shift_bps,
-        ),
+        actions,
         inventory_ref_center: quote_center(
             cfg,
             input.nonlinear_skew,
@@ -781,6 +848,7 @@ pub fn plan_cycle(cfg: &MakerConfig, input: CycleInput<'_>, halted: bool) -> Cyc
         ),
         external_skew_shift_bps: external_shift_bps,
         micro_price_shift_bps: micro_shift_bps,
+        quote_geometry,
     }
 }
 
@@ -792,6 +860,7 @@ pub fn plan_cycle(cfg: &MakerConfig, input: CycleInput<'_>, halted: bool) -> Cyc
 /// are dropped; duplicate prices after clamping/rounding are collapsed (outer
 /// level wins nothing — the inner level is kept).
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) fn compute_desired_quotes(
     cfg: &MakerConfig,
     mark: f64,
@@ -803,20 +872,50 @@ pub(crate) fn compute_desired_quotes(
     external_shift_bps: f64,
     guard: GuardDecision,
 ) -> Vec<DesiredQuote> {
-    let mut out = Vec::new();
+    compute_desired_quotes_with_geometry(
+        cfg,
+        mark,
+        best_bid,
+        best_ask,
+        position,
+        size_skew,
+        nonlinear_skew,
+        external_shift_bps,
+        guard,
+    )
+    .quotes
+}
+
+#[derive(Debug, Default)]
+struct DesiredQuotesWithGeometry {
+    quotes: Vec<DesiredQuote>,
+    geometry: Vec<QuoteGeometry>,
+}
+
+/// Construct desired quotes and their diagnostics in one pass so clamp
+/// telemetry cannot drift from the prices used by reconciliation.
+#[allow(clippy::too_many_arguments)]
+fn compute_desired_quotes_with_geometry(
+    cfg: &MakerConfig,
+    mark: f64,
+    best_bid: Option<f64>,
+    best_ask: Option<f64>,
+    position: f64,
+    size_skew: SizeSkewDecision,
+    nonlinear_skew: NonlinearSkewConfig,
+    external_shift_bps: f64,
+    guard: GuardDecision,
+) -> DesiredQuotesWithGeometry {
+    let mut result = DesiredQuotesWithGeometry::default();
     if !mark.is_finite()
         || mark <= 0.0
         || best_bid.is_some_and(|price| !price.is_finite() || price <= 0.0)
         || best_ask.is_some_and(|price| !price.is_finite() || price <= 0.0)
     {
-        return out;
+        return result;
     }
 
     let qty = round_to_decimals(cfg.size, cfg.qty_decimals);
-    if qty < cfg.min_order_qty || qty <= 0.0 {
-        return out;
-    }
-
     let tick = cfg.price_tick();
     // Band eligibility is defined around the TRUE mark, not the skewed center.
     let band_lo = mark * (1.0 - cfg.band_bps / 1e4);
@@ -828,11 +927,44 @@ pub(crate) fn compute_desired_quotes(
     // rather than moving the band with it.
     let center = quote_center(cfg, nonlinear_skew, external_shift_bps, mark, position);
 
+    if qty < cfg.min_order_qty || qty <= 0.0 {
+        for side in [OrderSide::Buy, OrderSide::Sell] {
+            for level in 0..cfg.levels {
+                let raw_price = raw_quote_price(cfg, center, side, level);
+                result.geometry.push(quote_geometry(
+                    side,
+                    level,
+                    raw_price,
+                    None,
+                    QuoteGeometryOutcome::DroppedBelowMinQty,
+                    mark,
+                    best_bid,
+                    best_ask,
+                    band_lo,
+                    band_hi,
+                ));
+            }
+        }
+        return result;
+    }
+
     let suppress_buy = position >= cfg.max_position;
     let suppress_sell = position <= -cfg.max_position;
 
     for side in [OrderSide::Buy, OrderSide::Sell] {
         if (side == OrderSide::Buy && suppress_buy) || (side == OrderSide::Sell && suppress_sell) {
+            push_suppressed_geometry(
+                &mut result.geometry,
+                cfg,
+                center,
+                mark,
+                best_bid,
+                best_ask,
+                band_lo,
+                band_hi,
+                side,
+                QuoteGeometryOutcome::SuppressedPosition,
+            );
             continue;
         }
         // External-price guard: the endangered side's quotes are stale against
@@ -840,6 +972,18 @@ pub(crate) fn compute_desired_quotes(
         // cycle. Resting quotes on that side cancel via the SideSuppressed
         // path; the guard releases once StandX's mark catches up.
         if guard.active && guard.endangered == Some(side) {
+            push_suppressed_geometry(
+                &mut result.geometry,
+                cfg,
+                center,
+                mark,
+                best_bid,
+                best_ask,
+                band_lo,
+                band_hi,
+                side,
+                QuoteGeometryOutcome::SuppressedGuard,
+            );
             continue;
         }
         let side_qty = if size_skew.active && size_skew.add_side == Some(side) {
@@ -852,24 +996,30 @@ pub(crate) fn compute_desired_quotes(
         };
         let mut last_price: Option<f64> = None;
         for level in 0..cfg.levels {
-            let offset_bps = cfg.spread_bps + level as f64 * cfg.level_step_bps;
-            let raw_price = match side {
-                OrderSide::Buy => center * (1.0 - offset_bps / 1e4),
-                OrderSide::Sell => center * (1.0 + offset_bps / 1e4),
-            };
+            let raw_price = raw_quote_price(cfg, center, side, level);
 
             // Intersect the eligibility band with the post-only no-cross
             // interval. If no tick can satisfy both, omit this side instead of
             // emitting a quote outside the band or relying on ALO rejection.
-            let (price_lo, price_hi) = match side {
-                OrderSide::Buy => (
-                    band_lo,
-                    best_ask.map_or(band_hi, |ask| band_hi.min(ask - tick)),
-                ),
-                OrderSide::Sell => (
-                    best_bid.map_or(band_lo, |bid| band_lo.max(bid + tick)),
-                    band_hi,
-                ),
+            let (price_lo, price_hi, lower_is_touch, upper_is_touch) = match side {
+                OrderSide::Buy => {
+                    let touch_hi = best_ask.map(|ask| ask - tick);
+                    (
+                        band_lo,
+                        touch_hi.map_or(band_hi, |bound| band_hi.min(bound)),
+                        false,
+                        touch_hi.is_some_and(|bound| bound <= band_hi),
+                    )
+                }
+                OrderSide::Sell => {
+                    let touch_lo = best_bid.map(|bid| bid + tick);
+                    (
+                        touch_lo.map_or(band_lo, |bound| band_lo.max(bound)),
+                        band_hi,
+                        touch_lo.is_some_and(|bound| bound >= band_lo),
+                        false,
+                    )
+                }
             };
             let price_tolerance = tick * 1e-6;
             if !raw_price.is_finite()
@@ -877,9 +1027,36 @@ pub(crate) fn compute_desired_quotes(
                 || !price_hi.is_finite()
                 || price_lo > price_hi + price_tolerance
             {
+                result.geometry.push(quote_geometry(
+                    side,
+                    level,
+                    raw_price,
+                    None,
+                    QuoteGeometryOutcome::DroppedInfeasible,
+                    mark,
+                    best_bid,
+                    best_ask,
+                    band_lo,
+                    band_hi,
+                ));
                 continue;
             }
 
+            let mut outcome = if raw_price < price_lo {
+                if lower_is_touch {
+                    QuoteGeometryOutcome::ClampedToTouch
+                } else {
+                    QuoteGeometryOutcome::ClampedToBand
+                }
+            } else if raw_price > price_hi {
+                if upper_is_touch {
+                    QuoteGeometryOutcome::ClampedToTouch
+                } else {
+                    QuoteGeometryOutcome::ClampedToBand
+                }
+            } else {
+                QuoteGeometryOutcome::Placed
+            };
             let mut price = raw_price.clamp(price_lo, price_hi);
 
             // Directional tick rounding: away from mark, so rounding never
@@ -893,8 +1070,18 @@ pub(crate) fn compute_desired_quotes(
             // band boundary is not tick-aligned. Snap back to the nearest
             // valid tick, then re-check every constraint.
             if price < price_lo {
+                outcome = if lower_is_touch {
+                    QuoteGeometryOutcome::ClampedToTouch
+                } else {
+                    QuoteGeometryOutcome::ClampedToBand
+                };
                 price = ceil_to_decimals(price_lo, cfg.price_decimals);
             } else if price > price_hi {
+                outcome = if upper_is_touch {
+                    QuoteGeometryOutcome::ClampedToTouch
+                } else {
+                    QuoteGeometryOutcome::ClampedToBand
+                };
                 price = floor_to_decimals(price_hi, cfg.price_decimals);
             }
 
@@ -905,16 +1092,52 @@ pub(crate) fn compute_desired_quotes(
                 || best_ask.is_some_and(|ask| side == OrderSide::Buy && price >= ask)
                 || best_bid.is_some_and(|bid| side == OrderSide::Sell && price <= bid)
             {
+                result.geometry.push(quote_geometry(
+                    side,
+                    level,
+                    raw_price,
+                    None,
+                    QuoteGeometryOutcome::DroppedInfeasible,
+                    mark,
+                    best_bid,
+                    best_ask,
+                    band_lo,
+                    band_hi,
+                ));
                 continue;
             }
 
             // Collapse duplicate levels (clamping can flatten the ladder).
             if last_price == Some(price) {
+                result.geometry.push(quote_geometry(
+                    side,
+                    level,
+                    raw_price,
+                    None,
+                    QuoteGeometryOutcome::DroppedDuplicate,
+                    mark,
+                    best_bid,
+                    best_ask,
+                    band_lo,
+                    band_hi,
+                ));
                 continue;
             }
             last_price = Some(price);
 
-            out.push(DesiredQuote {
+            result.geometry.push(quote_geometry(
+                side,
+                level,
+                raw_price,
+                Some(price),
+                outcome,
+                mark,
+                best_bid,
+                best_ask,
+                band_lo,
+                band_hi,
+            ));
+            result.quotes.push(DesiredQuote {
                 side,
                 level,
                 price,
@@ -923,7 +1146,160 @@ pub(crate) fn compute_desired_quotes(
         }
     }
 
-    out
+    result
+}
+
+fn raw_quote_price(cfg: &MakerConfig, center: f64, side: OrderSide, level: u32) -> f64 {
+    let offset_bps = cfg.spread_bps + level as f64 * cfg.level_step_bps;
+    match side {
+        OrderSide::Buy => center * (1.0 - offset_bps / 1e4),
+        OrderSide::Sell => center * (1.0 + offset_bps / 1e4),
+    }
+}
+
+/// Side-aware distance from mark, in bps of mark: positive means "away from
+/// mark in the direction that earns" (a buy below mark, a sell above it).
+/// Public so telemetry renders the same convention the ladder was built with
+/// instead of reimplementing it.
+pub fn side_distance_to_mark_bps(side: OrderSide, price: f64, mark: f64) -> f64 {
+    match side {
+        OrderSide::Buy => (mark - price) / mark * 1e4,
+        OrderSide::Sell => (price - mark) / mark * 1e4,
+    }
+}
+
+fn distance_to_touch_bps(
+    side: OrderSide,
+    price: f64,
+    mark: f64,
+    best_bid: Option<f64>,
+    best_ask: Option<f64>,
+) -> Option<f64> {
+    let distance = match side {
+        OrderSide::Buy => (best_ask? - price) / mark * 1e4,
+        OrderSide::Sell => (price - best_bid?) / mark * 1e4,
+    };
+    distance.is_finite().then_some(distance)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn quote_geometry(
+    side: OrderSide,
+    level: u32,
+    raw_price: f64,
+    final_price: Option<f64>,
+    outcome: QuoteGeometryOutcome,
+    mark: f64,
+    best_bid: Option<f64>,
+    best_ask: Option<f64>,
+    band_lo: f64,
+    band_hi: f64,
+) -> QuoteGeometry {
+    let band_edge = match side {
+        OrderSide::Buy => band_lo,
+        OrderSide::Sell => band_hi,
+    };
+    QuoteGeometry {
+        side,
+        level,
+        raw_price,
+        final_price,
+        outcome,
+        distance_to_touch_bps: final_price
+            .and_then(|price| distance_to_touch_bps(side, price, mark, best_bid, best_ask)),
+        band_edge_bps: side_distance_to_mark_bps(side, band_edge, mark),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_suppressed_geometry(
+    geometry: &mut Vec<QuoteGeometry>,
+    cfg: &MakerConfig,
+    center: f64,
+    mark: f64,
+    best_bid: Option<f64>,
+    best_ask: Option<f64>,
+    band_lo: f64,
+    band_hi: f64,
+    side: OrderSide,
+    outcome: QuoteGeometryOutcome,
+) {
+    for level in 0..cfg.levels {
+        geometry.push(quote_geometry(
+            side,
+            level,
+            raw_quote_price(cfg, center, side, level),
+            None,
+            outcome,
+            mark,
+            best_bid,
+            best_ask,
+            band_lo,
+            band_hi,
+        ));
+    }
+}
+
+fn mark_exposure_suppressed(geometry: &mut [QuoteGeometry], desired: &[DesiredQuote]) {
+    for row in geometry.iter_mut().filter(|row| row.final_price.is_some()) {
+        if desired
+            .iter()
+            .any(|quote| quote.side == row.side && quote.level == row.level)
+        {
+            continue;
+        }
+        row.outcome = QuoteGeometryOutcome::SuppressedPosition;
+        row.final_price = None;
+        row.distance_to_touch_bps = None;
+    }
+}
+
+/// Merge the quote observed resting at the start of the cycle into its slot.
+/// Holds use current resting geometry; placements keep their generated clamp
+/// outcome; cancel-only slots keep a non-`Placed` generated outcome or add the
+/// resting row when no such diagnostic exists. This action-aware precedence
+/// keeps at most one row per slot.
+fn overlay_resting_quote_geometry(
+    geometry: &mut Vec<QuoteGeometry>,
+    resting: &[RestingQuote],
+    actions: &[Action],
+    mark: f64,
+    best_bid: Option<f64>,
+    best_ask: Option<f64>,
+    band_bps: f64,
+) {
+    let band_lo = mark * (1.0 - band_bps / 1e4);
+    let band_hi = mark * (1.0 + band_bps / 1e4);
+    for quote in resting {
+        let held = actions.iter().any(|action| {
+            matches!(action, Action::Hold { side, level, .. } if *side == quote.side && *level == quote.level)
+        });
+        let placed = actions.iter().any(
+            |action| matches!(action, Action::Place(desired) if desired.side == quote.side && desired.level == quote.level),
+        );
+        let row = quote_geometry(
+            quote.side,
+            quote.level,
+            quote.price,
+            Some(quote.price),
+            QuoteGeometryOutcome::Placed,
+            mark,
+            best_bid,
+            best_ask,
+            band_lo,
+            band_hi,
+        );
+        if let Some(existing) = geometry
+            .iter_mut()
+            .find(|existing| existing.side == quote.side && existing.level == quote.level)
+        {
+            if held || (!placed && existing.outcome == QuoteGeometryOutcome::Placed) {
+                *existing = row;
+            }
+        } else {
+            geometry.push(row);
+        }
+    }
 }
 
 /// Limit a desired ladder so that all quotes on either side filling cannot

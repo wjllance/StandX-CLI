@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `standx maker` now records observation-only market microstructure on `cycle_summary`: a `book` block (up to five depth levels per side, top-of-book sizes, touch spread, mark/mid divergence), a `tape` block summarizing the newly subscribed `public_trade` channel over a five-second window, and a `geometry` block reporting per-slot quote geometry — pre-clamp and post-clamp price, which bound was binding (eligibility band vs post-only no-cross), and the distance from each quote to the opposing touch. None of these fields feed quoting, cancellation, exit, or safety decisions, and the replay action sequence is unchanged.
+
+### Changed
+- The trade tape and depth copy live on a lock separate from the decision-critical mark/touch cache, and the `public_trade` subscription is excluded from feed freshness and reconnect logic, so a silent tape can never stall or rebuild the market feed.
+- `examples/maker-microprice-hype-baseline.toml` returns to `band_bps = 30.0`. Widening the strategy's own cancel band to 40 worked against the ±10bp in-band uptime constraint in `docs/30`; the accepted consequence is that fully stacked center offsets are now clamped at the band edge.
+
+### Fixed
+- Removed a panic path introduced in the resident market-feed loop: the accepted-update branch now carries its channel directly instead of re-deriving it behind an `expect`.
+
 ## [1.3.4] - 2026-07-31
 
 ### Fixed

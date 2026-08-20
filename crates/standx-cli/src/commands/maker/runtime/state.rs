@@ -1,4 +1,4 @@
-use super::super::feed::FeedState;
+use super::super::feed::{FeedState, MarketTelemetry};
 use super::*;
 
 pub(super) struct RuntimeDeps {
@@ -70,6 +70,9 @@ pub(super) struct RuntimeLoopState {
 
 pub(super) struct RuntimeMarketState {
     pub(super) feed: Option<std::sync::Arc<tokio::sync::RwLock<FeedState>>>,
+    /// Bounded, observation-only book/tape state on a lock separate from the
+    /// decision-critical mark/touch cache.
+    pub(super) telemetry: Option<std::sync::Arc<tokio::sync::RwLock<MarketTelemetry>>>,
     pub(super) updates: Option<tokio::sync::watch::Receiver<u64>>,
     pub(super) market_watchdog_updates: Option<tokio::sync::watch::Receiver<u64>>,
     pub(super) feed_handle: Option<tokio::task::JoinHandle<()>>,
@@ -134,12 +137,16 @@ impl MakerRuntime {
             live_session,
         } = startup;
 
-        let (feed, updates, feed_handle) = if args.no_ws {
-            (None, None, None)
+        let (feed, telemetry, updates, feed_handle) = if args.no_ws {
+            (None, None, None, None)
         } else {
-            let (state, rx, handle) =
-                spawn_market_feed(symbol.clone(), args.verbose, endpoints.clone());
-            (Some(state), Some(rx), Some(handle))
+            let spawned = spawn_market_feed(symbol.clone(), args.verbose, endpoints.clone());
+            (
+                Some(spawned.state),
+                Some(spawned.telemetry),
+                Some(spawned.updates),
+                Some(spawned.handle),
+            )
         };
         let market_watchdog_updates = updates.as_ref().cloned();
 
@@ -308,6 +315,7 @@ impl MakerRuntime {
             },
             market: RuntimeMarketState {
                 feed,
+                telemetry,
                 updates,
                 market_watchdog_updates,
                 feed_handle,

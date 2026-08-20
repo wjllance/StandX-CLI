@@ -268,6 +268,7 @@ pub(super) async fn maker_cycle(
         recovery,
         market_fallback_reason,
         ws_snapshot,
+        market_telemetry,
         max_divergence_bps,
         inventory_exit_pct,
         inventory_exit_qty,
@@ -706,6 +707,7 @@ pub(super) async fn maker_cycle(
     let external_skew_shift_bps = plan.external_skew_shift_bps;
     let micro_price_shift_bps = plan.micro_price_shift_bps;
     let inventory_skew_shift_bps = legacy_inventory_skew_shift_bps(mark, &plan);
+    let quote_geometry = plan.quote_geometry;
     if external_skew_transitioned(*external_skew_previous_shift_bps, external_skew_shift_bps) {
         emit_external_skew_transition(
             output_format,
@@ -1109,6 +1111,8 @@ pub(super) async fn maker_cycle(
         market_source,
         market_fallback_reason,
         ws_snapshot,
+        market_telemetry,
+        quote_geometry: &quote_geometry,
         position,
         starting_position,
         account: account_balance.as_ref(),
@@ -1176,6 +1180,7 @@ mod tests {
             ref_center: 100.04,
             external_skew_shift_bps: 4.0,
             micro_price_shift_bps: 0.0,
+            quote_geometry: Vec::new(),
         };
 
         assert_eq!(legacy_inventory_skew_shift_bps(100.0, &plan), 0.0);
