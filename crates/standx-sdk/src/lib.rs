@@ -10,7 +10,14 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust
+//! `no_run`: this example is compiled and type-checked on every `cargo test`,
+//! but never executed. Running it would issue a real HTTP request to the
+//! production endpoint, which made the workspace test gate depend on network
+//! reachability — a transient DNS or connectivity blip failed `cargo test`
+//! with no test actually broken, which is worse than useless in CI and has
+//! already caused one misread gate result.
+//!
+//! ```rust,no_run
 //! use standx_sdk::client::StandXClient;
 //!
 //! #[tokio::main]

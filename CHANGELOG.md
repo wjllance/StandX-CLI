@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The SDK's quick-start documentation example is now compiled but not executed (`no_run`). It previously issued a real HTTP request to the production endpoint when `cargo test` ran, so a transient network failure could fail the workspace test gate with no test actually broken.
+
 ### Added
 - `standx maker` now records observation-only market microstructure on `cycle_summary`: a `book` block (up to five depth levels per side, top-of-book sizes, touch spread, mark/mid divergence), a `tape` block summarizing the newly subscribed `public_trade` channel over a five-second window, and a `geometry` block reporting per-slot quote geometry — pre-clamp and post-clamp price, which bound was binding (eligibility band vs post-only no-cross), and the distance from each quote to the opposing touch. None of these fields feed quoting, cancellation, exit, or safety decisions, and the replay action sequence is unchanged.
 
