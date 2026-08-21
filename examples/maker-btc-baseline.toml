@@ -23,11 +23,13 @@
 # （HYPE 约 72 档，XAG 仅 6 档）。价格粒度不再是约束。
 #
 # ─── 未调参：以下项在 BTC 上语义已变，本文件沿用 HYPE 值，需实测后再定 ───
-# stop_loss = 5.0 / alert_loss = 2.5 是**绝对 DUSD**，不随 size 缩放。2× 名义下同样的
-#   美元亏损只需一半的 bps 移动即触发，等于把刹车相对收紧了 2 倍。按 HYPE run1
-#   （-1.8591 DUSD / 35.9h）线性外推，2× 名义下约 48h 就会撞到 -$5 而中断窗口。
-#   **本文件不擅自放宽刹车**（放宽安全限额必须是显式决策）；若目标窗口 >2 天，
-#   请 owner 明确裁决是否提到 10.0 / 5.0。
+# stop_loss / alert_loss 是**绝对 DUSD**，不随 size 缩放：2× 名义下同样的美元亏损只需
+#   一半的 bps 移动即触发，等于把刹车相对收紧 2 倍。**owner 裁决 2026-08-21：
+#   stop_loss 5.0 -> 10.0**，恢复与 HYPE 侧相当的相对刹车位置。按 HYPE run1
+#   （-1.8591 DUSD / 35.9h）线性外推，2× 名义下约 97h（~4 天）才撞线，与 docs/27 的
+#   多日单臂采集窗口匹配（留在 5.0 时约 48h 就会中断窗口）。
+#   **alert_loss 故意留在 2.5**：它只通知不停机，在一个被放宽的刹车前面保留一个更早的
+#   预警反而是想要的；代价是它会在 stop 的 25%（而非 50%）处就响。
 # max_divergence_bps = 15.0 对 BTC 过松：BTC 的 mark/mid 背离 p50 仅 +0.3bps，
 #   15bps 实际上永不触发，等于关掉了这道 skip 门。收紧会改变 skip 行为，需单独裁决。
 # vol_pause_bps = 40.0 / vol_window_secs = 60 未按 BTC 波动率重标；BTC 60s 内 40bps
@@ -57,7 +59,7 @@ max_divergence_bps = 15.0
 vol_pause_bps = 40.0
 vol_window_secs = 60
 
-stop_loss = 5.0
+stop_loss = 10.0
 alert_loss = 2.5
 alert_inventory_pct = 70.0
 alert_position_change_pct = 20.0
