@@ -1,9 +1,10 @@
 # BTC-USD 基线（2026-08-21 换品种）。用法：standx maker run BTC-USD --config <本文件>
 #
-# 由 examples/maker-microprice-hype-baseline.toml 平移而来。**只有两个数值被改动**：
-# size 与 max_position（等名义换算 + owner 批准的 2× 扩大，见下）。其余参数逐字保留，
-# 以便与 HYPE 读数做机制层面的对照——但下面「未调参」一节列出的项在 BTC 上语义已变，
-# 不要当成已经为 BTC 调好。
+# 由 examples/maker-microprice-hype-baseline.toml 平移而来。已改动：size 与
+# max_position（owner 2026-08-21 两次裁决），以及同日第三次裁决启用的库存退出
+# （inventory_exit_pct=70 / inventory_exit_qty=0.0005 / [inventory_exit] ALO+IOC，见下）。
+# 其余参数逐字保留，以便与 HYPE 读数做机制层面的对照——但下面「未调参」一节列出的
+# 项在 BTC 上语义已变，不要当成已经为 BTC 调好。
 #
 # 为什么换到 BTC：docs/evidence/mark-best-spread-denominator-2026-08-20.md 实测五品种
 # mark-盘口分母，BTC 最健康（锚定偏置 p50 = +0.3bps，mark≈book mid），HYPE 最差
@@ -53,8 +54,11 @@ interval = 3
 
 max_position = 0.002
 skew_bps = 8.0
-inventory_exit_pct = 0.0
-inventory_exit_qty = 0.0
+# 库存退出触发（docs/33，owner 2026-08-21 第三次裁决启用）：|pos| >= max_position×70%
+# = 0.0014 起砍，每 cycle 最多砍 inventory_exit_qty=0.0005（一笔 size）。两个值都必须
+# >0，缺一 inventory_exit_plan 直接返回 None。
+inventory_exit_pct = 70.0
+inventory_exit_qty = 0.0005
 max_divergence_bps = 15.0
 vol_pause_bps = 40.0
 vol_window_secs = 60
@@ -128,6 +132,9 @@ lambda = 0.5
 cap_bps = 2.0
 dead_zone_bps = 0.5
 
-# Inventory exit execution cost (docs/33). 默认关；开启前先在 paper 验证 IOC 是否被后端接受。
+# Inventory exit execution cost (docs/33)。owner 2026-08-21 裁决启用：ALO 挂单离场优先
+# （1bps maker），亏损越 ioc_loss_bps（默认 5）或 Alo 段超 alo_max_cycles 升级 IOC
+# （4bps taker，穿价 ioc_cross_ticks 保证成交）。IOC 后端接受度已于当日实盘探针验证：
+# 不交叉 IOC 买单（74,000 @ 0.0001，mark ~77,700）被立即取消，无成交、无留单。
 [inventory_exit]
-alo_enabled = false
+alo_enabled = true

@@ -227,3 +227,56 @@ emergency cancel 操作人：release owner（BossX）
 配置 sha256 `24e8381a5bd9c915f321db17989492213acc5fad7f5a3c41a9b1f3c9c7593d0c`
 （size=0.0005），代码 git sha 同首次（`fa4d130`，期间仅 docs/配置提交，无代码变更）。
 
+### run2 截断记录（2026-08-21）
+
+窗口 09:28Z → 10:10Z（~42 分钟），因 owner 第三次裁决（启用库存退出）截断。
+这次走 SIGTERM 优雅停机：cleanup 撤单经 `query_order` 双向确认，residual
+−0.0001（部分成交所致）交接后手动 reduce-only 市价平仓，FLAT 复核通过。
+
+| 指标 | 读数 |
+|---|---|
+| 成交 | 34 笔 |
+| 净 PnL | **−0.350 DUSD**（`net_pnl_complete=true`；≈ −2.6bps/笔，与 run1 的 −2.7bps 一致） |
+| passive capture / markout 1s/5s/30s | +3.72 / +1.11 / −2.07 / −5.07 bps |
+| uptime | 64%（明显低于 HYPE 窗口的 ~88%，待观察） |
+| halt / guard | 22 / 1340 cycles（1.6%）；guard 激活 12 cycles |
+
+### owner 裁决（2026-08-21，第三次）：启用库存退出 ALO+IOC（70%）
+
+会话内明确指示（"我等不了，现在上，70%"）。随之变化：
+
+- `inventory_exit_pct=70`（|pos| ≥ 0.002×70% = 0.0014 触发）+
+  `inventory_exit_qty=0.0005`（每 cycle 最多砍一笔 size）+
+  `[inventory_exit] alo_enabled=true`（ALO 1bps 优先，亏损越 5bps 或 Alo 段超时
+  升级 IOC 4bps 穿价成交）。
+- **代码事实**：`inventory_exit_plan` 要求 `chunk_qty > 0`，只设 pct 不设 qty 是
+  空配置——三个值必须一起改。
+- **IOC 后端接受度已实盘探针验证**（docs/33 的前置要求）：不交叉 IOC 买单
+  （74,000 @ 0.0001，mark ~77,700）被立即取消，无成交、无留单。
+- **语义变化（必须带着读数）**：主动砍仓进入基线，退出成本进 PnL，本窗口读数
+  不再是与 HYPE 同口径的纯被动基线。docs/33 的判定（执行成本：退出笔数 × 节省
+  ~3bps、ALO/IOC 占比、exit_cost_quote）随每日记录观测，正式判定仍悬置——本轮
+  不给出 accepted/rejected，只采集。
+
+已填授权（2026-08-21，第三次，run2 截断后重开）：
+
+```text
+授权：BTC-USD 首窗口采集（单臂长跑，按 27 号手册规则，第三次）
+symbol：BTC-USD
+配置：examples/maker-btc-baseline.toml（size=0.0005 + 库存退出 70%/0.0005/ALO+IOC，
+      sha256 951de334…，原样）
+代码：git sha 同前（fa4d130 + docs/配置提交，无代码变更）
+风险边界：单 symbol、一档、size=0.0005（≈$38.6 名义）、max_position=0.002；
+          库存退出 70% 触发、chunk 0.0005、ALO+IOC；stop_loss=10.0 生效；
+          账户硬熔断不开启
+窗口：2026-08-21T10:15Z 起，计划 72 小时（3 天），不换臂、不调参
+emergency cancel 操作人：release owner（BossX）
+授权人 / 时间：release owner（BossX），2026-08-21，会话内明确授权
+      （"我等不了，现在上，70%"）
+前置：FLAT 实测通过（run2 residual −0.0001 已手动平仓）；IOC 探针通过；
+      token 覆盖窗口；OO 告警已 provision + AUTO_UPLOAD 实时上传；webhook 已实测
+```
+
+启动记录（第三次）：run_id `btc-first-window-20260821T1015Z`，首臂 2026-08-21T10:15Z（UTC），
+配置 sha256 `951de334af5b76d704e3962c74eb0f2cee47a948e0c239443e5d673b24b4ca04`，
+代码 git sha 同首次（`fa4d130`，无代码变更）。

@@ -2,9 +2,14 @@
 
 ## 状态
 
-`planned`。这是**影响成交结果**的变更（改的是成交方式，不是报价位置），按
-[28-experiment-protocol](28-experiment-protocol.md) 需要立项与预注册判据；判据是执行成本，
-不是 PnL（见「判据」一节）。默认关闭，关闭时逐 action 等价。
+`enabled_pending_judgment`（2026-08-21）。owner 当日第三次裁决直接启用（跳过独立
+A/B）：BTC 首窗口 run3 起 `inventory_exit_pct=70 / inventory_exit_qty=0.0005 /
+alo_enabled=true`，见 [34](34-maker-btc-migration-2026-08-21.md) §7。IOC 后端接受度已于
+当日实盘探针验证。判据（执行成本，见「判据」一节）随窗口每日记录观测，**正式判定
+悬置**——裁决时点在 BTC 基线读数出来之后，不在本轮窗口内给 accepted/rejected。
+这是**影响成交结果**的变更（改的是成交方式，不是报价位置），按
+[28-experiment-protocol](28-experiment-protocol.md) 的常态路径是立项 + 预注册判据 + 独立
+A/B；本次启用是 owner 的显式例外裁决，读数解释时必须带上"基线含主动砍仓"这一前提。
 
 ## 背景：为什么这是当前性价比最高的一项
 
