@@ -60,10 +60,11 @@ include capture), so the two conventions differ by ~capture_bps.
 """
 import bisect
 import json
+import random
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
-from statistics import mean, median
+from statistics import mean, median, stdev
 
 HORIZONS = [1.0, 5.0, 30.0]
 # attribution_rows computes the full curve; legacy pooled tables keep HORIZONS.
@@ -287,7 +288,7 @@ def attribution_rows(cycles, timeline):
                     if seg:
                         adverse = min(seg) if sign > 0 else max(seg)
                         exc = (maf - adverse) * sign / maf * 1e4
-            rows.append(dict(side=d["side"], tier=tier,
+            rows.append(dict(side=d["side"], tier=tier, ts=t,
                              cap=(mark0 - price) * sign / price * 1e4,
                              mo=mo, drift=drift, age=age, cls=cls,
                              stale_bps=stale_bps, stale_age=stale_age,
@@ -456,12 +457,84 @@ def print_signal_pricing(rows):
     print(" train is optimistic — the val column is the honest estimate; the real verdict is live A/B.")
 
 
+def block_bootstrap_sem(blocks, reps=1000, seed=20060731):
+    """Clustered (block) bootstrap SEM of the mean.
+
+    Fills inside one block share the same market episode, so resampling fills
+    one by one understates the uncertainty of the mean. Resampling whole
+    blocks (with replacement, same count as the input) preserves within-block
+    dependence; the spread of replicate means is the honest SEM. `blocks` is a
+    list of value-lists, one per block."""
+    rng = random.Random(seed)
+    flat = [v for block in blocks for v in block]
+    if len(blocks) < 2 or len(flat) < 2:
+        return float("nan")
+    means = []
+    for _ in range(reps):
+        total = count = 0
+        for _ in range(len(blocks)):
+            block = blocks[rng.randrange(len(blocks))]
+            total += sum(block)
+            count += len(block)
+        means.append(total / count)
+    return stdev(means)
+
+
+def print_clustering(rows):
+    print("\n=== clustering: block bootstrap (design effect of same-episode fills) ===")
+    print("fills cluster inside shared market episodes, so n nominal fills carry the")
+    print("information of fewer independent ones. deff = (block_sem / nominal_sem)^2;")
+    print("neff = n / deff is 'how many independent fills the sample is really worth'.")
+    print("Blocks are per arm x wall-clock window; three window lengths shown because")
+    print("clustering longer than the window still leaks into the estimate.")
+    metrics = [
+        ("cap", lambda r: r["cap"]),
+        ("mo1s", lambda r: r["mo"].get(1.0)),
+        ("mo5s", lambda r: r["mo"].get(5.0)),
+        ("mo30s", lambda r: r["mo"].get(30.0)),
+        ("drift15s", lambda r: r["drift"].get(15.0)),
+    ]
+    for t in ("baseline", "candidate"):
+        arm_rows_t = [r for r in rows if r.get("treatment") == t]
+        if not arm_rows_t:
+            continue
+        print(f"{t}:")
+        for name, get in metrics:
+            vals = [(r["arm_ts"], r["ts"], get(r)) for r in arm_rows_t
+                    if r.get("ts") is not None and get(r) is not None]
+            n = len(vals)
+            if n < 30:
+                print(f" {name:9s}: n{n} (too few)")
+                continue
+            xs = [v for _, _, v in vals]
+            nominal = stdev(xs) / n ** 0.5
+            line = (f" {name:9s} n{n:4d} mean{mean(xs):+6.2f} sd{stdev(xs):5.2f} "
+                    f"sem_nom{nominal:5.2f}")
+            for hours in (1, 2, 4):
+                blocks = defaultdict(list)
+                for arm_ts, ts, v in vals:
+                    blocks[(arm_ts, int(ts // (hours * 3600)))].append(v)
+                bl = list(blocks.values())
+                if len(bl) < 8:
+                    line += f" | {hours}h: {len(bl)} blocks (too few)"
+                    continue
+                sem_b = block_bootstrap_sem(bl)
+                deff = (sem_b / nominal) ** 2
+                line += f" | {hours}h sem{sem_b:5.2f} deff{deff:4.1f} neff{n / deff:4.0f}"
+            print(line)
+
+
 def stat(xs):
     xs = [x for x in xs if x is not None]
     if not xs:
         return "n/a"
     neg = sum(1 for x in xs if x < 0) / len(xs) * 100
-    return f"mean{mean(xs):+6.2f} med{median(xs):+6.2f} neg%{neg:3.0f}"
+    sd_s = sem_s = "   n/a"
+    if len(xs) > 1:
+        sd = stdev(xs)  # sample standard deviation (ddof=1)
+        sd_s = f"{sd:5.2f}"
+        sem_s = f"{sd / len(xs) ** 0.5:5.2f}"
+    return f"mean{mean(xs):+6.2f} med{median(xs):+6.2f} sd{sd_s} sem{sem_s} neg%{neg:3.0f}"
 
 
 def m(xs):
@@ -622,6 +695,9 @@ def main(paths):
         if arms:
             print(f"{'':9s}  sum pnl {sum(a['pnl'] for a in arms):+.3f}  "
                   f"sum gross_spread {sum(a['gross'] for a in arms if a['gross']):+.3f}")
+
+    if attr_rows:
+        print_clustering(attr_rows)
 
     if pooled.get("baseline") and tier0_only.get("candidate"):
         print("\n=== matched-condition: candidate tier0 fills vs all baseline fills ===")
