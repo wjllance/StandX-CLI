@@ -17,8 +17,16 @@
 - **当前冻结 HYPE 基线**启用 `nonlinear_skew(boost=3, cap=12bps)` 与
   `external_guard(enter=10bps, exit=5bps)`；两者分别于 2026-07-25 和 2026-07-27
   判定 accepted，但当时的预注册判据没有把 PnL 作为晋级条件。
-- **`external_skew` 已实现但默认关闭。** 当前只有冻结候选配置，没有 accepted 判定；是否
-  使用 live 时间片验证，仍需 release owner 独立裁决和新的精确授权。
+- **`external_skew` 在跑，但从未被判定（owner 裁决 2026-08-21：保留，判定推迟）。**
+  它随 microprice A/B 进入生产——那一轮**两臂都带 `[external_skew]`**，所以那次判定
+  只回答了"在 external_skew 之上加 microprice 有没有用"，**从未隔离过 external_skew
+  自己**。当前 `examples/maker-microprice-hype-baseline.toml` 里 `enabled = true`。
+  owner 于 2026-08-21 裁决**暂不摘除、暂不补判定**，之后有窗口再回来看；
+  判据仍冻结在 [29](29-maker-external-skew-design.md)，不会失效。
+  **直接后果（读数时必须记住）**：在它开着的期间跑出来的任何窗口，读数里都含着一个
+  效果未知的机制。这尤其影响两件正欠窗口的事——band=30 的重新验证和 microprice 的
+  幅度重测（见 [30](30-maker-uptime-band-tightening-design.md)）。两者的结论都不能
+  被表述为"当前基线的效果"，只能表述为"含未判 external_skew 的基线的效果"。
 - **主要损耗是逆向选择。** 两轮数据中，spread capture 无法覆盖成交后 markout 与手续费；
   即使剔除最差 10% 成交，其余 90% 的单笔经济性仍约为负。
 - **当前瓶颈是诊断数据，不是缺少机制。** 下一优先级是纯观测的盘口深度、成交方向和
@@ -40,7 +48,7 @@
 | `external_guard` | accepted | 防御侧抑制已进入冻结 HYPE 基线；保持 fail-open 信号语义 |
 | 阶段 5-b：退出与账户风险 | implemented | typed trim/wind-down、残余仓位交接和默认关闭的账户硬熔断已落地 |
 | cleanup 残余判定硬化 | completed | WS 终态 success 优先、按单 REST status 兜底，未确认时继续 fail-closed |
-| `external_skew` | implemented, pending verdict | 默认关闭、关闭时等价；候选尚未获得 accepted 判定 |
+| `external_skew` | **enabled in live, unjudged** | 已在冻结基线里开启（`enabled = true`），但从未隔离判定——随 microprice A/B 以**两臂同开**的方式进入生产。owner 2026-08-21 裁决保留、判定推迟；判据仍冻结在 [29](29-maker-external-skew-design.md) |
 | `micro_price` | accepted（方向）/ 幅度未判 | A/B 于 2026-08-19 判 accepted 并提为默认基线配置（`52b0bea`）；判定成立于 band=40，band=30 下偏移会被 clamp 截断，**效果量需新窗口重测**（见 [30](30-maker-uptime-band-tightening-design.md)） |
 
 历史设计、运行手册与判定链见
@@ -85,9 +93,11 @@ symbol、敞口、配置和时间窗，不能复用于新的 live 运行。
    标签；先用 replay 证明不会把一种毒性换成另一种，再考虑立项。
 3. **降低退出执行成本**：库存退出目前发 `OrderType::Market`，每次付 4bps taker。改为
    ALO 挂单优先、亏损越阈值才 IOC 兜底，每次省约 3bps。纯成本项，不改变风险方向。
-4. **裁决 `external_skew`**：如决定继续，使用
-   [29-maker-external-skew-design.md](29-maker-external-skew-design.md) 的冻结单候选和预注册
-   判据，并重新记录授权；未裁决前保持默认关闭。
+4. **（推迟）隔离判定 `external_skew`**：owner 2026-08-21 裁决先保留启用、不补判定。
+   回来做的时候用 [29-maker-external-skew-design.md](29-maker-external-skew-design.md) 的
+   预注册判据（仍有效），但**臂定义已过期**——文中 baseline 臂是 microprice 晋级前的
+   `maker-guard-hype-candidate.toml`，需重挂到当前基线（baseline = 当前减
+   `external_skew`，candidate = 当前）并重新登记授权。
 
 盘口/流特征数据未积累到足够窗口前，不启动 OFI 或新的自动暂停机制。microprice 已实现
 并于 2026-08-19 判 accepted（方向），但其幅度在当前 band=30 下未判；纯观测遥测见
