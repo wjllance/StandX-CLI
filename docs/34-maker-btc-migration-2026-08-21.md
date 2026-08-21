@@ -280,3 +280,25 @@ emergency cancel 操作人：release owner（BossX）
 启动记录（第三次）：run_id `btc-first-window-20260821T1015Z`，首臂 2026-08-21T10:15Z（UTC），
 配置 sha256 `951de334af5b76d704e3962c74eb0f2cee47a948e0c239443e5d673b24b4ca04`，
 代码 git sha 同首次（`fa4d130`，无代码变更）。
+
+### run3 截断记录（2026-08-21，基础设施事故，非 maker 故障）
+
+窗口 10:15Z → 12:39Z（~2.4h），**被宿主任务系统的输出上限（16MiB）强杀**——maker
+stderr 的 `public_trade raw sample` 等输出被任务捕获管道吞满所致，maker 本身无任何
+故障。硬杀导致 cleanup 未执行：残余卖单 1 张（0.0005 @ 77361.43）手动
+`cancel-all` 清除，仓位本已 FLAT，复核通过。OO 已 drain（16230 条）。
+
+截断前读数（4014 cycles，80 笔，买/卖 40/40）：净 −0.458 DUSD（≈ −1.5bps/笔，
+好于 run1/run2 的 −2.6/−2.7），capture +3.73bps，markout 5s/30s = −1.95/−2.91bps。
+**库存退出首实战**：仓位顶到 0.002 触发 trim，ALO 挂 3s 未成交 → 升 IOC →
+残量重试，两笔各 0.0005 @ 76905.99 成交，砍回 0.001；`exit_cost_quote` −0.0258
+（~3.3bps，本集全额 taker）。
+
+**教训（第三条，流程级）**：长跑 run 的 wrapper 输出必须重定向到文件
+（`>> var/standx/<run>.wrapper.log 2>&1`），不能让宿主管道捕获 maker stderr——
+它无界增长会触发宿主强杀，等于绕过所有 fail-safe。
+
+启动记录（第四次，配置不变，run3 事故的继续采集，沿用第三次授权——同配置、
+同风险边界，仅重开窗口）：run_id `btc-first-window-20260821T1241Z`，首臂
+2026-08-21T12:41Z（UTC），配置 sha256 同前（`951de334…`），代码 git sha 不变。
+72h 窗口至 2026-08-24T12:41Z。
