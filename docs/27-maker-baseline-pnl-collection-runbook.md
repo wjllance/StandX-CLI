@@ -139,6 +139,23 @@ emergency cancel 操作人：release owner（BossX）
 两次 fail-closed 均为误报，停机时 FLAT 且挂单簿已清。根因与修复见
 [maker-baseline-pnl-2026-07-30-run2-truncated.md](evidence/maker-baseline-pnl-2026-07-30-run2-truncated.md)。
 
+已填授权（2026-07-31，第四次，run3 事故后重新采集）：
+
+```text
+授权：冻结基线 PnL 绝对读数采集（单臂长跑）
+symbol：HYPE-USD
+配置：examples/maker-guard-hype-candidate.toml（sha256 6314a374…，原样）
+代码：git sha cd50832bc5d895e0c9fc4601462652d2171f8562（含两帧 ack place/cancel
+      双侧修复 + venue_observed 保全，PR #359）
+风险边界：单 symbol、一档、最小有效数量、max_position 沿用基线；
+          stop_loss=5.0 生效；账户硬熔断不开启
+窗口：2026-07-31T03:01Z 起，计划 72 小时（3 天），不换臂、不调参
+emergency cancel 操作人：release owner（BossX）
+授权人 / 时间：release owner（BossX），2026-07-31，会话内明确授权（"已合入main。继续重新采集"）
+前置：FLAT 实测通过（positions/orders 均空，run3 残余 -0.1 HYPE 空头已处置）；
+      token 剩余 222h 覆盖窗口；metadata 3/2/0.1 未变；OO 两条告警已 provision
+```
+
 风险预算沿用当前 [live gate](14-maker-live-gate.md) 和
 [19 号 runbook](19-maker-stage2-live-ab-runbook.md) 的最小敞口、精确授权口径：已知最坏
 路径是趋势市库存满仓后 stop-loss 停机持仓，损失上界约

@@ -17,4 +17,6 @@ __pycache__/
 *.py[cod]
 /tmp
 /var/standx/
+/var/lark-auth-qr.png
+/.mimocode/
 /deploy/openobserve/data/
