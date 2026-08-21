@@ -31,8 +31,9 @@
 #   多日单臂采集窗口匹配（留在 5.0 时约 48h 就会中断窗口）。
 #   **alert_loss 故意留在 2.5**：它只通知不停机，在一个被放宽的刹车前面保留一个更早的
 #   预警反而是想要的；代价是它会在 stop 的 25%（而非 50%）处就响。
-# max_divergence_bps = 15.0 对 BTC 过松：BTC 的 mark/mid 背离 p50 仅 +0.3bps，
-#   15bps 实际上永不触发，等于关掉了这道 skip 门。收紧会改变 skip 行为，需单独裁决。
+# max_divergence_bps：owner 2026-08-21 第四次裁决 15.0 -> 8.0。依据 run3/run4 实测
+#   逐周期 |mark-mid| 分布（n=5797）：p50=1.9 / p90=5.3 / p99=11.65，15bps 零触发
+#   （等于没这道门）；8bps 跳过 ~3% 周期、切在 p99 尾巴前；5bps 会跳 12% 伤 uptime。
 # vol_pause_bps = 40.0 / vol_window_secs = 60 未按 BTC 波动率重标；BTC 60s 内 40bps
 #   的移动比 HYPE 罕见，熔断相应更难触发。
 # band 预算红线（docs/29，启动即校验，不是运行时截断）：
@@ -59,7 +60,7 @@ skew_bps = 8.0
 # >0，缺一 inventory_exit_plan 直接返回 None。
 inventory_exit_pct = 70.0
 inventory_exit_qty = 0.0005
-max_divergence_bps = 15.0
+max_divergence_bps = 8.0
 vol_pause_bps = 40.0
 vol_window_secs = 60
 
