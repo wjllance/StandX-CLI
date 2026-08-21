@@ -302,3 +302,20 @@ stderr 的 `public_trade raw sample` 等输出被任务捕获管道吞满所致�
 同风险边界，仅重开窗口）：run_id `btc-first-window-20260821T1241Z`，首臂
 2026-08-21T12:41Z（UTC），配置 sha256 同前（`951de334…`），代码 git sha 不变。
 72h 窗口至 2026-08-24T12:41Z。
+
+### run4 截断记录（2026-08-21）+ owner 第四次裁决：max_divergence 15→8
+
+窗口 12:41Z → 13:40Z（~1h），因 owner 第四次裁决截断。SIGTERM 优雅停机，
+residual flat（无需人工处置）。读数：42 笔，净 −0.568 DUSD，capture +3.95bps，
+markout 5s/30s = −3.0/−4.48bps，uptime 70%，exit_fills=1。
+
+**owner 裁决（2026-08-21，第四次）：`max_divergence_bps` 15.0 → 8.0**（"现在就收紧"）。
+阈值依据 run3/run4 实测逐周期 |mark−mid| 分布（n=5797）：p50=1.9 / p90=5.3 /
+p99=11.65 / max=14.8bps；15bps 零触发（死门确认），8bps 跳过 ~3% 周期、切在 p99
+尾巴前。备选 5bps 会跳 12% 周期、叠加本已偏低的 uptime（64–70%）被放弃。
+改变的是 skip/standby 行为：背离越阈时进入行情降级 standby（不报价），属防御性收紧。
+
+启动记录（第五次，沿用第三/四次授权的风险边界，仅配置一行变化）：
+run_id `btc-first-window-20260821T1345Z`，首臂 2026-08-21T13:45Z（UTC），
+配置 sha256 `ba8849df2bff60289ee00bdc55c1e53e4769d1c7c3b76526510c1bcffaa7b9a7`，
+代码 git sha 不变（`fa4d130`，无代码变更）。72h 窗口至 2026-08-24T13:45Z。
