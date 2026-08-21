@@ -57,6 +57,7 @@ runbook 统一放在 [archive/](archive/README.md)，不能作为新的 live 授
 |---|---|---|
 | [12 - 发布流程](12-version-checklist.md) | 版本真源、发布 PR 和验证 | 不复制当前版本号 |
 | [19 - 受控 A/B 基础 runbook](19-maker-stage2-live-ab-runbook.md) | 当前 stage2 编排器的部署、canary、应急与轮换流程 | 历史授权不可复用 |
+| [Handoff 下一阶段 2026-08-21](handoff-next-phase-2026-08-21.md) | 已落地内容、三件欠窗口的事、建议顺序与陷阱清单 | 交接指针，非授权 |
 | [27 - 冻结基线 PnL 采集](27-maker-baseline-pnl-collection-runbook.md) | 单臂长跑、绝对读数和异常处置 | 新运行必须重新授权 |
 | [28 - 实验规程](28-experiment-protocol.md) | 预注册判据、四件套、判定词汇和未判项 | 影响成交结果的变更必须遵守 |
 | [ADR 0001](adr/0001-maker-recovery-supervision.md) | Maker 恢复与监督架构 | 已采纳的架构决策 |
