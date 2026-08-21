@@ -102,4 +102,16 @@ ALO+IOC；max_divergence_bps=8；窗口 ~12h 墙钟（6 臂 × 2h + 臂间 wind-
 
 ## 启动记录
 
-（开跑时追加：首臂 UTC 时间戳、git sha、编排器 pid、锁路径。）
+- git sha：`136fb46`（main，本立项 commit；本地 main 领先 origin/main，推送待 owner）
+- 首臂（baseline）UTC 启动：2026-08-21T15:02:23Z
+  （run_id `stage2-baseline-20260821T150223Z-ba8849df2bff`，maker lifecycle
+  started 15:02:25Z，LIVE + feishu webhook 已确认）
+- 编排器 pid 332421，日志 `var/standx/stage2-ab-boost6-20260821T150223Z.orchestrator.log`，
+  锁 `var/standx/.ab.lock`；臂长 7200s，臂序 baseline→candidate 交替，臂末
+  SIGUSR1 wind-down（reduce-only 市价平仓残余），FLAT 才换臂。
+- OO 实时上传已随臂启动（openobserve_ingest --follow，interval 2s）。
+- 作废片段：15:01:19Z 首次启动因 OO 凭据漏导出主动 SIGTERM 重开，该片段
+  ~2.5 分钟、0 成交（fills_total=0），不进入任何分析。
+- 前置状态：run5（`btc-first-window-20260821T1345Z`，配置同 baseline）已于
+  15:00:01Z 优雅停止，residual flat，exit=0，66 fills / 75min / PnL -0.68；
+  独立复核 `account positions` / `account orders` 均为 `[]`。
