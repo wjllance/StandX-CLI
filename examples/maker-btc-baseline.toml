@@ -1,0 +1,131 @@
+# BTC-USD 基线（2026-08-21 换品种）。用法：standx maker run BTC-USD --config <本文件>
+#
+# 由 examples/maker-microprice-hype-baseline.toml 平移而来。**只有两个数值被改动**：
+# size 与 max_position（等名义换算 + owner 批准的 2× 扩大，见下）。其余参数逐字保留，
+# 以便与 HYPE 读数做机制层面的对照——但下面「未调参」一节列出的项在 BTC 上语义已变，
+# 不要当成已经为 BTC 调好。
+#
+# 为什么换到 BTC：docs/evidence/mark-best-spread-denominator-2026-08-20.md 实测五品种
+# mark-盘口分母，BTC 最健康（锚定偏置 p50 = +0.3bps，mark≈book mid），HYPE 最差
+# （p50 = +1.9bps 持续偏在 mid 上方，半价差 p99 = 4.7bps 厚尾）。逆选的物理量是「距
+# best 的距离」，而我们所有几何量锚在 mark 上，所以分母直接框住一切机制的起效空间。
+# 八轮机制迭代全跑在最差的分母上，换品种从未被检验过。
+#
+# 规模（mark 74,650.75 @ 2026-08-21；qty tick = min_order_qty = 0.0001 BTC ≈ $7.465）：
+#   size = 0.0002        单笔名义 ≈ $14.93   （HYPE 侧是 0.1 × 72.5 ≈ $7.25）
+#   max_position = 0.002 最大敞口 ≈ $149.3   （保持 HYPE 的 10× size 库存容量比例）
+# 即 2× 名义。**这越过了 docs/18「收益读数转正前不扩大 size / max_position」那条红线**，
+# 由 owner 于 2026-08-21 明确裁决通过；理由与代价记录在 docs/18 与 docs/34。
+# size 取 0.0002 而非等名义的 0.0001，是因为 0.0001 正好等于 min_order_qty，会让
+# skew 的缩量退化成二值开关——阶段 3 v0 判 rejected 的同一个坑。
+#
+# tick 精度：BTC 0.01 / 74,650 = 0.00134 bps/tick，±10bp 带内约 7,460 档，基本连续
+# （HYPE 约 72 档，XAG 仅 6 档）。价格粒度不再是约束。
+#
+# ─── 未调参：以下项在 BTC 上语义已变，本文件沿用 HYPE 值，需实测后再定 ───
+# stop_loss = 5.0 / alert_loss = 2.5 是**绝对 DUSD**，不随 size 缩放。2× 名义下同样的
+#   美元亏损只需一半的 bps 移动即触发，等于把刹车相对收紧了 2 倍。按 HYPE run1
+#   （-1.8591 DUSD / 35.9h）线性外推，2× 名义下约 48h 就会撞到 -$5 而中断窗口。
+#   **本文件不擅自放宽刹车**（放宽安全限额必须是显式决策）；若目标窗口 >2 天，
+#   请 owner 明确裁决是否提到 10.0 / 5.0。
+# max_divergence_bps = 15.0 对 BTC 过松：BTC 的 mark/mid 背离 p50 仅 +0.3bps，
+#   15bps 实际上永不触发，等于关掉了这道 skip 门。收紧会改变 skip 行为，需单独裁决。
+# vol_pause_bps = 40.0 / vol_window_secs = 60 未按 BTC 波动率重标；BTC 60s 内 40bps
+#   的移动比 HYPE 罕见，熔断相应更难触发。
+# band 预算红线（docs/29，启动即校验，不是运行时截断）：
+#   spread(8) + nonlinear.cap(12) + external.cap(8) + micro.cap(2) = 30 <= band 30
+#   micro.cap 由 6 降到 2 正是为了满足这条；6 会得到 34 > 30，配置直接起不来。
+# [microprice] lambda = 0.5 是在 HYPE 上定的，而分母证据明确指出各品种锚定偏置的
+#   方向和幅度都不同、单一固定 lambda 无法适配所有品种。BTC 锚定偏置 (+0.3bps) 只有
+#   HYPE (+1.9bps) 的六分之一，这个 lambda 在 BTC 上没有依据。见 docs/34 的裁决点。
+# [external_skew] 已启用但从未隔离判定（docs/29，owner 2026-08-21 裁决保留）。
+#   任何 BTC 读数同样含这个未判机制。
+
+spread_bps = 8.0
+band_bps = 30.0
+size = 0.0002
+levels = 1
+level_step_bps = 2.0
+refresh_bps = 4.0
+interval = 3
+
+max_position = 0.002
+skew_bps = 8.0
+inventory_exit_pct = 0.0
+inventory_exit_qty = 0.0
+max_divergence_bps = 15.0
+vol_pause_bps = 40.0
+vol_window_secs = 60
+
+stop_loss = 5.0
+alert_loss = 2.5
+alert_inventory_pct = 70.0
+alert_position_change_pct = 20.0
+alert_uptime = 60.0
+alert_equity_below = 94.0
+alert_margin_below = 30.0
+
+no_ws = false
+order_response_reconnect_attempts = 3
+order_response_reconnect_backoff = 2
+account_stream_reconnect_attempts = 3
+account_stream_reconnect_backoff = 2
+
+[adaptive_spread]
+enabled = false
+min_spread_bps = 8.0
+max_spread_bps = 18.0
+
+[[adaptive_spread.tiers]]
+spread_bps = 8.0
+refresh_bps = 4.0
+
+[[adaptive_spread.tiers]]
+enter_vol_bps = 10.0
+exit_vol_bps = 7.0
+spread_bps = 12.0
+refresh_bps = 5.0
+
+[[adaptive_spread.tiers]]
+enter_vol_bps = 20.0
+exit_vol_bps = 15.0
+spread_bps = 18.0
+refresh_bps = 6.0
+
+[size_skew]
+enabled = false
+activate_pct = 30.0
+release_pct = 20.0
+add_side_factor = 0.5
+
+# Stage 3 v1 nonlinear price skew. size > min_order_qty 后缩量不再退化为二值。
+[nonlinear_skew]
+enabled = true
+boost = 3.0
+cap_bps = 12.0
+
+# External-price defensive guard.
+[external_guard]
+enabled = true
+enter_bps = 10.0
+exit_bps = 5.0
+max_age_ms = 5000
+basis_half_life_secs = 300
+
+# External-price center offset. 已启用但从未隔离判定（docs/29）。
+[external_skew]
+enabled = true
+lambda = 0.5
+cap_bps = 8.0
+dead_zone_bps = 1.0
+
+# Field-side mid-bias microprice shift (docs/31)。lambda 在 HYPE 上定标，BTC 无依据。
+[microprice]
+enabled = true
+lambda = 0.5
+cap_bps = 2.0
+dead_zone_bps = 0.5
+
+# Inventory exit execution cost (docs/33). 默认关；开启前先在 paper 验证 IOC 是否被后端接受。
+[inventory_exit]
+alo_enabled = false

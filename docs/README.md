@@ -50,6 +50,7 @@ runbook 统一放在 [archive/](archive/README.md)，不能作为新的 live 授
 | [31 - Microprice 设计](31-maker-microprice-design.md) | 场内侧 touch-mid 中心偏移的设计与预注册判据 | 方向已判 accepted，幅度未判 |
 | [32 - 纯观测遥测](32-maker-observation-telemetry-design.md) | 盘口深档、成交流、clamp 命中与距盘口距离的观测字段设计 | 纯观测，不含策略授权 |
 | [33 - 退出执行成本](33-maker-exit-execution-cost-design.md) | 库存退出改 ALO 优先 + IOC 兜底的设计与预注册判据 | 待立项候选，默认关闭 |
+| [34 - 换品种到 BTC](34-maker-btc-migration-2026-08-21.md) | 规模换算、owner 裁决、band 红线修复与首窗口计划 | 已准备，未授权 live |
 
 ## 生产操作与实验
 

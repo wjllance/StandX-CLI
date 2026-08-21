@@ -27,6 +27,25 @@
   效果未知的机制。这尤其影响两件正欠窗口的事——band=30 的重新验证和 microprice 的
   幅度重测（见 [30](30-maker-uptime-band-tightening-design.md)）。两者的结论都不能
   被表述为"当前基线的效果"，只能表述为"含未判 external_skew 的基线的效果"。
+- **交易品种自 2026-08-21 起换为 BTC-USD（owner 裁决）。** 依据是
+  [mark-best 分母证据](evidence/mark-best-spread-denominator-2026-08-20.md)：BTC 锚定偏置
+  p50 = +0.3bps（mark≈book mid，五品种最健康），HYPE = +1.9bps（最差，半价差 p99 4.7bps
+  厚尾）。八轮机制迭代全跑在最差的分母上，而换品种从未被检验。配置见
+  `examples/maker-btc-baseline.toml`，规模换算与未决裁决点见
+  [34](34-maker-btc-migration-2026-08-21.md)。
+  **`size` 采用 0.0002（≈$14.93，2× 名义）而非等名义的 0.0001**：后者正好等于
+  `min_order_qty`，会让 skew 缩量退化成二值开关（阶段 3 v0 判 rejected 的同一个坑）。
+  owner 明确裁决接受这次 2× 扩大——**这是下面那条「不扩大 size」红线的一次显式例外**，
+  代价是若逐笔经济性与 HYPE 同量级则美元流血同比放大。注意加大 size **不提升统计功效**
+  （bps 是比率、σ 不随 size 缩小），功效只由成交笔数决定。
+  **HYPE 的机制判定不自动结转到 BTC**，冻结经济口径（capture 2.8 / markout 3.2）全是
+  HYPE 测量，BTC 需要自己的绝对读数。
+- **band 预算红线曾使生产配置无法启动（2026-08-21 已修）。** band 40→30 之后
+  `spread(8)+nonlinear(12)+external(8)+micro(6)=34 > 30` 触发 [29](29-maker-external-skew-design.md)
+  的启动校验，`maker-microprice-hype-baseline.toml` **完全起不来**。红线是启动即校验、
+  不做运行时截断（在被截断的偏移上做 A/B 不可解读）。修复为 `[microprice] cap_bps 6→2`
+  （幅度本就是未判项，不触碰已 accepted 机制）。**逃逸路径值得记住：改 live 配置后单测
+  全绿不构成验证——必须用该配置真正启动一次走完启动校验。**
 - **主要损耗是逆向选择。** 两轮数据中，spread capture 无法覆盖成交后 markout 与手续费；
   即使剔除最差 10% 成交，其余 90% 的单笔经济性仍约为负。
 - **当前瓶颈是诊断数据，不是缺少机制。** 下一优先级是纯观测的盘口深度、成交方向和

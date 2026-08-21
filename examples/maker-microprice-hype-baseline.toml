@@ -3,11 +3,19 @@
 # Candidate: same baseline + [microprice] enabled.
 # Band kept at 30bps (owner decision 2026-08-19): docs/30 made ±10bp two-sided
 # in-band uptime a CONSTRAINT, and widening the strategy's own cancel band moves
-# the wrong way. The band is deliberately allowed to bind.
-# Band budget: spread(8) + nonlinear.cap(12) + external.cap(8) = 28 <= 30  (baseline)
-#             spread(8) + nonlinear.cap(12) + external.cap(8) + micro.cap(6) = 34 > 30 (candidate)
-#             -> on fully stacked shifts the candidate arm's center offset IS
-#                clamped to the band edge. That truncation is accepted, not a bug.
+# the wrong way.
+# Band budget red line (docs/29, 2026-07-31): spread + ladder + inventory cap +
+# external cap + microprice cap MUST be <= band_bps, enforced at STARTUP — the
+# bot refuses to run otherwise, it does not silently clamp.
+#   spread(8) + nonlinear.cap(12) + external.cap(8) + micro.cap(2) = 30 <= 30
+# 2026-08-21 fix: micro.cap was 6, giving 34 > 30, so this config could not
+# start at all after band went 40 -> 30 on 2026-08-19. The earlier comment here
+# claimed the excess would "be clamped to the band edge, accepted, not a bug" —
+# that contradicted the red line, which exists so a mechanism's configured
+# strength can never be silently truncated (an A/B on a truncated shift is
+# uninterpretable). microprice's cap was the one cut because its MAGNITUDE is
+# explicitly unjudged (owner 2026-08-19: direction accepted, magnitude needs a
+# fresh window), so shrinking it touches no accepted mechanism.
 #
 # Safety: microprice is fail-open (missing signal -> shift=0, quoting continues).
 # Guardrails: capture drop >1bps, cancel rate +50%, position p95 up, uptime -2pp.
@@ -91,11 +99,11 @@ cap_bps = 8.0
 dead_zone_bps = 1.0
 
 # ─── Field-side mid-bias microprice shift (docs/31) ───
-# Aggressive start: cap=6, lambda=0.5, dead_zone=0.5.
-# Band stays at 30, so a fully stacked shift is clamped to the band edge.
+# cap=2 (was 6): forced by the band budget red line at band=30, see header.
+# lambda=0.5, dead_zone=0.5 unchanged.
 # Fail-open: signal missing/non-finite -> shift=0.
 [microprice]
 enabled = true
 lambda = 0.5
-cap_bps = 6.0
+cap_bps = 2.0
 dead_zone_bps = 0.5
