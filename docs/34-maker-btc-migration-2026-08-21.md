@@ -30,7 +30,8 @@ mark 74,650.75（2026-08-21）；`qty tick = min_order_qty = 0.0001 BTC ≈ $7.4
 | `max_position` | 1.0（≈ $72.5） | 0.001（≈ $74.7） | **0.002（≈ $149.3）** |
 | 库存容量比 | 10× size | 10× size | 10× size |
 
-**owner 裁决 2026-08-21：采用 2× 名义（size = 0.0002）。** 两点理由与代价：
+**owner 裁决 2026-08-21：采用 2× 名义（size = 0.0002）。**（同日被第二次裁决
+0.0005 取代，见 §7。）两点理由与代价：
 
 - 等名义的 `0.0001` **正好等于 `min_order_qty`**，会让 skew 的缩量退化成二值开关——
   阶段 3 v0 判 rejected 的同一个坑。`size > min_order_qty` 是摆脱它的最低要求。
@@ -168,4 +169,61 @@ emergency cancel 操作人：release owner（BossX）
 启动记录：run_id `btc-first-window-20260821T0637Z`，首臂 2026-08-21T06:37Z（UTC），
 配置 sha256 `7b26cf013f190d057649282578ae138c7a877c7b6eb2f137208b66fcdc963e96`，
 代码 git sha `fa4d1300402526cafb11ecf372b0ec95a40d1d27`。
+
+### 首次 run 截断记录（2026-08-21）
+
+窗口 2026-08-21T06:37Z → 08:28Z，存活 ~110 分钟后**因 owner 改参裁决截断**
+（size 0.0002 → 0.0005，需重启，见下）。读数仍然有效但只是 110 分钟的噪声窗：
+
+| 指标 | 读数 |
+|---|---|
+| 成交 | 70 笔 |
+| 净 PnL | **−0.291 DUSD**（gross +0.596 − fee 0.104 − markout 拖累；≈ −2.7bps/笔，−3.8 DUSD/24h 折算） |
+| passive capture | +5.56bps |
+| markout 1s / 5s / 30s | +1.38 / −2.34 / −1.68 bps |
+| 完整标志 | `net_pnl_complete=false`（`execution_costs_unavailable=2`，硬杀截断 audit 回填周期所致） |
+| 二元问题 | `public_trade` **带 `side`**（50/50）；`cycle_summary.book` null 占比 **0%**（390 非 warmup 周期） |
+| standby / halt / guard | 无 standby 事件；halt 68/3198 cycles（2.1%）；guard 激活 30 cycles（0.9%） |
+
+**操作教训（两条，已发生的真实代价）**：
+
+1. 停 maker **不要用硬杀**（本次用任务管理器强杀，cleanup 未执行，残余卖单
+   `sxmk-…c8es0` 挂在场上）。残余仓位 0.0002 多靠该卖单在撤单前**自行成交**恰好
+   闭合（+0.025 DUSD 价差），纯运气；随后手动 `order cancel-all BTC-USD` 复核清零。
+   今后停机一律给 wrapper 发 SIGTERM（它转发子进程并走 cleanup + 残余交接）。
+2. wrapper 的 OO 实时上传需要 `OPENOBSERVE_AUTO_UPLOAD=1` 且导出凭据，首次启动
+   漏配导致前 16 分钟无远端覆盖（deadman 空窗），后用独立 follow 上传器补传。
+
+### owner 裁决（2026-08-21，第二次）：size 0.0002 → 0.0005
+
+会话内明确指示（"增大摆单量到0.0005"）。随之变化的口径：
+
+- 单笔名义 ≈ $38.6（mark ~77,100），≈ HYPE 等名义的 **5×**；再次越过 docs/18 红线。
+- `max_position=0.002` **不变**：库存容量比从 10× 降为 **4× size**。
+- **`stop_loss` 保持 10.0**（owner 征询后采纳建议）：亏损速率随名义 ×2.5，
+  按 HYPE 口径外推 ~39h 撞线，按首次 run 实测（−3.8 DUSD/24h @ 0.0002）折算
+  甚至 ~25h；接受为检查点，不再叠加第三道安全限额放宽。`alert_loss=2.5` 不变。
+- size=0.0005 = 5× `min_order_qty`，skew 缩量退化为二值开关的坑依然不适用。
+
+已填授权（2026-08-21，第二次，首次 run 截断后重开）：
+
+```text
+授权：BTC-USD 首窗口采集（单臂长跑，按 27 号手册规则，第二次）
+symbol：BTC-USD
+配置：examples/maker-btc-baseline.toml（size=0.0005，sha256 见下，原样）
+代码：git sha 与首次相同（fa4d130 + docs/启动记录提交，无代码变更）
+风险边界：单 symbol、一档、size=0.0005（≈$38.6 名义）、max_position=0.002（4× size）；
+          stop_loss=10.0 生效；账户硬熔断不开启
+窗口：2026-08-21T09:24Z 起，计划 72 小时（3 天），不换臂、不调参
+emergency cancel 操作人：release owner（BossX）
+授权人 / 时间：release owner（BossX），2026-08-21，会话内明确授权
+      （"增大摆单量到0.0005" + "继续"）
+前置：FLAT 实测通过（首次 run 残余已处置：卖单自行成交闭合 + cancel-all 复核清零）；
+      token 剩余 ~250h 覆盖窗口；OO 两条告警已 provision 且本次
+      OPENOBSERVE_AUTO_UPLOAD=1 实时上传；webhook 通道已实测
+```
+
+启动记录（第二次）：run_id `btc-first-window-20260821T0924Z`，首臂 2026-08-21T09:24Z（UTC），
+配置 sha256 `24e8381a5bd9c915f321db17989492213acc5fad7f5a3c41a9b1f3c9c7593d0c`
+（size=0.0005），代码 git sha 同首次（`fa4d130`，期间仅 docs/配置提交，无代码变更）。
 
