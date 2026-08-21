@@ -1,0 +1,115 @@
+# 换品种到 BTC-USD：规模换算、决策记录与首窗口计划（2026-08-21）
+
+状态：`prepared_awaiting_authorization`。配置已就绪并通过 paper 冒烟；**未授权 live**。
+按 [28-experiment-protocol.md](28-experiment-protocol.md)，开跑前需登记立项、判据、启动记录。
+
+## 1. 为什么换
+
+[mark-best 分母证据（2026-08-20）](evidence/mark-best-spread-denominator-2026-08-20.md) 实测五品种：
+
+| 品种 | 锚定偏置 p50（mark 相对 book mid） | 备注 |
+|---|---|---|
+| **BTC** | **+0.3bps**（mark ≈ mid） | 分母最健康 |
+| HYPE | **+1.9bps**（持续偏在 mid 上方） | 半价差 p99 = 4.7bps 厚尾 |
+| ETH | +2.5bps | 持续压高 |
+| XAG | mean −4.6 / p50 −0.7 | 左偏长尾、薄盘 |
+
+逆选的物理量是「距 best 的距离」，而我们所有几何量锚在 mark 上——**分母直接框住一切
+中心偏移机制的起效空间**。八轮机制迭代（stage2/3/3v1/4/nonlinear/guard/external_skew/
+microprice）全跑在最差的分母上，而「换品种」这个变量从未被检验。
+
+tick 精度也支持这个选择：BTC `0.01 / 74,650 = 0.00134 bps/tick`，±10bp 带内约 7,460 档，
+基本连续（HYPE 约 72 档；XAG 仅 6 档）。价格粒度不再是约束。
+
+## 2. 规模换算与 owner 裁决
+
+mark 74,650.75（2026-08-21）；`qty tick = min_order_qty = 0.0001 BTC ≈ $7.465`。
+
+| | HYPE 现状 | BTC 等名义 | **采用值** |
+|---|---|---|---|
+| `size` | 0.1（≈ $7.25） | 0.0001（≈ $7.47） | **0.0002（≈ $14.93）** |
+| `max_position` | 1.0（≈ $72.5） | 0.001（≈ $74.7） | **0.002（≈ $149.3）** |
+| 库存容量比 | 10× size | 10× size | 10× size |
+
+**owner 裁决 2026-08-21：采用 2× 名义（size = 0.0002）。** 两点理由与代价：
+
+- 等名义的 `0.0001` **正好等于 `min_order_qty`**，会让 skew 的缩量退化成二值开关——
+  阶段 3 v0 判 rejected 的同一个坑。`size > min_order_qty` 是摆脱它的最低要求。
+- **这越过了 [18](18-maker-strategy-roadmap.md) 的红线**「收益读数转正前不扩大 size /
+  `max_position` / symbol 数量」（换 symbol 不算，数量仍是 1；加 size 算）。两轮 HYPE
+  读数均为负（−1.8591 / −1.66 DUSD），BTC 上零读数。代价是若逐笔经济性与 HYPE 同量级
+  （−1.4bps/笔），2× 名义就是 2× 的美元流血。
+- **加大 size 不会提升统计功效**：capture / markout / fee 都是 bps 比率，对 size 不变，
+  bps 的 σ 也不随 size 缩小。功效只由成交笔数决定。size 只放大美元数额，以及
+  SIP-5A maker-hours。
+
+## 3. 换品种意味着证据基础重置
+
+冻结经济口径 `capture 2.8 − markout 3.2 − fee 1 ≈ −1.4bps/笔` **全部是 HYPE 的测量**。
+BTC 需要自己的绝对读数；HYPE 的机制判定（nonlinear_skew accepted、guard accepted、
+microprice 方向 accepted）**不自动结转到 BTC**——尤其 microprice：其 `lambda = 0.5` 是在
+HYPE 的 +1.9bps 锚定偏置上定标的，而 BTC 只有 +0.3bps（六分之一），证据文档明确指出
+**单一固定 lambda 无法适配所有品种**。这是本次最大的未决裁决点（见 §5）。
+
+费率与品种无关，已核实：maker 1bps / taker 4bps，11 个 symbol 一致。
+
+## 4. band 预算红线：一个已修复的阻断性缺陷
+
+`examples/maker-microprice-hype-baseline.toml` 在 band 40→30（2026-08-19）之后
+**完全无法启动**：
+
+```
+❌ microprice violates band red line:
+   spread_bps + ladder + inventory cap + external cap_bps + cap_bps = 34 must be <= band_bps 30
+```
+
+红线来自 [29](29-maker-external-skew-design.md)（2026-07-31 立），在**启动时**校验：
+所有中心偏移 cap 加 spread 必须装进 band，否则拒绝运行——它**不做运行时截断**，因为
+在被截断的偏移上做 A/B 是不可解读的。当时改 band 的注释写「会被 clamp 截断，是接受的
+代价」，与这条不变量直接矛盾。
+
+**逃逸路径**：改了 live 配置 → 跑全套单测（无任何测试加载该配置文件，全绿）→
+**从未用该配置启动过一次 bot**。为此存在的启动校验器一次都没跑。
+
+**修复**：`[microprice] cap_bps 6 → 2`，`8 + 12 + 8 + 2 = 30 ≤ 30`。选 microprice 是因为
+它的**幅度**本就是明确未判项（owner 2026-08-19：方向 accepted、幅度需新窗口重测），
+砍它不触碰任何已 accepted 的机制。BTC 配置沿用同一预算。
+
+**教训（已记入流程）**：改动 live 配置文件后，单测绿不构成验证，必须用该配置真正启动
+一次（paper 即可）走完启动校验。
+
+## 5. 未决裁决点
+
+1. **microprice 在 BTC 上的 lambda 无依据**（§3）。选项：(a) 沿用 0.5 并把它当未判项，
+   (b) 按锚定偏置比例缩到 ~0.1，(c) 在 BTC 上先关掉、跑干净基线。本文件采用 (a) 的
+   保守变体：保留启用但 cap 已降到 2bps，实际偏移被硬顶在 2bps 内。
+2. **`stop_loss = 5.0` 是绝对 DUSD，不随 size 缩放。** 2× 名义下同样美元亏损只需一半
+   bps 移动即触发。按 HYPE run1（−1.8591 / 35.9h）线性外推，约 48h 就会撞线而中断窗口。
+   若目标窗口 > 2 天，需明确裁决是否提到 10.0 / 5.0。**本文件不擅自放宽刹车。**
+3. **`max_divergence_bps = 15.0` 对 BTC 过松**：BTC mark/mid 背离 p50 仅 +0.3bps，
+   15bps 实际永不触发，等于关掉这道 skip 门。收紧会改变 skip 行为。
+4. **`vol_pause_bps = 40 / 60s` 未按 BTC 波动率重标。**
+5. **`external_skew` 仍是未判机制**（owner 2026-08-21 保留）。BTC 读数同样含它。
+
+## 6. 首窗口计划
+
+首窗口**不是收益读数**，而是同时办三件事（遥测是纯观测，不污染读数）：
+
+1. 回答 [handoff](handoff-next-phase-2026-08-21.md) 的两个二元问题：`public_trade` 到底
+   带不带 `side`（看 stderr 的 `public_trade raw sample:` 前 50 条原文）、
+   `cycle_summary.book` 的 `null` 占比。
+2. 拿 BTC 的第一个 `geometry` 分布：`min_distance_to_touch_bps`、`clamped_to_touch`
+   计数。**注意**：这些计数在不同 `band_bps` 之间不可比（见 [30](30-maker-uptime-band-tightening-design.md)）。
+3. BTC 的第一个绝对 PnL 读数（按 [27](27-maker-baseline-pnl-collection-runbook.md) 的单臂规则）。
+
+paper 冒烟已通过（2026-08-21）：配置加载、启动校验、报价与 hold 均正常；
+首三周期即观察到 mark 落在最优买价之下、touch 约 1.6bps 宽的不对称形态。
+
+命令：
+
+```bash
+standx maker run BTC-USD --maker-config examples/maker-btc-baseline.toml
+```
+
+加 `--live` 前需按 [14](14-maker-live-gate.md) 确认 `STANDX_ENABLE_LIVE_MAKER`
+（注意 canary 逐次要求已于 2026-08-20 被 owner 挂起，其余门槛仍适用）。
