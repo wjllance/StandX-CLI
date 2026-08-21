@@ -81,9 +81,9 @@ done
   exit 64
 }
 case "$symbol" in
-  XAG-USD|HYPE-USD) ;;
+  XAG-USD|HYPE-USD|BTC-USD) ;;
   *)
-    printf 'stage2 A/B is frozen to XAG-USD and HYPE-USD\n' >&2
+    printf 'stage2 A/B is frozen to XAG-USD, HYPE-USD and BTC-USD\n' >&2
     exit 64
     ;;
 esac
@@ -126,7 +126,13 @@ fi
 #       to the pre-registered values too, that layout can only ever match
 #       byte-identical arms, which the degenerate-pair check below rejects.
 #       A promoted baseline therefore needs a new pre-registered case for
-#       whatever the next candidate adds on top of it.
+#       whatever the next candidate adds on top of it; or
+#   (i) the [nonlinear_skew].boost amplitude pair (docs/35): only the boost
+#       assignment inside [nonlinear_skew] differs (baseline 3.0, candidate
+#       6.0), nonlinear_skew stays enabled in both arms, and every other line
+#       is byte-identical. cap_bps is unchanged, so the band budget red line
+#       and the 2+ inventory-unit behaviour are identical across arms; the
+#       arms diverge only in the 1-unit inventory state.
 python3 - "$baseline_config" "$candidate_config" <<'PY' || exit 64
 from pathlib import Path
 import re
@@ -380,8 +386,54 @@ microprice_pair = (
     and candidate_both == baseline_both
 )
 
+# (i) nonlinear boost amplitude pair (docs/35): only the boost assignment
+#     inside [nonlinear_skew] differs (3.0 -> 6.0). The section must stay
+#     enabled in both arms, otherwise the pair measures nothing.
+PREREG_BOOST_BASELINE = "3.0"
+PREREG_BOOST_CANDIDATE = "6.0"
+
+
+def nonlinear_boost_sections(text):
+    """Blank the boost assignment inside [nonlinear_skew]; return (rewritten, value).
+
+    A repeated boost key fails closed, matching external_skew_sections."""
+    lines = text.splitlines(keepends=True)
+    section = None
+    boost = None
+    for i, line in enumerate(lines):
+        body = line.rstrip("\r\n")
+        ending = line[len(body):]
+        header = re.fullmatch(r"\s*\[([^][]+)]\s*(?:#.*)?", body)
+        if header:
+            section = header.group(1).strip()
+            continue
+        if body.lstrip().startswith("["):
+            section = None
+            continue
+        if section != "nonlinear_skew":
+            continue
+        match = re.fullmatch(r"(\s*boost\s*=\s*)([0-9.]+)(\s*(?:#.*)?)", body)
+        if match is None:
+            continue
+        if boost is not None:
+            raise SystemExit("stage2 config repeats [nonlinear_skew].boost")
+        boost = match.group(2)
+        lines[i] = f"{match.group(1)}<normalized>{match.group(3)}{ending}"
+    return "".join(lines), boost
+
+
+baseline_boost_norm, baseline_boost = nonlinear_boost_sections(baseline)
+candidate_boost_norm, candidate_boost = nonlinear_boost_sections(candidate)
+_, baseline_switches = size_skew_sections(baseline)
+boost_pair = (
+    baseline_boost_norm == candidate_boost_norm
+    and baseline_boost == PREREG_BOOST_BASELINE
+    and candidate_boost == PREREG_BOOST_CANDIDATE
+    and baseline_switches["nonlinear_skew"] is True
+)
+
 adaptive_toggle_only = baseline.replace("enabled = false", "enabled = true") == candidate
-if external_skew_pair or microprice_pair:
+if external_skew_pair or microprice_pair or boost_pair:
     pass
 elif adaptive_toggle_only:
     pass
@@ -458,14 +510,16 @@ elif "enabled = false" in baseline and "enabled = false" in candidate:
                 "spread_bps / size_skew.enabled / "
                 "nonlinear_skew.enabled(+external_guard.enabled) / "
                 "the pre-registered [external_skew] block / "
-                "the pre-registered [microprice] block (on top of [external_skew])"
+                "the pre-registered [microprice] block (on top of [external_skew]) / "
+                "the pre-registered [nonlinear_skew].boost amplitude pair"
             )
 else:
     raise SystemExit(
         "stage2 arm configs differ outside adaptive_spread.enabled / "
         "spread_bps / size_skew.enabled / "
         "the pre-registered [external_skew] block / "
-        "the pre-registered [microprice] block (on top of [external_skew])"
+        "the pre-registered [microprice] block (on top of [external_skew]) / "
+        "the pre-registered [nonlinear_skew].boost amplitude pair"
     )
 PY
 
@@ -555,8 +609,16 @@ run_arm() {
   }
   notify "stage2 A/B arm starting: arm=$arm run_id=$run_id config_hash=$config_hash"
 
+  # Live mode refuses to start without --alert-webhook (maker startup gate).
+  # Forward the supervisor webhook as the maker's push channel when set so
+  # deadman/risk notifications reach the same sink as orchestrator notices.
+  maker_args=(--output json maker run "$symbol" --maker-config "$config" --live)
+  if [[ -n "${STANDX_SUPERVISOR_WEBHOOK:-}" ]]; then
+    maker_args+=(--alert-webhook "$STANDX_SUPERVISOR_WEBHOOK")
+    maker_args+=(--alert-webhook-format "${STANDX_SUPERVISOR_WEBHOOK_FORMAT:-slack}")
+  fi
   STANDX_RUN_ID="$run_id" "$root/scripts/run_maker_observed.sh" \
-    "$standx_bin" --output json maker run "$symbol" --maker-config "$config" --live &
+    "$standx_bin" "${maker_args[@]}" &
   pid=$!
   current_arm_pid="$pid"
   arm_start=$SECONDS
