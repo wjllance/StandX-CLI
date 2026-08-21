@@ -1,8 +1,20 @@
 # 外部领先价连续偏移（`[external_skew]`）立项设计（2026-07-29 草案，2026-07-31 细化）
 
-状态：**实现已合入、默认关闭，live 判定待 release owner 裁决**。实现提交 `13bef03` 保持
-toggle-off 等价；本文的候选配置和预注册判据不构成 live 授权。2026-08-01 复核结论仍是
-**保持待裁决，不降级、不关闭**。
+状态：**已在 live 基线中启用，但从未隔离判定；owner 2026-08-21 裁决保留、判定推迟。**
+
+- 它随 microprice A/B 进入生产，而那一轮**两臂都带 `[external_skew]`**（见
+  [handoff 参数表](handoff-microprice-ab-2026-08-13.md)），因此那次 accepted 判定
+  只属于 microprice，**不构成 external_skew 的判定**。当前
+  `examples/maker-microprice-hype-baseline.toml` 中 `enabled = true`。
+- **本文的预注册判据仍然有效且冻结**（primary：逐笔签名 markout@30s 改善 ≥2bps，
+  单侧 95% 下界 >0，4h block bootstrap；护栏：5s markout 不恶化 >1bps；AS 为诊断量）。
+- **但臂定义已过期**：下文 baseline 臂写的是 `maker-guard-hype-candidate.toml`，那是
+  microprice 晋级前的配置。回来跑时须重挂到当前基线（baseline = 当前减
+  `external_skew`，candidate = 当前），并按 [28](28-experiment-protocol.md) 重新登记
+  立项与授权。样本量口径不变：实测 ≈14.4 fills/h，两臂合计约 4 天 live。
+- 早前状态（供溯源）：实现提交 `13bef03` 保持 toggle-off 等价；2026-08-01 复核结论为
+  "保持待裁决，不降级、不关闭"。当时它确实是默认关闭的——**变成启用是后来随基线配置
+  一起发生的，没有独立决策记录**，这正是本次把状态写清的原因。
 
 - **2026-07-31 细化**四处（机制与配置面不变）：guard 激活期间的复合语义、band 预算
   红线、验收判据的统计功效口径、证据溯源。

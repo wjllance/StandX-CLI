@@ -45,7 +45,7 @@ runbook 统一放在 [archive/](archive/README.md)，不能作为新的 live 授
 | [16 - WebSocket 目标](16-ws-iteration-goals.md) | 当前 WS 架构、健康与验收边界 | 开发参考 |
 | [17 - WS canary 快速启动](17-ws-command-canary-quickstart.md) | 受控命令链 create/cancel 验证 | 操作手册 |
 | [18 - 当前状态与路线](18-maker-strategy-roadmap.md) | 机制判定、经济结论、优先级与长期不变量 | 当前策略状态真源 |
-| [29 - External skew 候选](29-maker-external-skew-design.md) | 默认关闭候选的设计和预注册判据 | 待裁决候选，不代表已授权 |
+| [29 - External skew 候选](29-maker-external-skew-design.md) | 设计与预注册判据（判据仍冻结有效） | **已在 live 启用但从未判定**；owner 2026-08-21 裁决保留、判定推迟 |
 | [30 - 带内 uptime 参数收缩](30-maker-uptime-band-tightening-design.md) | SIP-5A ±10bp 带内 uptime 的渐进参数收缩设计与预注册判据 | 待裁决序列，每步需 owner 裁决 |
 | [31 - Microprice 设计](31-maker-microprice-design.md) | 场内侧 touch-mid 中心偏移的设计与预注册判据 | 方向已判 accepted，幅度未判 |
 | [32 - 纯观测遥测](32-maker-observation-telemetry-design.md) | 盘口深档、成交流、clamp 命中与距盘口距离的观测字段设计 | 纯观测，不含策略授权 |
