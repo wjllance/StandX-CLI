@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The SDK's quick-start documentation example is now compiled but not executed (`no_run`). It previously issued a real HTTP request to the production endpoint when `cargo test` ran, so a transient network failure could fail the workspace test gate with no test actually broken.
+
 ### Added
 - `standx maker` can execute an inventory trim as a resting post-only (ALO) reduce-only order with an IOC fallback instead of a market order, behind a new default-disabled `[inventory_exit]` config section (`alo_enabled = false`). The venue charges 1bps maker and 4bps taker, so a filled ALO exit costs about 3bps less than the market exit it replaces. The exit trigger is unchanged, wind-down still exits immediately, and with the flag off the market path is used exactly as before.
 
