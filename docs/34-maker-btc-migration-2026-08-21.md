@@ -1,7 +1,6 @@
 # 换品种到 BTC-USD：规模换算、决策记录与首窗口计划（2026-08-21）
 
-状态：`prepared_awaiting_authorization`。配置已就绪并通过 paper 冒烟；**未授权 live**。
-按 [28-experiment-protocol.md](28-experiment-protocol.md)，开跑前需登记立项、判据、启动记录。
+状态：`authorized_running`。首窗口已于 2026-08-21T06:37Z 开跑（授权与启动记录见 §7）。
 
 ## 1. 为什么换
 
@@ -100,9 +99,9 @@ HYPE 的 +1.9bps 锚定偏置上定标的，而 BTC 只有 +0.3bps（六分之�
 
 首窗口**不是收益读数**，而是同时办三件事（遥测是纯观测，不污染读数）：
 
-1. 回答 [handoff](handoff-next-phase-2026-08-21.md) 的两个二元问题：`public_trade` 到底
-   带不带 `side`（看 stderr 的 `public_trade raw sample:` 前 50 条原文）、
-   `cycle_summary.book` 的 `null` 占比。
+1. 回答两个二元问题（原 handoff 文档 `handoff-next-phase-2026-08-21.md` 未入库，问题
+   已内联于此，不需要它也能执行）：`public_trade` 到底带不带 `side`（看 stderr 的
+   `public_trade raw sample:` 前 50 条原文）、`cycle_summary.book` 的 `null` 占比。
 2. 拿 BTC 的第一个 `geometry` 分布：`min_distance_to_touch_bps`、`clamped_to_touch`
    计数。**注意**：这些计数在不同 `band_bps` 之间不可比（见 [30](30-maker-uptime-band-tightening-design.md)）。
 3. BTC 的第一个绝对 PnL 读数（按 [27](27-maker-baseline-pnl-collection-runbook.md) 的单臂规则）。
@@ -118,3 +117,55 @@ standx maker run BTC-USD --maker-config examples/maker-btc-baseline.toml
 
 加 `--live` 前需按 [14](14-maker-live-gate.md) 确认 `STANDX_ENABLE_LIVE_MAKER`
 （注意 canary 逐次要求已于 2026-08-20 被 owner 挂起，其余门槛仍适用）。
+
+## 7. 启动前检查与授权（2026-08-21 准备）
+
+首窗口按 [27](27-maker-baseline-pnl-collection-runbook.md) 的单臂规则执行（不是 A/B，
+没有晋级判据），前置检查套用该手册并适配 BTC。以下均为**启动前实测**，不是转述：
+
+| 检查项 | 结果（2026-08-21T06:2xZ 实测） |
+|---|---|
+| FLAT | ✅ `account positions` / `account orders` 均为空 |
+| auth token | ✅ 剩余 250h（到期 2026-08-31T17:04Z），覆盖 72h 窗口有余量 |
+| 场馆 metadata | ✅ `price_tick_decimals=2` / `qty_tick_decimals=4` / `min_order_qty=0.0001`，与 §2 假设一致；maker 1bps / taker 4bps 与全品种一致 |
+| Hyperliquid 连通（guard） | ✅ paper 冒烟中 `guard_enabled=true`、`external_basis_bps≈4.45` 已初始化 |
+| paper 冒烟（新构建） | ✅ `fa4d130` release 构建跑 70s / 24 cycles：启动校验通过（band 预算 30≤30）、双边上架、`geometry` 遥测正常产出、paper 成交与 residual 交接通知均按预期 |
+| 互斥 | ✅ 无其他 live maker 容器/进程在跑 |
+| 磁盘 | ✅ 302G 可用（`var/standx` 现有 2.4G） |
+| OpenObserve 两条 push 告警 | ❌ 未 provision——`scripts/openobserve_alerts.py` 缺 `OPENOBSERVE_USER` / `OPENOBSERVE_PASSWORD`，启动前必须由操作人补齐 |
+| webhook 实测送达 | ⬜ 启动时确认（`--alert-webhook` 配置并实测一次） |
+
+配置冻结值：sha256(`examples/maker-btc-baseline.toml`) =
+`7b26cf013f190d057649282578ae138c7a877c7b6eb2f137208b66fcdc963e96`，启动前
+`shasum -a 256` 复核，跑动期间一个字节都不改。
+
+**§5 未决项的默认处置**：若授权时 owner 未对 §5 第 1/3/4/5 条另作裁决，启动即视为
+采纳当前配置默认——microprice 选项 (a)（沿用 lambda=0.5、cap=2 硬顶）、
+`max_divergence_bps=15` 与 `vol_pause` 不重标、`external_skew` 保留启用。这些默认值
+已写进配置，读数解释时必须带上这一前提。
+
+精确授权文本（release owner 填写后才能启动）：
+
+已填授权（2026-08-21，首次）：
+
+```text
+授权：BTC-USD 首窗口采集（单臂长跑，按 27 号手册规则）
+symbol：BTC-USD
+配置：examples/maker-btc-baseline.toml（sha256 7b26cf01…，原样）
+代码：git sha fa4d1300402526cafb11ecf372b0ec95a40d1d27（启动校验与 paper
+      冒烟均在此 sha 的 release 构建上复核通过）
+风险边界：单 symbol、一档、size=0.0002（≈$15 名义）、max_position=0.002；
+          stop_loss=10.0 生效（owner 2026-08-21 裁决）；账户硬熔断不开启
+窗口：2026-08-21T06:37Z 起，计划 72 小时（3 天），不换臂、不调参
+emergency cancel 操作人：release owner（BossX）
+授权人 / 时间：release owner（BossX），2026-08-21，会话内明确授权（"授权开跑"）
+前置：FLAT 实测通过（positions/orders 均空）；token 剩余 250h（到期
+      2026-08-31T17:04Z）覆盖窗口；BTC metadata 2/4/0.0001 复核一致；
+      OO 两条告警已 provision（deadman + critical_risk，Feishu 目的地已更新）；
+      webhook 实测送达（Feishu code 0）；无其他 live maker 在跑
+```
+
+启动记录：run_id `btc-first-window-20260821T0637Z`，首臂 2026-08-21T06:37Z（UTC），
+配置 sha256 `7b26cf013f190d057649282578ae138c7a877c7b6eb2f137208b66fcdc963e96`，
+代码 git sha `fa4d1300402526cafb11ecf372b0ec95a40d1d27`。
+
