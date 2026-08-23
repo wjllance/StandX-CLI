@@ -115,3 +115,13 @@ ALO+IOC；max_divergence_bps=8；窗口 ~12h 墙钟（6 臂 × 2h + 臂间 wind-
 - 前置状态：run5（`btc-first-window-20260821T1345Z`，配置同 baseline）已于
   15:00:01Z 优雅停止，residual flat，exit=0，66 fills / 75min / PnL -0.68；
   独立复核 `account positions` / `account orders` 均为 `[]`。
+
+## 最终状态（2026-08-23 收尾）
+
+- **判定：`ab_completed_not_accepted`**，判定报告
+  [evidence/maker-skew-boost-ab-verdict-2026-08-23.md](evidence/maker-skew-boost-ab-verdict-2026-08-23.md)
+  （不可变）。12 对 24 条完整臂，运维门槛全过，两条经济门槛均不满足。
+- 停机：owner 2026-08-23 裁决「停」，编排器 15:51Z SIGTERM，末臂 cleanup 后
+  独立复核 FLAT。停机时在跑臂（baseline-150730Z，44min 3 fills）为未完成片段，
+  不入分析。
+- 每日记录 cron 已随停机删除。配置无回滚（baseline 全程未动）。
