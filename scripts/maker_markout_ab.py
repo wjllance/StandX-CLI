@@ -678,8 +678,12 @@ def main(paths):
     for a in arm_summary:
         tier_s = f"  tiers {a['tiers']}" if a["treatment"] == "candidate" else ""
         pnl_s = f"{a['pnl']:+7.3f}" if a["pnl"] is not None else "    n/a"
+        # Zero-fill arms have no cap/markout samples; print n/a instead of crashing.
+        cap_s = f"{a['cap']:+5.2f}" if a["cap"] is not None else "  n/a"
+        mo5_s = f"{a['mo5']:+6.2f}" if a["mo5"] is not None else "   n/a"
+        mo30_s = f"{a['mo30']:+6.2f}" if a["mo30"] is not None else "   n/a"
         print(f"{a['name']}: {a['dur']:.1f}h fills {a['n']:3d} ({a['rate']:4.1f}/h) "
-              f"cap{a['cap']:+5.2f} mo5{a['mo5']:+6.2f} mo30{a['mo30']:+6.2f} "
+              f"cap{cap_s} mo5{mo5_s} mo30{mo30_s} "
               f"pnl{pnl_s} gross{a['gross']:+5.3f} inv{a['inv']:.2f} "
               f"mark {a['mark0']:.2f}->{a['mark1']:.2f} [{a['mlo']:.2f},{a['mhi']:.2f}]{tier_s}")
 
