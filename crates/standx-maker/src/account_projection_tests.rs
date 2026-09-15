@@ -193,6 +193,7 @@ fn post_resolution_cancel_ack_is_idempotent_even_when_rejected() {
             side: OrderSide::Sell,
             level: 0,
             price: 54.349,
+            qty: 1.0,
             cycle: 1,
         }),
     );
@@ -426,6 +427,7 @@ fn terminal_account_order_reports_cancel_effective() {
             side: OrderSide::Buy,
             level: 0,
             price: 100.0,
+            qty: 1.0,
             cycle: 2,
         }),
     );
@@ -446,6 +448,7 @@ fn terminal_account_order_reports_cancel_effective_after_ack() {
             side: OrderSide::Buy,
             level: 0,
             price: 100.0,
+            qty: 1.0,
             cycle: 2,
         }),
     );
@@ -543,6 +546,7 @@ fn cancel_ack_after_close_is_idempotent() {
             side: OrderSide::Buy,
             level: 0,
             price: 100.0,
+            qty: 1.0,
             cycle: 2,
         }),
     );
@@ -584,6 +588,7 @@ fn late_open_after_cancel_ack_is_recognized_as_a_retired_current_run_order() {
             side: OrderSide::Buy,
             level: 0,
             price: 100.0,
+            qty: 1.0,
             cycle: 2,
         }),
     );
@@ -680,6 +685,7 @@ fn account_reconnect_reset_preserves_unacked_order_response_registry() {
             side: OrderSide::Buy,
             level: 0,
             price: 100.0,
+            qty: 1.0,
             cycle: 1,
         }),
     );
@@ -754,6 +760,7 @@ fn freeze_closes_quote_slots_but_preserves_unacked_response_registry() {
             side: OrderSide::Buy,
             level: 0,
             price: 100.0,
+            qty: 1.0,
             cycle: 1,
         }),
     );
@@ -958,6 +965,7 @@ fn rest_audit_tolerates_order_until_pending_cancel_resolves() {
             side: open.side,
             level: 0,
             price: open.price,
+            qty: 1.0,
             cycle: 2,
         }),
     );
@@ -972,6 +980,10 @@ fn rest_audit_tolerates_order_until_pending_cancel_resolves() {
             request_id: "c1".to_string(),
         },
     );
+    assert!(state
+        .unexpected_rest_open_order_ids(1, std::slice::from_ref(&open))
+        .is_empty());
+    state.apply(1, AccountProjectionEvent::OrderObserved(order(0.0, true)));
     assert_eq!(state.unexpected_rest_open_order_ids(1, &[open]), vec![7]);
 }
 
@@ -987,6 +999,7 @@ fn rapid_cycle_advances_keep_unconfirmed_slots_reserved() {
             side: OrderSide::Sell,
             level: 0,
             price: 101.0,
+            qty: 1.0,
             cycle: 1,
         }),
     );
@@ -1026,8 +1039,13 @@ fn rapid_cycle_advances_keep_unconfirmed_slots_reserved() {
             request_id: "c1".to_string(),
         },
     );
-    assert!(state.pending_cancels().is_empty());
+    assert_eq!(state.pending_cancels().len(), 1);
     assert_eq!(state.pending_request_count(), 0);
+    let mut terminal = order(0.0, true);
+    terminal.order_id = 9;
+    terminal.side = OrderSide::Sell;
+    state.apply(1, AccountProjectionEvent::OrderObserved(terminal));
+    assert!(state.pending_cancels().is_empty());
 }
 
 #[test]
@@ -1246,4 +1264,96 @@ fn heuristic_adopts_pending_despite_one_ulp_price_echo_difference() {
         "adopts the pending place's real level, not the unknown sentinel"
     );
     assert!(state.pending_places().is_empty());
+}
+
+#[test]
+fn executable_exposure_tracks_pending_open_and_cancelled_quantities_once() {
+    let cfg = crate::MakerConfig {
+        spread_bps: 10.0,
+        band_bps: 20.0,
+        level_step_bps: 2.0,
+        refresh_bps: 3.0,
+        levels: 1,
+        size: 0.1,
+        max_position: 0.3,
+        skew_bps: 0.0,
+        price_decimals: 2,
+        qty_decimals: 4,
+        min_order_qty: 0.001,
+    };
+    let assert_headroom = |state: &MakerAccountProjection, available: f64| {
+        let mut actions = vec![
+            crate::Action::Place(crate::DesiredQuote {
+                side: OrderSide::Buy,
+                level: 1,
+                price: 99.0,
+                qty: available,
+            }),
+            crate::Action::Place(crate::DesiredQuote {
+                side: OrderSide::Buy,
+                level: 2,
+                price: 98.0,
+                qty: cfg.qty_tick(),
+            }),
+        ];
+        state
+            .executable_exposure()
+            .retain_safe_placements(&cfg, 0.0, &mut actions);
+        assert_eq!(
+            actions.len(),
+            1,
+            "must admit exactly the remaining headroom"
+        );
+        assert!(matches!(&actions[0], crate::Action::Place(q) if q.level == 1));
+    };
+    for account_before_ack in [true, false] {
+        let mut state = MakerAccountProjection::new(1, PREFIX, 0.0, 0.005, 0.00005);
+        state.apply(1, AccountProjectionEvent::PlaceSubmitted(pending("p1")));
+        assert_headroom(&state, 0.1);
+        if account_before_ack {
+            state.apply(1, AccountProjectionEvent::OrderObserved(order(0.2, false)));
+        }
+        state.apply(
+            1,
+            AccountProjectionEvent::PlaceAccepted {
+                request_id: "p1".into(),
+            },
+        );
+        assert_headroom(&state, 0.1);
+        state.apply(1, AccountProjectionEvent::OrderObserved(order(0.2, false)));
+        assert_headroom(&state, 0.1);
+        // A partial fill shrinks only the remaining executable order.
+        state.apply(1, AccountProjectionEvent::OrderObserved(order(0.15, false)));
+        assert_headroom(&state, 0.15);
+        state.apply(
+            1,
+            AccountProjectionEvent::CancelSubmitted(ProjectionPendingCancel {
+                request_id: "c1".into(),
+                order_id: 7,
+                side: OrderSide::Buy,
+                level: 0,
+                price: 100.0,
+                qty: 0.15,
+                cycle: 2,
+            }),
+        );
+        assert_headroom(&state, 0.15);
+        state.apply(
+            1,
+            AccountProjectionEvent::CancelResolved {
+                request_id: "c1".into(),
+            },
+        );
+        assert!(state.has_pending_request_lifecycle("c1"));
+        assert_headroom(&state, 0.15);
+        // An open account replay while cancellation is pending must not
+        // count both the order and its cancellation snapshot.
+        state.apply(1, AccountProjectionEvent::OrderObserved(order(0.15, false)));
+        assert_headroom(&state, 0.15);
+        state.apply(1, AccountProjectionEvent::OrderObserved(order(0.0, true)));
+        assert_headroom(&state, 0.3);
+        state.reset_after_cleanup_preserving_pending_acks(2, 0.0);
+        state.apply(1, AccountProjectionEvent::PlaceSubmitted(pending("stale")));
+        assert_headroom(&state, 0.3);
+    }
 }

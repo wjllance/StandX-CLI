@@ -1,5 +1,38 @@
 //! Pure position-risk detection for maker sessions.
 
+/// The existing gross session-MTM stop, evaluated before order effects.
+/// Fees/funding deliberately remain outside this policy's historical basis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SessionStopLoss {
+    pub pnl: f64,
+    pub limit: f64,
+    pub mark: f64,
+}
+
+impl SessionStopLoss {
+    pub fn check(
+        stats: &crate::MakerStats,
+        position: f64,
+        mark: f64,
+        limit: f64,
+    ) -> Result<(), Self> {
+        let pnl = stats.pnl(position, mark);
+        if limit > 0.0 && pnl <= -limit {
+            Err(Self { pnl, limit, mark })
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl std::fmt::Display for SessionStopLoss {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "session PnL {:+.2} <= -{:.2}", self.pnl, self.limit)
+    }
+}
+
+impl std::error::Error for SessionStopLoss {}
+
 /// The reason a position change requires a maker risk notification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PositionRiskKind {
@@ -142,5 +175,23 @@ mod tests {
             exit.evaluate(0.20, 0.8, 25.0, 0.0005).unwrap().kind,
             PositionRiskKind::InventoryExitCrossed
         );
+    }
+}
+
+#[cfg(test)]
+mod session_stop_loss_tests {
+    use super::SessionStopLoss;
+    use crate::MakerStats;
+
+    #[test]
+    fn stop_loss_preserves_gross_basis_inclusive_threshold_and_disabled_policy() {
+        for (position, mark) in [(1.0, 90.0), (-1.0, 110.0)] {
+            let stats = MakerStats::with_inventory_baseline(position, 100.0);
+            let loss = SessionStopLoss::check(&stats, position, mark, 10.0).unwrap_err();
+            assert_eq!(loss.pnl, -10.0);
+            assert!(SessionStopLoss::check(&stats, position, mark, 10.01).is_ok());
+            assert!(SessionStopLoss::check(&stats, position, mark, 0.0).is_ok());
+            assert!(SessionStopLoss::check(&stats, position, 100.0, 10.0).is_ok());
+        }
     }
 }

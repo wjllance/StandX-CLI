@@ -174,6 +174,25 @@ pub(super) async fn shutdown_report(report: ShutdownReport<'_>) -> Result<()> {
         None
     };
 
+    // The financial brake has already invalidated the generation. Cleanup
+    // must run before a slow webhook can delay shutdown with orders still live.
+    if let MakerExit::StopLoss(detail) = &exit {
+        notifier
+            .risk(
+                RiskNotice::critical(
+                    "stop_loss",
+                    "triggered",
+                    &format!("{detail}; shutting down"),
+                    symbol,
+                    cycle,
+                )
+                .position_after(ledger.expected_position)
+                .expected(ledger.expected_position),
+                true,
+            )
+            .await;
+    }
+
     // Notify stop on every exit path. Await delivery so the message lands
     // before the process exits.
     let reason = exit.lifecycle_reason();

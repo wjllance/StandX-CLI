@@ -292,6 +292,7 @@ pub(super) async fn maker_cycle(
         inventory_exit_qty,
         inventory_exit_cfg,
         stop_equity_below,
+        stop_loss,
         stop_margin_below,
         wind_down,
         qty_tolerance,
@@ -329,6 +330,19 @@ pub(super) async fn maker_cycle(
         latency_started,
     } = state;
     use maker::{format_decimals, quote_crosses_touch, Action, CycleInput, MarketSnapshot};
+
+    // Check known loss even if preflight skips or subsequent account I/O
+    // fails. Neither situation grants permission to place before stopping.
+    maker::SessionStopLoss::check(
+        stats,
+        if live {
+            ledger.expected_position
+        } else {
+            *sim_position
+        },
+        mark,
+        stop_loss,
+    )?;
 
     // 0. Run all market-only guards before any account/order I/O. The pure
     // planner owns breaker observation and data-consistency policy; this
@@ -663,6 +677,8 @@ pub(super) async fn maker_cycle(
     }
 
     // 3. Build the pure quote/exit plan from the synchronized state.
+    // REST backfill/paper fills can change PnL since the first check.
+    let stop_loss = maker::SessionStopLoss::check(stats, position, mark, stop_loss).err();
     let size_skew_decision = size_skew_controller.observe(position, cfg);
     let guard_observed_at = Instant::now();
     let guard_max_age_ms = guard_controller.config().max_age_ms;
@@ -791,16 +807,17 @@ pub(super) async fn maker_cycle(
 
     let create_orders_allowed = market_data_mode == maker::MarketDataMode::Active
         && order_creation_allowed(live, rest_position_recheck_pending);
-    let inventory_exit = if create_orders_allowed && !exit_awaiting_confirmation {
-        plan.inventory_exit
-    } else {
-        None
-    };
+    let inventory_exit =
+        if stop_loss.is_none() && create_orders_allowed && !exit_awaiting_confirmation {
+            plan.inventory_exit
+        } else {
+            None
+        };
     // The pure reconciler intentionally knows nothing about transport state.
     // Remove desired placements whose slots are still reserved by an HTTP
     // submission before both execution and telemetry, so output never claims
     // a duplicate place occurred.
-    let actions: Vec<Action> = plan
+    let mut actions: Vec<Action> = plan
         .actions
         .into_iter()
         .filter(|action| match action {
@@ -842,6 +859,19 @@ pub(super) async fn maker_cycle(
         .collect();
 
     // The pure planner provides the anti-flicker anchor for new placements.
+    if let Some(projection) = account_projection.as_deref() {
+        // Cancel intent is not completion: reserve all still-open exposure
+        // before admitting this cycle's replacements or additional levels.
+        projection
+            .executable_exposure()
+            .retain_safe_placements(cfg, position, &mut actions);
+    }
+
+    if stop_loss.is_some() {
+        // Already-applied fills still go through ordinary cycle telemetry.
+        // Shutdown owns cleanup; this breached cycle must execute no orders.
+        actions.clear();
+    }
     let ref_center = plan.ref_center;
 
     // 4. Execute. A socket-write failure propagates toward the fail-safe;
@@ -882,6 +912,13 @@ pub(super) async fn maker_cycle(
                                 side: *side,
                                 level: *level,
                                 price: *price,
+                                qty: active_resting
+                                    .iter()
+                                    .find(|quote| quote.order_id.as_deref() == Some(id.as_str()))
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!("cancel has no projected quantity")
+                                    })?
+                                    .qty,
                                 cycle,
                             }),
                         )?;
@@ -1217,6 +1254,7 @@ pub(super) async fn maker_cycle(
                                 side: exit.side,
                                 level: maker::EXIT_ORDER_LEVEL,
                                 price: resting.price,
+                                qty: resting.qty,
                                 cycle,
                             }),
                         )?;
@@ -1441,6 +1479,7 @@ pub(super) async fn maker_cycle(
     });
 
     Ok(CycleResult {
+        stop_loss,
         places,
         cancels,
         holds,
@@ -2335,3 +2374,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "cycle_safety_tests.rs"]
+mod safety_tests;

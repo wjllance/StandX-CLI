@@ -352,3 +352,125 @@ fn touch_or_divergence_can_request_an_early_replan_without_mark_drift() {
         25.0,
     ));
 }
+
+#[test]
+fn stop_loss_invalidates_inflight_generation_before_shutdown() {
+    let mut state = MakerState::starting();
+    state.handle(MakerEvent::StartupReady);
+    let token = take_cycle_work(&mut state).unwrap().unwrap();
+    let exit = super::super::cycle_flow::stop_loss_exit(
+        &mut state,
+        OutputFormat::Quiet,
+        "BTC-USD",
+        1,
+        maker::SessionStopLoss {
+            pnl: -10.0,
+            limit: 10.0,
+            mark: 100.0,
+        },
+        None,
+    );
+    assert!(matches!(exit, MakerExit::StopLoss(_)));
+    assert!(!commit_cycle_effect(&mut state, token));
+    assert!(take_cycle_work(&mut state).unwrap().is_none());
+}
+
+#[test]
+fn stop_loss_books_buffered_trade_ownership_without_notification_waits() {
+    use super::super::cycle_flow::{stop_loss_exit, StopAccountBuffer};
+    let mut runtime = MakerState::starting();
+    runtime.handle(MakerEvent::StartupReady);
+    let token = take_cycle_work(&mut runtime).unwrap().unwrap();
+    let mut ledger = MakerLedger::new(0.0);
+    let mut stats = MakerStats::default();
+    let mut projection = MakerAccountProjection::new(1, "sxmk-test-", 0.0, 0.005, 0.00005);
+    let mut state = AccountEventState {
+        ledger: &mut ledger,
+        stats: &mut stats,
+        projection: &mut projection,
+    };
+    let context = AccountEventContext {
+        symbol: "BTC-USD",
+        run_order_prefix: "sxmk-test-",
+        mark: 100.0,
+        cycle: 1,
+        output_format: OutputFormat::Quiet,
+        excess_bps_at_fill: None,
+    };
+    let trade = standx_sdk::account_stream::TradeUpdate {
+        seq: 1,
+        trade_id: 11,
+        order_id: 7,
+        symbol: "BTC-USD".into(),
+        side: OrderSide::Buy,
+        price: "101".into(),
+        qty: "0.02".into(),
+        trade_ts: "2026-07-14T00:00:00Z".into(),
+    };
+    let outcome =
+        apply_account_event(AccountEvent::Trade(trade.clone()), &mut state, &context).unwrap();
+    assert_eq!(outcome.fills, 0, "trade waits for current-run ownership");
+    let order = OrderUpdate {
+        seq: 2,
+        order_id: 7,
+        cl_ord_id: Some("sxmk-test-q00000001b0".into()),
+        symbol: "BTC-USD".into(),
+        side: OrderSide::Buy,
+        qty: "0.02".into(),
+        fill_qty: "0.02".into(),
+        fill_avg_price: "101".into(),
+        price: "101".into(),
+        status: standx_sdk::models::OrderStatus::Filled,
+        reduce_only: false,
+        updated_at: "2026-07-14T00:00:00Z".into(),
+    };
+    assert!(!account_event_invalidates_cycle(&AccountEvent::Order(
+        order.clone()
+    )));
+    let mut total_fills = 0;
+    let exit = stop_loss_exit(
+        &mut runtime,
+        OutputFormat::Quiet,
+        "BTC-USD",
+        1,
+        maker::SessionStopLoss {
+            pnl: -1.0,
+            limit: 1.0,
+            mark: 100.0,
+        },
+        Some(StopAccountBuffer {
+            events: vec![
+                AccountEvent::Order(order.clone()),
+                AccountEvent::Order(order),
+            ],
+            state,
+            context,
+            total_fills: &mut total_fills,
+        }),
+    );
+    assert!(matches!(exit, MakerExit::StopLoss(_)));
+    assert_eq!(total_fills, 1);
+    assert_eq!(stats.fills(), 1);
+    assert_eq!(ledger.expected_position, 0.02);
+    assert!((stats.pnl(ledger.expected_position, 100.0) + 0.02).abs() < 1e-9);
+    assert!(!commit_cycle_effect(&mut runtime, token));
+    // The stable-ID trade remains deduplicated if a later cleanup audit sees it.
+    let duplicate = apply_account_event(
+        AccountEvent::Trade(trade),
+        &mut AccountEventState {
+            ledger: &mut ledger,
+            stats: &mut stats,
+            projection: &mut projection,
+        },
+        &AccountEventContext {
+            symbol: "BTC-USD",
+            run_order_prefix: "sxmk-test-",
+            mark: 100.0,
+            cycle: 1,
+            output_format: OutputFormat::Quiet,
+            excess_bps_at_fill: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(duplicate.fills, 0);
+}

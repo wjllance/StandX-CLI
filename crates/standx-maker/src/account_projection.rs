@@ -44,6 +44,8 @@ pub struct ProjectionPendingCancel {
     pub side: OrderSide,
     pub level: u32,
     pub price: f64,
+    /// Open quantity at submission, reserved while the cancellation is pending.
+    pub qty: f64,
     pub cycle: u64,
 }
 
@@ -645,6 +647,36 @@ impl MakerAccountProjection {
             .map(|entry| &entry.request)
     }
 
+    /// Quantity across the canonical order/request registry. A replayed open
+    /// order can coexist with its pending cancel: reserve the larger quantity
+    /// once. Fills racing cancellation may temporarily over-reserve capacity.
+    pub fn executable_exposure(&self) -> crate::ExecutableExposure {
+        let mut exposure = crate::ExecutableExposure::default();
+        for order in self.orders.values() {
+            exposure.reserve(order.side, order.open_qty);
+        }
+        for entry in self.pending.iter().filter(|entry| entry.slot_open) {
+            match &entry.request {
+                ProjectionPendingRequest::Place(place) => exposure.reserve(place.side, place.qty),
+                ProjectionPendingRequest::Cancel(cancel) => {
+                    let observed_qty = self
+                        .orders
+                        .get(&cancel.order_id)
+                        .map_or(0.0, |order| order.open_qty);
+                    exposure.reserve(
+                        cancel.side,
+                        if cancel.qty.is_finite() && cancel.qty >= 0.0 {
+                            (cancel.qty - observed_qty).max(0.0)
+                        } else {
+                            cancel.qty
+                        },
+                    );
+                }
+            }
+        }
+        exposure
+    }
+
     pub fn pending_request_count(&self) -> usize {
         self.pending
             .iter()
@@ -921,10 +953,14 @@ impl MakerAccountProjection {
                 let Some(index) = index else {
                     return ProjectionOutcome::default();
                 };
-                // Only a still-open cancel is holding an order out of the map;
-                // cleanup or a terminal account observation may have closed
-                // the slot before the response arrives.
-                let entry = self.pending.remove(index);
+                // Gateway acceptance settles only the acknowledgement. The
+                // venue may still execute the cancelled order until its
+                // terminal account observation arrives. Keep its quantity,
+                // slot, and timeout lifecycle alive until then (or verified
+                // cleanup); a cancel intent/ack never creates headroom.
+                let entry = &mut self.pending[index];
+                entry.ack_pending = false;
+                let request = entry.request.clone();
                 let order_changed = if entry.slot_open {
                     let order_id = entry.cancel().expect("cancel entry").order_id;
                     self.orders.remove(&order_id).is_some()
@@ -932,11 +968,11 @@ impl MakerAccountProjection {
                     false
                 };
                 self.remember_completed_request(
-                    entry.request,
+                    request,
                     ProjectionRequestResolution::CancelResolved,
-                    // The flag is only consulted for accepted places.
                     false,
                 );
+                self.drop_settled();
                 ProjectionOutcome {
                     applied: true,
                     order_changed,
