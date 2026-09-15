@@ -176,7 +176,7 @@ fn cycle_plan_actions_are_identical_with_geometry_sidecar_present() {
         0.0,
         GuardDecision::INACTIVE,
     );
-    let desired = cap_desired_exposure(&c, 0.0, &generated.quotes, &[]);
+    let desired = cap_desired_exposure(&c, 0.0, &generated.quotes, &[], &[]);
     let actions_without_geometry = reconcile(
         &c,
         market.mark,
@@ -995,7 +995,7 @@ fn exposure_cap_limits_all_same_side_fills() {
     c.size = 0.02;
     c.max_position = 0.05;
     let raw = desired(&c, 100.0, None, None, 0.03);
-    let capped = cap_desired_exposure(&c, 0.03, &raw, &[]);
+    let capped = cap_desired_exposure(&c, 0.03, &raw, &[], &[]);
 
     // At +0.03, only one additional 0.02 buy can be exposed. All three
     // sells remain safe: even if they all fill, the position is -0.03.
@@ -1028,7 +1028,7 @@ fn exposure_cap_reserves_pending_slot_before_new_levels() {
     c.size = 0.02;
     c.max_position = 0.05;
     let raw = desired(&c, 100.0, None, None, 0.03);
-    let capped = cap_desired_exposure(&c, 0.03, &raw, &[(OrderSide::Buy, 2)]);
+    let capped = cap_desired_exposure(&c, 0.03, &raw, &[(OrderSide::Buy, 2)], &[]);
 
     // The in-flight outer bid gets the only 0.02 buy budget. A later
     // reconcile cannot place level 0 in addition while level 2 is still
@@ -2359,4 +2359,158 @@ fn wind_down_overrides_threshold_and_honors_tolerance() {
             kind: ExitKind::WindDown,
         })
     );
+}
+
+fn size_skew_exposure_plan(
+    cfg: &MakerConfig,
+    position: f64,
+    resting: &[RestingQuote],
+    size_skew: SizeSkewDecision,
+) -> CyclePlan {
+    plan_cycle(
+        cfg,
+        CycleInput {
+            cycle: 2,
+            market: MarketSnapshot {
+                mark: 100.0,
+                best_bid: Some(99.99),
+                best_ask: Some(100.01),
+            },
+            position,
+            resting,
+            pending_slots: &[],
+            market_data_mode: MarketDataMode::Active,
+            active_exit_enabled: true,
+            inventory_exit_pct: 0.0,
+            inventory_exit_qty: 0.0,
+            size_skew,
+            nonlinear_skew: Default::default(),
+            external_skew: Default::default(),
+            external_excess_bps: None,
+            micro_price: Default::default(),
+            guard: GuardDecision::INACTIVE,
+            wind_down: false,
+            qty_tolerance: 0.00005,
+        },
+        false,
+    )
+}
+
+#[test]
+fn size_skew_transition_keeps_executable_exposure_within_cap() {
+    let cfg = MakerConfig {
+        levels: 3,
+        size: 0.02,
+        ..cfg()
+    };
+    for side in [OrderSide::Buy, OrderSide::Sell] {
+        for filled in [0.016, 0.02] {
+            let sign = if side == OrderSide::Buy { 1.0 } else { -1.0 };
+            let mut controller = SizeSkewController::new(
+                SizeSkewConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+                &cfg,
+            )
+            .unwrap();
+            let initial = size_skew_exposure_plan(&cfg, 0.0, &[], controller.observe(0.0, &cfg));
+            let mut resting: Vec<_> = initial
+                .actions
+                .iter()
+                .filter_map(|a| match a {
+                    Action::Place(q) => Some(RestingQuote {
+                        order_id: Some(format!("{}{:?}", q.level, q.side)),
+                        side: q.side,
+                        level: q.level,
+                        price: q.price,
+                        qty: q.qty,
+                        ref_center: 100.0,
+                        placed_at_cycle: 0,
+                    }),
+                    _ => None,
+                })
+                .collect();
+            resting
+                .iter_mut()
+                .find(|q| q.side == side && q.level == 0)
+                .unwrap()
+                .qty -= filled;
+            resting.retain(|q| q.qty > cfg.qty_tick() / 2.0);
+            let position = filled * sign;
+            let updated = size_skew_exposure_plan(
+                &cfg,
+                position,
+                &resting,
+                controller.observe(position, &cfg),
+            );
+            let executable: f64 = updated
+                .actions
+                .iter()
+                .map(|action| match action {
+                    Action::Place(q) if q.side == side => q.qty,
+                    Action::Hold {
+                        side: held_side,
+                        level,
+                        ..
+                    } if *held_side == side => {
+                        resting
+                            .iter()
+                            .find(|q| q.side == side && q.level == *level)
+                            .unwrap()
+                            .qty
+                    }
+                    _ => 0.0,
+                })
+                .sum();
+            assert!(
+                filled + executable <= cfg.max_position + cfg.qty_tick() / 2.0,
+                "{side:?} fill={filled}: held plus new={executable} exceeds cap"
+            );
+        }
+    }
+}
+
+#[test]
+fn executable_budget_preserves_safe_actions_and_caps_each_side() {
+    let cfg = cfg();
+    let place = |side, level, qty| {
+        Action::Place(DesiredQuote {
+            side,
+            level,
+            qty,
+            price: 100.0,
+        })
+    };
+    for (side, position) in [(OrderSide::Buy, 0.02), (OrderSide::Sell, -0.02)] {
+        let other = if side == OrderSide::Buy {
+            OrderSide::Sell
+        } else {
+            OrderSide::Buy
+        };
+        let hold = Action::Hold {
+            side,
+            level: 0,
+            price: 100.0,
+            age_cycles: 1,
+            drift_bps: 0.0,
+        };
+        let safe = vec![hold, place(side, 1, 0.01), place(other, 0, 0.05)];
+        let mut budget = ExecutableExposure::default();
+        budget.reserve(side, 0.02);
+        let mut actions = safe.clone();
+        actions.push(place(side, 2, cfg.qty_tick()));
+        budget.retain_safe_placements(&cfg, position, &mut actions);
+        assert_eq!(
+            actions, safe,
+            "reserve each admitted placement and keep safe ordering"
+        );
+    }
+    for invalid in [f64::NAN, f64::INFINITY, -0.01] {
+        let mut budget = ExecutableExposure::default();
+        budget.reserve(OrderSide::Buy, invalid);
+        let mut actions = vec![place(OrderSide::Sell, 0, 0.01)];
+        budget.retain_safe_placements(&cfg, 0.0, &mut actions);
+        assert!(actions.is_empty(), "invalid exposure must block admission");
+    }
 }

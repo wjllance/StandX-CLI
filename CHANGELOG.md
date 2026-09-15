@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Maker exposure budgets now include retained order quantities and pending venue exposure, including cancels after gateway acknowledgement, preventing size-skew transitions and asynchronous replacements from exceeding the configured position cap. Missing cancel terminal observations remain covered by the existing request timeout.
+- Maker session stop-loss now prevents further maker/exit orders before shutdown cleanup and webhook delivery, while retaining fills recorded in the triggering cycle. Gross PnL semantics, thresholds, JSON fields, and live gates are unchanged.
 - The SDK's quick-start documentation example is now compiled but not executed (`no_run`). It previously issued a real HTTP request to the production endpoint when `cargo test` ran, so a transient network failure could fail the workspace test gate with no test actually broken.
 
 ### Added

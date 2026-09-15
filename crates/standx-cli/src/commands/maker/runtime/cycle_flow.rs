@@ -9,6 +9,7 @@ pub(super) struct CycleAttempt {
 }
 
 struct CycleSuccess {
+    stop_loss: Option<maker::SessionStopLoss>,
     places: u64,
     cancels: u64,
     holds: u64,
@@ -46,6 +47,40 @@ pub(super) fn commit_cycle_effect(runtime_state: &mut MakerState, token: WorkTok
         runtime_state.next_effect(),
         Some(MakerEffect::CommitCycle(committed)) if committed == token
     )
+}
+
+pub(super) struct StopAccountBuffer<'a> {
+    pub(super) events: Vec<AccountEvent>,
+    pub(super) state: AccountEventState<'a>,
+    pub(super) context: AccountEventContext<'a>,
+    pub(super) total_fills: &'a mut u64,
+}
+
+/// This path has no notification await: freeze now, deliver after cleanup.
+pub(super) fn stop_loss_exit(
+    state: &mut MakerState,
+    output_format: OutputFormat,
+    symbol: &str,
+    cycle: u64,
+    loss: maker::SessionStopLoss,
+    buffer: Option<StopAccountBuffer<'_>>,
+) -> MakerExit {
+    state.handle(MakerEvent::StopRequested(RuntimeStopReason::StopLoss(
+        loss.to_string(),
+    )));
+    // An Order callback can unlock a previously buffered Trade's ownership.
+    // These already-received account facts must survive stopping; they use
+    // the canonical ingestion path without awaiting position notifications.
+    if let Some(mut buffer) = buffer {
+        for event in buffer.events {
+            match apply_account_event(event, &mut buffer.state, &buffer.context) {
+                Ok(outcome) => *buffer.total_fills += outcome.fills,
+                Err(error) => eprintln!("⚠️ stopped maker account-event ingestion failed: {error}"),
+            }
+        }
+    }
+    emit_stop_loss_triggered(output_format, symbol, cycle, loss.pnl, loss.limit);
+    take_stop_effect(state, MakerExit::StopLoss)
 }
 
 impl MakerRuntime {
@@ -260,6 +295,7 @@ impl MakerRuntime {
                         inventory_exit_qty: args.inventory_exit_qty,
                         inventory_exit_cfg: args.inventory_exit,
                         stop_equity_below: args.stop_equity_below,
+                        stop_loss: args.stop_loss,
                         stop_margin_below: args.stop_margin_below,
                         wind_down: self.loop_state.wind_down,
                         qty_tolerance,
@@ -304,6 +340,7 @@ impl MakerRuntime {
                 )
                 .await?;
                 Ok::<_, anyhow::Error>(CycleSuccess {
+                    stop_loss: result.stop_loss,
                     places: result.places,
                     cancels: result.cancels,
                     holds: result.holds,
@@ -424,6 +461,48 @@ impl MakerRuntime {
                         .handle(MakerEvent::MarketDataDegraded(detail.clone()));
                     self.market.pending_degradation = Some(detail);
                 }
+            }
+            // A known financial stop outranks buffered-event notifications.
+            // Fill accounting/output has already completed in maker_cycle;
+            // freeze before any await and let shutdown compensate at the venue.
+            let loss = match cycle_result.as_ref() {
+                Some(Ok(success)) => success.stop_loss,
+                Some(Err(error)) => error.downcast_ref::<maker::SessionStopLoss>().copied(),
+                None => None,
+            };
+            if let Some(loss) = loss {
+                if let Some(Ok(success)) = &cycle_result {
+                    self.loop_state.counters.total_fills += success.fills;
+                }
+                self.market.last_mark = Some(loss.mark);
+                let account_buffer = self.live_session.as_mut().map(|session| StopAccountBuffer {
+                    events: buffered_account,
+                    state: AccountEventState {
+                        ledger: &mut self.loop_state.ledger,
+                        stats: &mut self.loop_state.stats,
+                        projection: &mut session.projection,
+                    },
+                    context: AccountEventContext {
+                        symbol,
+                        run_order_prefix,
+                        mark: loss.mark,
+                        cycle,
+                        output_format,
+                        excess_bps_at_fill: self
+                            .loop_state
+                            .external_excess_telemetry
+                            .current(std::time::Instant::now()),
+                    },
+                    total_fills: &mut self.loop_state.counters.total_fills,
+                });
+                return Err(LoopDirective::Exit(stop_loss_exit(
+                    &mut self.recovery.runtime_state,
+                    output_format,
+                    symbol,
+                    cycle,
+                    loss,
+                    account_buffer,
+                )));
             }
             // The buffers are only fed from live-session receivers, so both are
             // empty in paper mode.
@@ -611,6 +690,7 @@ impl MakerRuntime {
         let exit = 'phase: {
             match cycle_result {
                 Ok(CycleSuccess {
+                    stop_loss: _,
                     places,
                     cancels,
                     holds,
@@ -632,6 +712,28 @@ impl MakerRuntime {
                     self.loop_state.counters.total_fills += fills;
                     self.loop_state.counters.total_halted += halted as u64;
                     self.market.last_mark = Some(mark);
+                    // Buffered account events can change the session PnL after
+                    // cycle work settled. Stop before awaiting any notification.
+                    let session_position = if args.live {
+                        self.loop_state.ledger.expected_position
+                    } else {
+                        self.loop_state.stats.position()
+                    };
+                    if let Err(loss) = maker::SessionStopLoss::check(
+                        &self.loop_state.stats,
+                        session_position,
+                        mark,
+                        args.stop_loss,
+                    ) {
+                        break 'phase stop_loss_exit(
+                            &mut self.recovery.runtime_state,
+                            output_format,
+                            symbol,
+                            cycle,
+                            loss,
+                            None,
+                        );
+                    }
                     if halted != breaker_halted_before {
                         let (severity, event, message) = if halted {
                             (
@@ -760,39 +862,19 @@ impl MakerRuntime {
                             }
                         }
                     }
-                    // Financial brake: a session loss breaching --stop-loss routes
-                    // through the fail-safe shutdown (freeze, cancel the maker
-                    // book, await the critical webhook, exit) — the same path the
-                    // other MakerExit variants use.
-                    if args.stop_loss > 0.0 {
-                        let pnl = self.loop_state.stats.pnl(session_position, mark);
-                        if pnl <= -args.stop_loss {
-                            emit_stop_loss_triggered(
-                                output_format,
-                                symbol,
-                                cycle,
-                                pnl,
-                                args.stop_loss,
-                            );
-                            notifier
-                                .risk(
-                                    RiskNotice::critical("stop_loss", "triggered", &format!( "session PnL {pnl:+.2} breached stop-loss -{:.2}; shutting down", args.stop_loss ), symbol, cycle).position_after(self.loop_state.ledger.expected_position).expected(self.loop_state.ledger.expected_position),
-                                    true,
-                                )
-                                .await;
-                            self.recovery
-                                .runtime_state
-                                .handle(MakerEvent::StopRequested(RuntimeStopReason::StopLoss(
-                                    format!("session PnL {pnl:+.2} <= -{:.2}", args.stop_loss),
-                                )));
-                            break 'phase take_stop_effect(
-                                &mut self.recovery.runtime_state,
-                                MakerExit::PositionReconciliation,
-                            );
-                        }
-                    }
                 }
                 Err(e) => {
+                    if let Some(loss) = e.downcast_ref::<maker::SessionStopLoss>() {
+                        self.market.last_mark = Some(loss.mark);
+                        break 'phase stop_loss_exit(
+                            &mut self.recovery.runtime_state,
+                            output_format,
+                            symbol,
+                            cycle,
+                            *loss,
+                            None,
+                        );
+                    }
                     // Solvency brake (stage 5-b): raised from inside the cycle
                     // *before* any order work, so reaching here means the
                     // breached (or unverifiable) balance added no exposure.
