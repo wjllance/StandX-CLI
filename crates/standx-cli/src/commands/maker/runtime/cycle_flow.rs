@@ -49,6 +49,15 @@ pub(super) fn commit_cycle_effect(runtime_state: &mut MakerState, token: WorkTok
     )
 }
 
+enum BufferIngest {
+    Continue {
+        needs_reconciliation: bool,
+        position: Option<f64>,
+    },
+    Stop(maker::SessionStopLoss),
+    Failed,
+}
+
 pub(super) struct StopAccountBuffer<'a> {
     pub(super) events: Vec<AccountEvent>,
     pub(super) state: AccountEventState<'a>,
@@ -514,6 +523,8 @@ impl MakerRuntime {
                 }
                 // Apply the events buffered during work, ordering order-responses
                 // before account events to mirror the top-of-loop drain.
+                // Account events are applied below, after this borrow ends, so a
+                // stop can freeze without holding the session across the exit.
                 for response in buffered_orders {
                     // Ack for a cleanup-minted WS cancel: cleanup already
                     // established the venue state via `/api/query_order`, so the
@@ -548,7 +559,21 @@ impl MakerRuntime {
                         session.order_response_health.mark_unhealthy(reason);
                     }
                 }
-                for event in buffered_account {
+            }
+            while !buffered_account.is_empty() {
+                let event = buffered_account.remove(0);
+                let mark = match cycle_result.as_ref() {
+                    Some(Ok(success)) => success.mark,
+                    _ => self.market.last_mark.unwrap_or(baseline_mark),
+                };
+                let excess = self
+                    .loop_state
+                    .external_excess_telemetry
+                    .current(std::time::Instant::now());
+                let decision = {
+                    let Some(session) = self.live_session.as_mut() else {
+                        break;
+                    };
                     match apply_account_event(
                         event,
                         &mut AccountEventState {
@@ -559,21 +584,20 @@ impl MakerRuntime {
                         &AccountEventContext {
                             symbol,
                             run_order_prefix,
-                            mark: self.market.last_mark.unwrap_or(baseline_mark),
+                            mark,
                             cycle,
                             output_format,
-                            excess_bps_at_fill: self
-                                .loop_state
-                                .external_excess_telemetry
-                                .current(std::time::Instant::now()),
+                            excess_bps_at_fill: excess,
                         },
                     ) {
                         Ok(outcome) => {
-                            if outcome.requires_order_reconciliation {
-                                cycle_invalidated_by_account = true;
-                            }
-                            let position = absorb_account_outcome(
+                            let needs_reconciliation = outcome.requires_order_reconciliation;
+                            match absorb_account_outcome_or_stop(
                                 outcome,
+                                &self.loop_state.stats,
+                                self.loop_state.ledger.expected_position,
+                                mark,
+                                args.stop_loss,
                                 OutcomeSink {
                                     total_fills: &mut self.loop_state.counters.total_fills,
                                     balance_refresh_requested: &mut self
@@ -596,15 +620,13 @@ impl MakerRuntime {
                                     latency_started: Some(session.latency_started),
                                 },
                             )
-                            .await;
-                            if let Some(position) = position {
-                                if (position - self.loop_state.ledger.expected_position).abs()
-                                    > qty_tolerance
-                                {
-                                    self.recovery.account_position_mismatch = Some(position);
-                                } else {
-                                    self.recovery.account_position_mismatch = None;
-                                }
+                            .await
+                            {
+                                Ok(position) => BufferIngest::Continue {
+                                    needs_reconciliation,
+                                    position,
+                                },
+                                Err(loss) => BufferIngest::Stop(loss),
                             }
                         }
                         Err(error) => {
@@ -614,7 +636,72 @@ impl MakerRuntime {
                             session
                                 .account_stream_health
                                 .mark_unhealthy(error.to_string());
+                            BufferIngest::Failed
                         }
+                    }
+                };
+                match decision {
+                    BufferIngest::Continue {
+                        needs_reconciliation,
+                        position,
+                    } => {
+                        if needs_reconciliation {
+                            cycle_invalidated_by_account = true;
+                        }
+                        if let Some(position) = position {
+                            if (position - self.loop_state.ledger.expected_position).abs()
+                                > qty_tolerance
+                            {
+                                self.recovery.account_position_mismatch = Some(position);
+                            } else {
+                                self.recovery.account_position_mismatch = None;
+                            }
+                        }
+                    }
+                    BufferIngest::Failed => {}
+                    BufferIngest::Stop(loss) => {
+                        // The cycle's own fills are normally counted in finish_cycle.
+                        // This exit skips that function, so credit them once here.
+                        if let Some(Ok(success)) = cycle_result.as_ref() {
+                            self.loop_state.counters.total_fills += success.fills;
+                        }
+                        let mut remaining = buffered_account;
+                        if let Some(session) = self.live_session.as_mut() {
+                            while let Ok(next) = session.account_events.try_recv() {
+                                remaining.push(next);
+                            }
+                        }
+                        self.market.last_mark = Some(loss.mark);
+                        let excess = self
+                            .loop_state
+                            .external_excess_telemetry
+                            .current(std::time::Instant::now());
+                        let account_buffer =
+                            self.live_session.as_mut().map(|session| StopAccountBuffer {
+                                events: remaining,
+                                state: AccountEventState {
+                                    ledger: &mut self.loop_state.ledger,
+                                    stats: &mut self.loop_state.stats,
+                                    projection: &mut session.projection,
+                                },
+                                context: AccountEventContext {
+                                    symbol,
+                                    run_order_prefix,
+                                    mark: loss.mark,
+                                    cycle,
+                                    output_format,
+                                    excess_bps_at_fill: excess,
+                                },
+                                total_fills: &mut self.loop_state.counters.total_fills,
+                            });
+                        return Err(LoopDirective::Exit(stop_loss_exit(
+                            &mut self.recovery.runtime_state,
+                            output_format,
+                            symbol,
+                            cycle,
+                            loss,
+                            account_buffer,
+                        )));
                     }
                 }
             }
@@ -1385,9 +1472,29 @@ impl MakerRuntime {
                     event = account_update => {
                         // The branch futures are dropped before select! handlers
                         // run, so the session can be re-borrowed here. An event
-                        // only arrives when the live session exists.
-                        match (event, self.live_session.as_mut()) {
-                            (Some(event), Some(session)) => match apply_account_event(
+                        // only arrives when the live session exists. A fill that
+                        // breaches stop-loss freezes before position_jump; the
+                        // orders from the previous cycle are still live during
+                        // this wait.
+                        let Some(event) = event else {
+                            if let Some(session) = self.live_session.as_mut() {
+                                session.account_stream_health.mark_unhealthy(
+                                    "authenticated account stream disconnected",
+                                );
+                            }
+                            break;
+                        };
+                        let cycle_now = self.loop_state.counters.cycle;
+                        let mark = self.market.last_mark.unwrap_or(baseline_mark);
+                        let excess = self
+                            .loop_state
+                            .external_excess_telemetry
+                            .current(std::time::Instant::now());
+                        let decision = {
+                            let Some(session) = self.live_session.as_mut() else {
+                                break;
+                            };
+                            match apply_account_event(
                                 event,
                                 &mut AccountEventState {
                                     ledger: &mut self.loop_state.ledger,
@@ -1397,56 +1504,117 @@ impl MakerRuntime {
                                 &AccountEventContext {
                                     symbol,
                                     run_order_prefix,
-                                    mark: self.market.last_mark.unwrap_or(baseline_mark),
-                                    cycle: self.loop_state.counters.cycle,
+                                    mark,
+                                    cycle: cycle_now,
                                     output_format,
-                                    excess_bps_at_fill: self
-                                        .loop_state
-                                        .external_excess_telemetry
-                                        .current(std::time::Instant::now()),
+                                    excess_bps_at_fill: excess,
                                 },
                             ) {
                                 Ok(outcome) => {
-                                    self.recovery.account_order_reconciliation_required |=
-                                        outcome.requires_order_reconciliation;
-                                    let position = absorb_account_outcome(
+                                    let needs_reconciliation = outcome.requires_order_reconciliation;
+                                    match absorb_account_outcome_or_stop(
                                         outcome,
+                                        &self.loop_state.stats,
+                                        self.loop_state.ledger.expected_position,
+                                        mark,
+                                        args.stop_loss,
                                         OutcomeSink {
                                             total_fills: &mut self.loop_state.counters.total_fills,
-                                            balance_refresh_requested: &mut self.loop_state.account_balance_refresh_requested,
-                                            inventory_exit_pending: &mut self.loop_state.inventory_exit_pending,
+                                            balance_refresh_requested: &mut self
+                                                .loop_state
+                                                .account_balance_refresh_requested,
+                                            inventory_exit_pending: &mut self
+                                                .loop_state
+                                                .inventory_exit_pending,
                                             notifier,
-                                            position_alert_anchor: &mut self.loop_state.position_alert_anchor,
-                                            expected_position: self.loop_state.ledger.expected_position,
+                                            position_alert_anchor: &mut self
+                                                .loop_state
+                                                .position_alert_anchor,
+                                            expected_position: self
+                                                .loop_state
+                                                .ledger
+                                                .expected_position,
                                             max_position: cfg.max_position,
                                             inventory_exit_pct: args.inventory_exit_pct,
                                             qty_tolerance,
                                             symbol,
-                                            cycle: self.loop_state.counters.cycle,
+                                            cycle: cycle_now,
                                             order_latency: Some(&mut session.order_latency),
                                             latency_started: Some(session.latency_started),
                                         },
                                     )
-                                    .await;
-                                    if let Some(position) = position.filter(|position| {
-                                        (*position - self.loop_state.ledger.expected_position).abs() > qty_tolerance
-                                    }) {
-                                        self.recovery.account_position_mismatch = Some(position);
+                                    .await
+                                    {
+                                        Ok(position) => BufferIngest::Continue {
+                                            needs_reconciliation,
+                                            position,
+                                        },
+                                        Err(loss) => BufferIngest::Stop(loss),
                                     }
-                                    break;
                                 }
                                 Err(error) => {
-                                    session.account_stream_health.mark_unhealthy(error.to_string());
-                                    break;
+                                    session
+                                        .account_stream_health
+                                        .mark_unhealthy(error.to_string());
+                                    BufferIngest::Failed
                                 }
-                            },
-                            (None, Some(session)) => {
-                                session
-                                    .account_stream_health
-                                    .mark_unhealthy("authenticated account stream disconnected");
+                            }
+                        };
+                        match decision {
+                            BufferIngest::Continue {
+                                needs_reconciliation,
+                                position,
+                            } => {
+                                self.recovery.account_order_reconciliation_required |=
+                                    needs_reconciliation;
+                                if let Some(position) = position.filter(|position| {
+                                    (*position - self.loop_state.ledger.expected_position).abs()
+                                        > qty_tolerance
+                                }) {
+                                    self.recovery.account_position_mismatch = Some(position);
+                                }
                                 break;
                             }
-                            (_, None) => break,
+                            BufferIngest::Failed => break,
+                            BufferIngest::Stop(loss) => {
+                                let mut remaining = Vec::new();
+                                if let Some(session) = self.live_session.as_mut() {
+                                    while let Ok(next) = session.account_events.try_recv() {
+                                        remaining.push(next);
+                                    }
+                                }
+                                self.market.last_mark = Some(loss.mark);
+                                let excess = self
+                                    .loop_state
+                                    .external_excess_telemetry
+                                    .current(std::time::Instant::now());
+                                let account_buffer =
+                                    self.live_session.as_mut().map(|session| StopAccountBuffer {
+                                        events: remaining,
+                                        state: AccountEventState {
+                                            ledger: &mut self.loop_state.ledger,
+                                            stats: &mut self.loop_state.stats,
+                                            projection: &mut session.projection,
+                                        },
+                                        context: AccountEventContext {
+                                            symbol,
+                                            run_order_prefix,
+                                            mark: loss.mark,
+                                            cycle: cycle_now,
+                                            output_format,
+                                            excess_bps_at_fill: excess,
+                                        },
+                                        total_fills: &mut self.loop_state.counters.total_fills,
+                                    });
+                                break 'phase stop_loss_exit(
+                                    &mut self.recovery.runtime_state,
+                                    output_format,
+                                    symbol,
+                                    cycle_now,
+                                    loss,
+                                    account_buffer,
+                                );
+                            }
                         }
                     }
                     ok = update => {

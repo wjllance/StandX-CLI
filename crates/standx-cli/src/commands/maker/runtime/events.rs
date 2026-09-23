@@ -492,6 +492,38 @@ pub(super) async fn absorb_account_outcome(
     outcome: AccountEventOutcome,
     mut sink: OutcomeSink<'_>,
 ) -> Option<f64> {
+    credit_account_outcome(&outcome, &mut sink);
+    notify_position_observations(&outcome, &mut sink).await;
+    outcome.position_observations.last().copied()
+}
+
+/// Book a buffered account outcome, then either notify or stop.
+///
+/// A fill that arrives while a cycle is in flight is applied only after that
+/// cycle may already have submitted orders. `position_jump` is an await on
+/// this path, and the accounting-invariant notice that follows buffer ingest
+/// awaits webhook delivery. Both must run only after the gross session stop
+/// has been checked: a breach freezes the generation immediately, and shutdown
+/// delivers notifications after maker cleanup. Sync fill/latency credit still
+/// happens so the triggering fill is not dropped. Position warnings for the
+/// same outcome are skipped; the stop event is the operator signal.
+///
+/// `stop_loss == 0` stays disabled, matching [`maker::SessionStopLoss::check`].
+pub(super) async fn absorb_account_outcome_or_stop(
+    outcome: AccountEventOutcome,
+    stats: &maker::MakerStats,
+    session_position: f64,
+    mark: f64,
+    stop_loss: f64,
+    mut sink: OutcomeSink<'_>,
+) -> Result<Option<f64>, maker::SessionStopLoss> {
+    credit_account_outcome(&outcome, &mut sink);
+    maker::SessionStopLoss::check(stats, session_position, mark, stop_loss)?;
+    notify_position_observations(&outcome, &mut sink).await;
+    Ok(outcome.position_observations.last().copied())
+}
+
+fn credit_account_outcome(outcome: &AccountEventOutcome, sink: &mut OutcomeSink<'_>) {
     if let (Some(tracker), Some(started)) =
         (sink.order_latency.as_deref_mut(), sink.latency_started)
     {
@@ -512,13 +544,15 @@ pub(super) async fn absorb_account_outcome(
     if outcome.exit_fill_observed {
         *sink.inventory_exit_pending = false;
     }
-    let position = outcome.position_observations.last().copied();
-    for observed in outcome.position_observations {
+}
+
+async fn notify_position_observations(outcome: &AccountEventOutcome, sink: &mut OutcomeSink<'_>) {
+    for observed in &outcome.position_observations {
         sink.notifier
             .position_jump(
                 sink.position_alert_anchor,
                 PositionChange {
-                    observed,
+                    observed: *observed,
                     expected: sink.expected_position,
                     max_position: sink.max_position,
                     inventory_exit_pct: sink.inventory_exit_pct,
@@ -529,7 +563,6 @@ pub(super) async fn absorb_account_outcome(
             )
             .await;
     }
-    position
 }
 pub(super) fn apply_account_events(
     receiver: &mut tokio::sync::mpsc::Receiver<AccountEvent>,
