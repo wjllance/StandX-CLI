@@ -166,6 +166,7 @@ fn apply_order_response_matches_cancel_acknowledgement() {
             side: OrderSide::Buy,
             level: 0,
             price: 100.0,
+            qty: 1.0,
             cycle: 1,
         }),
     );
@@ -176,7 +177,45 @@ fn apply_order_response_matches_cancel_acknowledgement() {
         verdict.operation().map(RequestOperation::label),
         Some("cancel")
     );
+    assert_eq!(projection.pending_cancels().len(), 1);
+    assert!(projection.has_pending_request_lifecycle("cancel-1"));
+    assert_eq!(projection.pending_request_count(), 0);
+    let started = std::time::Instant::now();
+    let mut deadlines = OrderRequestDeadlines::default();
+    deadlines.record("cancel-1".into(), OrderRequestKind::Cancel, started);
+    // A second gateway/terminal response does not substitute for the
+    // independent account-order terminal observation.
+    assert_eq!(
+        correlate(&mut projection, Some("cancel-1"), 0).label(),
+        "late_known"
+    );
+    assert_eq!(
+        correlate(&mut projection, Some("cancel-1"), 100).label(),
+        "late_known"
+    );
+    deadlines.retain_pending(&projection);
+    let expired = deadlines
+        .timed_out(
+            &projection,
+            started + ORDER_REQUEST_TIMEOUT,
+            ORDER_REQUEST_TIMEOUT,
+        )
+        .unwrap();
+    assert_eq!(expired.phase, maker::RequestTimeoutPhase::AccountOrder);
+    projection.apply(
+        1,
+        AccountProjectionEvent::OrderObserved(maker::OrderObservation {
+            order_id: 7,
+            client_order_id: Some("sxmk-test-b".into()),
+            side: OrderSide::Buy,
+            price: 100.0,
+            open_qty: 0.0,
+            terminal: true,
+        }),
+    );
+    deadlines.retain_pending(&projection);
     assert!(projection.pending_cancels().is_empty());
+    assert!(deadlines.next_deadline(ORDER_REQUEST_TIMEOUT).is_none());
 }
 
 #[test]
@@ -251,6 +290,7 @@ fn duplicate_cancel_ack_matches_completed_request_after_cleanup() {
             side: OrderSide::Buy,
             level: 0,
             price: 100.0,
+            qty: 1.0,
             cycle: 1,
         }),
     );
@@ -336,6 +376,7 @@ fn apply_order_response_fails_closed_on_rejected_cancel_acknowledgement() {
             side: OrderSide::Buy,
             level: 0,
             price: 100.0,
+            qty: 1.0,
             cycle: 1,
         }),
     );
@@ -577,6 +618,7 @@ fn apply_order_responses_rejected_cancel_fails_closed() {
             side: OrderSide::Buy,
             level: 0,
             price: 100.0,
+            qty: 1.0,
             cycle: 1,
         }),
     );

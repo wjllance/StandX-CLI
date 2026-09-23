@@ -18,6 +18,7 @@
 use standx_sdk::models::OrderSide;
 
 mod alerts;
+mod exposure;
 mod stats;
 
 pub mod account_projection;
@@ -48,6 +49,7 @@ pub use exit_execution::{
     plan_exit_order_step, validate_inventory_exit_config, ExitOrderStep, ExitPhase, ExitPhaseState,
     InventoryExitConfig,
 };
+pub use exposure::ExecutableExposure;
 pub use external_guard::{
     ExternalDivergence, GuardConfig, GuardController, GuardDecision, GuardError,
 };
@@ -84,7 +86,7 @@ pub use replay::{
     run_replay, ReplayCycle, ReplayCycleOutcome, ReplayError, ReplayEvent, ReplayResult,
     ReplaySettings,
 };
-pub use risk::{PositionAlertAnchor, PositionRiskEvent, PositionRiskKind};
+pub use risk::{PositionAlertAnchor, PositionRiskEvent, PositionRiskKind, SessionStopLoss};
 pub use runtime::{
     order_cancel_rejection_reason, MakerEffect, MakerEvent, MakerState, RecoveryTarget,
     RequestTimeoutPhase, RuntimeStopReason, WorkToken, MAX_CONSECUTIVE_CYCLE_ERRORS,
@@ -804,8 +806,13 @@ pub fn plan_cycle(cfg: &MakerConfig, input: CycleInput<'_>, halted: bool) -> Cyc
                 total_shift_bps,
                 input.guard,
             );
-            let capped =
-                cap_desired_exposure(cfg, input.position, &generated.quotes, input.pending_slots);
+            let capped = cap_desired_exposure(
+                cfg,
+                input.position,
+                &generated.quotes,
+                input.pending_slots,
+                input.resting,
+            );
             mark_exposure_suppressed(&mut generated.geometry, &capped);
             (capped, generated.geometry)
         };
@@ -1321,6 +1328,7 @@ pub(crate) fn cap_desired_exposure(
     position: f64,
     desired: &[DesiredQuote],
     reserved_slots: &[(OrderSide, u32)],
+    resting: &[RestingQuote],
 ) -> Vec<DesiredQuote> {
     let mut buy_budget = (cfg.max_position - position).max(0.0);
     let mut sell_budget = (cfg.max_position + position).max(0.0);
@@ -1341,8 +1349,18 @@ pub(crate) fn cap_desired_exposure(
             // could fall below the venue's minimum order size. Allow half a qty
             // tick of slack so a budget that lands a hair under a whole-tick
             // quote (float noise) still admits it.
-            if quote.qty <= *budget + cfg.qty_tick() / 2.0 {
-                *budget = (*budget - quote.qty).max(0.0);
+            // Size skew can shrink the target while reconcile HOLDS a larger
+            // old order. Budget the actual old quantity, not just its target.
+            // Cancellation is asynchronous; the executor also budgets open
+            // requests before submitting replacements.
+            let resting_qty: f64 = resting
+                .iter()
+                .filter(|old| old.side == quote.side && old.level == quote.level)
+                .map(|old| old.qty)
+                .sum();
+            let reserved_qty = quote.qty.max(resting_qty);
+            if reserved_qty <= *budget + cfg.qty_tick() / 2.0 {
+                *budget = (*budget - reserved_qty).max(0.0);
                 true
             } else {
                 false

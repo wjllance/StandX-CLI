@@ -118,6 +118,20 @@ pub(super) struct MakerRuntime {
     pub(super) live_session: Option<LiveSession>,
     pub(super) ctrl_c_rx: tokio::sync::watch::Receiver<bool>,
     pub(super) wind_down_rx: tokio::sync::watch::Receiver<bool>,
+    /// Test-only stand-in for a cycle that already succeeded. The work select
+    /// prefers an invalidating trade over the cycle result, so a regression
+    /// cannot otherwise pair `CycleSuccess` with buffered trades.
+    #[cfg(test)]
+    pub(super) test_buffered_cycle: Option<TestBufferedCycle>,
+}
+
+/// Successful-cycle mark and fills, plus the account events already buffered
+/// for the post-cycle ingest. Production code leaves this unset.
+#[cfg(test)]
+pub(super) struct TestBufferedCycle {
+    pub(super) events: Vec<standx_sdk::account_stream::AccountEvent>,
+    pub(super) mark: f64,
+    pub(super) fills: u64,
 }
 
 pub(super) enum LoopDirective {
@@ -354,6 +368,8 @@ impl MakerRuntime {
             live_session,
             ctrl_c_rx,
             wind_down_rx,
+            #[cfg(test)]
+            test_buffered_cycle: None,
         })
     }
 }

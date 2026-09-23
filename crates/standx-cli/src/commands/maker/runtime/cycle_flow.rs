@@ -9,6 +9,7 @@ pub(super) struct CycleAttempt {
 }
 
 struct CycleSuccess {
+    stop_loss: Option<maker::SessionStopLoss>,
     places: u64,
     cancels: u64,
     holds: u64,
@@ -48,6 +49,49 @@ pub(super) fn commit_cycle_effect(runtime_state: &mut MakerState, token: WorkTok
     )
 }
 
+enum BufferIngest {
+    Continue {
+        needs_reconciliation: bool,
+        position: Option<f64>,
+    },
+    Stop(maker::SessionStopLoss),
+    Failed,
+}
+
+pub(super) struct StopAccountBuffer<'a> {
+    pub(super) events: Vec<AccountEvent>,
+    pub(super) state: AccountEventState<'a>,
+    pub(super) context: AccountEventContext<'a>,
+    pub(super) total_fills: &'a mut u64,
+}
+
+/// This path has no notification await: freeze now, deliver after cleanup.
+pub(super) fn stop_loss_exit(
+    state: &mut MakerState,
+    output_format: OutputFormat,
+    symbol: &str,
+    cycle: u64,
+    loss: maker::SessionStopLoss,
+    buffer: Option<StopAccountBuffer<'_>>,
+) -> MakerExit {
+    state.handle(MakerEvent::StopRequested(RuntimeStopReason::StopLoss(
+        loss.to_string(),
+    )));
+    // An Order callback can unlock a previously buffered Trade's ownership.
+    // These already-received account facts must survive stopping; they use
+    // the canonical ingestion path without awaiting position notifications.
+    if let Some(mut buffer) = buffer {
+        for event in buffer.events {
+            match apply_account_event(event, &mut buffer.state, &buffer.context) {
+                Ok(outcome) => *buffer.total_fills += outcome.fills,
+                Err(error) => eprintln!("⚠️ stopped maker account-event ingestion failed: {error}"),
+            }
+        }
+    }
+    emit_stop_loss_triggered(output_format, symbol, cycle, loss.pnl, loss.limit);
+    take_stop_effect(state, MakerExit::StopLoss)
+}
+
 impl MakerRuntime {
     pub(super) async fn drive(mut self) -> (Self, MakerExit) {
         let exit = 'main: loop {
@@ -77,7 +121,9 @@ impl MakerRuntime {
         self.finish_cycle(attempt).await
     }
 
-    async fn execute_cycle(&mut self) -> std::result::Result<CycleAttempt, LoopDirective> {
+    pub(super) async fn execute_cycle(
+        &mut self,
+    ) -> std::result::Result<CycleAttempt, LoopDirective> {
         let args = &self.deps.args;
         let output_format = self.deps.output_format;
         let client = &self.deps.client;
@@ -166,7 +212,31 @@ impl MakerRuntime {
                 ),
                 None => (None, None, None, None, None, None, None, None, None, None),
             };
+            // Clone before `work` captures `self`. A trade in the select aborts
+            // the cycle before its result is observed, so tests place the
+            // buffered trades here and let `work` return the paired success.
+            #[cfg(test)]
+            let injected_events = self
+                .test_buffered_cycle
+                .as_ref()
+                .map(|cycle| cycle.events.clone());
             let work = async {
+                #[cfg(test)]
+                if let Some(injected) = self.test_buffered_cycle.take() {
+                    return Ok(CycleSuccess {
+                        stop_loss: None,
+                        places: 0,
+                        cancels: 0,
+                        holds: 0,
+                        fills: injected.fills,
+                        mark: injected.mark,
+                        src: "test",
+                        market_fallback_reason: None,
+                        halted: false,
+                        exit_pending_after: false,
+                        balance: None,
+                    });
+                }
                 if let Some(observed) = mismatch {
                     return Err(anyhow::Error::new(
                         PositionReconciliationError::position_mismatch(
@@ -260,6 +330,7 @@ impl MakerRuntime {
                         inventory_exit_qty: args.inventory_exit_qty,
                         inventory_exit_cfg: args.inventory_exit,
                         stop_equity_below: args.stop_equity_below,
+                        stop_loss: args.stop_loss,
                         stop_margin_below: args.stop_margin_below,
                         wind_down: self.loop_state.wind_down,
                         qty_tolerance,
@@ -304,6 +375,7 @@ impl MakerRuntime {
                 )
                 .await?;
                 Ok::<_, anyhow::Error>(CycleSuccess {
+                    stop_loss: result.stop_loss,
                     places: result.places,
                     cancels: result.cancels,
                     holds: result.holds,
@@ -323,6 +395,10 @@ impl MakerRuntime {
             // queued Cleanup effect compensates for any request that may already
             // have reached the venue.
             let mut buffered_account: Vec<AccountEvent> = Vec::new();
+            #[cfg(test)]
+            if let Some(events) = injected_events {
+                buffered_account = events;
+            }
             let mut buffered_orders: Vec<OrderResponse> = Vec::new();
             let mut cycle_invalidated_by_account = false;
             let mut cycle_invalidated_by_market: Option<String> = None;
@@ -425,6 +501,48 @@ impl MakerRuntime {
                     self.market.pending_degradation = Some(detail);
                 }
             }
+            // A known financial stop outranks buffered-event notifications.
+            // Fill accounting/output has already completed in maker_cycle;
+            // freeze before any await and let shutdown compensate at the venue.
+            let loss = match cycle_result.as_ref() {
+                Some(Ok(success)) => success.stop_loss,
+                Some(Err(error)) => error.downcast_ref::<maker::SessionStopLoss>().copied(),
+                None => None,
+            };
+            if let Some(loss) = loss {
+                if let Some(Ok(success)) = &cycle_result {
+                    self.loop_state.counters.total_fills += success.fills;
+                }
+                self.market.last_mark = Some(loss.mark);
+                let account_buffer = self.live_session.as_mut().map(|session| StopAccountBuffer {
+                    events: buffered_account,
+                    state: AccountEventState {
+                        ledger: &mut self.loop_state.ledger,
+                        stats: &mut self.loop_state.stats,
+                        projection: &mut session.projection,
+                    },
+                    context: AccountEventContext {
+                        symbol,
+                        run_order_prefix,
+                        mark: loss.mark,
+                        cycle,
+                        output_format,
+                        excess_bps_at_fill: self
+                            .loop_state
+                            .external_excess_telemetry
+                            .current(std::time::Instant::now()),
+                    },
+                    total_fills: &mut self.loop_state.counters.total_fills,
+                });
+                return Err(LoopDirective::Exit(stop_loss_exit(
+                    &mut self.recovery.runtime_state,
+                    output_format,
+                    symbol,
+                    cycle,
+                    loss,
+                    account_buffer,
+                )));
+            }
             // The buffers are only fed from live-session receivers, so both are
             // empty in paper mode.
             if let Some(session) = self.live_session.as_mut() {
@@ -435,6 +553,8 @@ impl MakerRuntime {
                 }
                 // Apply the events buffered during work, ordering order-responses
                 // before account events to mirror the top-of-loop drain.
+                // Account events are applied below, after this borrow ends, so a
+                // stop can freeze without holding the session across the exit.
                 for response in buffered_orders {
                     // Ack for a cleanup-minted WS cancel: cleanup already
                     // established the venue state via `/api/query_order`, so the
@@ -469,7 +589,25 @@ impl MakerRuntime {
                         session.order_response_health.mark_unhealthy(reason);
                     }
                 }
-                for event in buffered_account {
+            }
+            // Parent booked these events at the previous last_mark. finish_cycle
+            // evaluates stop-loss at the cycle mark and only then stores it.
+            // Ledger mark_at_fill stays on last_mark; the stop uses the cycle mark.
+            let telemetry_mark = self.market.last_mark.unwrap_or(baseline_mark);
+            let stop_mark = match cycle_result.as_ref() {
+                Some(Ok(success)) => success.mark,
+                _ => telemetry_mark,
+            };
+            while !buffered_account.is_empty() {
+                let event = buffered_account.remove(0);
+                let excess = self
+                    .loop_state
+                    .external_excess_telemetry
+                    .current(std::time::Instant::now());
+                let decision = {
+                    let Some(session) = self.live_session.as_mut() else {
+                        break;
+                    };
                     match apply_account_event(
                         event,
                         &mut AccountEventState {
@@ -480,21 +618,20 @@ impl MakerRuntime {
                         &AccountEventContext {
                             symbol,
                             run_order_prefix,
-                            mark: self.market.last_mark.unwrap_or(baseline_mark),
+                            mark: telemetry_mark,
                             cycle,
                             output_format,
-                            excess_bps_at_fill: self
-                                .loop_state
-                                .external_excess_telemetry
-                                .current(std::time::Instant::now()),
+                            excess_bps_at_fill: excess,
                         },
                     ) {
                         Ok(outcome) => {
-                            if outcome.requires_order_reconciliation {
-                                cycle_invalidated_by_account = true;
-                            }
-                            let position = absorb_account_outcome(
+                            let needs_reconciliation = outcome.requires_order_reconciliation;
+                            match absorb_account_outcome_or_stop(
                                 outcome,
+                                &self.loop_state.stats,
+                                self.loop_state.ledger.expected_position,
+                                stop_mark,
+                                args.stop_loss,
                                 OutcomeSink {
                                     total_fills: &mut self.loop_state.counters.total_fills,
                                     balance_refresh_requested: &mut self
@@ -517,15 +654,13 @@ impl MakerRuntime {
                                     latency_started: Some(session.latency_started),
                                 },
                             )
-                            .await;
-                            if let Some(position) = position {
-                                if (position - self.loop_state.ledger.expected_position).abs()
-                                    > qty_tolerance
-                                {
-                                    self.recovery.account_position_mismatch = Some(position);
-                                } else {
-                                    self.recovery.account_position_mismatch = None;
-                                }
+                            .await
+                            {
+                                Ok(position) => BufferIngest::Continue {
+                                    needs_reconciliation,
+                                    position,
+                                },
+                                Err(loss) => BufferIngest::Stop(loss),
                             }
                         }
                         Err(error) => {
@@ -535,7 +670,74 @@ impl MakerRuntime {
                             session
                                 .account_stream_health
                                 .mark_unhealthy(error.to_string());
+                            BufferIngest::Failed
                         }
+                    }
+                };
+                match decision {
+                    BufferIngest::Continue {
+                        needs_reconciliation,
+                        position,
+                    } => {
+                        if needs_reconciliation {
+                            cycle_invalidated_by_account = true;
+                        }
+                        if let Some(position) = position {
+                            if (position - self.loop_state.ledger.expected_position).abs()
+                                > qty_tolerance
+                            {
+                                self.recovery.account_position_mismatch = Some(position);
+                            } else {
+                                self.recovery.account_position_mismatch = None;
+                            }
+                        }
+                    }
+                    BufferIngest::Failed => {}
+                    BufferIngest::Stop(loss) => {
+                        // The cycle's own fills are normally counted in finish_cycle.
+                        // This exit skips that function, so credit them once here.
+                        // Places, cancels, holds, and halted stay undercounted
+                        // (independent review P3). They do not gate the stop.
+                        if let Some(Ok(success)) = cycle_result.as_ref() {
+                            self.loop_state.counters.total_fills += success.fills;
+                        }
+                        let mut remaining = buffered_account;
+                        if let Some(session) = self.live_session.as_mut() {
+                            while let Ok(next) = session.account_events.try_recv() {
+                                remaining.push(next);
+                            }
+                        }
+                        self.market.last_mark = Some(loss.mark);
+                        let excess = self
+                            .loop_state
+                            .external_excess_telemetry
+                            .current(std::time::Instant::now());
+                        let account_buffer =
+                            self.live_session.as_mut().map(|session| StopAccountBuffer {
+                                events: remaining,
+                                state: AccountEventState {
+                                    ledger: &mut self.loop_state.ledger,
+                                    stats: &mut self.loop_state.stats,
+                                    projection: &mut session.projection,
+                                },
+                                context: AccountEventContext {
+                                    symbol,
+                                    run_order_prefix,
+                                    mark: telemetry_mark,
+                                    cycle,
+                                    output_format,
+                                    excess_bps_at_fill: excess,
+                                },
+                                total_fills: &mut self.loop_state.counters.total_fills,
+                            });
+                        return Err(LoopDirective::Exit(stop_loss_exit(
+                            &mut self.recovery.runtime_state,
+                            output_format,
+                            symbol,
+                            cycle,
+                            loss,
+                            account_buffer,
+                        )));
                     }
                 }
             }
@@ -611,6 +813,7 @@ impl MakerRuntime {
         let exit = 'phase: {
             match cycle_result {
                 Ok(CycleSuccess {
+                    stop_loss: _,
                     places,
                     cancels,
                     holds,
@@ -632,6 +835,28 @@ impl MakerRuntime {
                     self.loop_state.counters.total_fills += fills;
                     self.loop_state.counters.total_halted += halted as u64;
                     self.market.last_mark = Some(mark);
+                    // Buffered account events can change the session PnL after
+                    // cycle work settled. Stop before awaiting any notification.
+                    let session_position = if args.live {
+                        self.loop_state.ledger.expected_position
+                    } else {
+                        self.loop_state.stats.position()
+                    };
+                    if let Err(loss) = maker::SessionStopLoss::check(
+                        &self.loop_state.stats,
+                        session_position,
+                        mark,
+                        args.stop_loss,
+                    ) {
+                        break 'phase stop_loss_exit(
+                            &mut self.recovery.runtime_state,
+                            output_format,
+                            symbol,
+                            cycle,
+                            loss,
+                            None,
+                        );
+                    }
                     if halted != breaker_halted_before {
                         let (severity, event, message) = if halted {
                             (
@@ -760,39 +985,19 @@ impl MakerRuntime {
                             }
                         }
                     }
-                    // Financial brake: a session loss breaching --stop-loss routes
-                    // through the fail-safe shutdown (freeze, cancel the maker
-                    // book, await the critical webhook, exit) — the same path the
-                    // other MakerExit variants use.
-                    if args.stop_loss > 0.0 {
-                        let pnl = self.loop_state.stats.pnl(session_position, mark);
-                        if pnl <= -args.stop_loss {
-                            emit_stop_loss_triggered(
-                                output_format,
-                                symbol,
-                                cycle,
-                                pnl,
-                                args.stop_loss,
-                            );
-                            notifier
-                                .risk(
-                                    RiskNotice::critical("stop_loss", "triggered", &format!( "session PnL {pnl:+.2} breached stop-loss -{:.2}; shutting down", args.stop_loss ), symbol, cycle).position_after(self.loop_state.ledger.expected_position).expected(self.loop_state.ledger.expected_position),
-                                    true,
-                                )
-                                .await;
-                            self.recovery
-                                .runtime_state
-                                .handle(MakerEvent::StopRequested(RuntimeStopReason::StopLoss(
-                                    format!("session PnL {pnl:+.2} <= -{:.2}", args.stop_loss),
-                                )));
-                            break 'phase take_stop_effect(
-                                &mut self.recovery.runtime_state,
-                                MakerExit::PositionReconciliation,
-                            );
-                        }
-                    }
                 }
                 Err(e) => {
+                    if let Some(loss) = e.downcast_ref::<maker::SessionStopLoss>() {
+                        self.market.last_mark = Some(loss.mark);
+                        break 'phase stop_loss_exit(
+                            &mut self.recovery.runtime_state,
+                            output_format,
+                            symbol,
+                            cycle,
+                            *loss,
+                            None,
+                        );
+                    }
                     // Solvency brake (stage 5-b): raised from inside the cycle
                     // *before* any order work, so reaching here means the
                     // breached (or unverifiable) balance added no exposure.
@@ -1146,7 +1351,7 @@ impl MakerRuntime {
         LoopDirective::Exit(exit)
     }
 
-    async fn wait_phase(&mut self) -> LoopDirective {
+    pub(super) async fn wait_phase(&mut self) -> LoopDirective {
         let args = &self.deps.args;
         let output_format = self.deps.output_format;
         let cfg = &self.deps.cfg;
@@ -1303,9 +1508,29 @@ impl MakerRuntime {
                     event = account_update => {
                         // The branch futures are dropped before select! handlers
                         // run, so the session can be re-borrowed here. An event
-                        // only arrives when the live session exists.
-                        match (event, self.live_session.as_mut()) {
-                            (Some(event), Some(session)) => match apply_account_event(
+                        // only arrives when the live session exists. A fill that
+                        // breaches stop-loss freezes before position_jump; the
+                        // orders from the previous cycle are still live during
+                        // this wait.
+                        let Some(event) = event else {
+                            if let Some(session) = self.live_session.as_mut() {
+                                session.account_stream_health.mark_unhealthy(
+                                    "authenticated account stream disconnected",
+                                );
+                            }
+                            break;
+                        };
+                        let cycle_now = self.loop_state.counters.cycle;
+                        let mark = self.market.last_mark.unwrap_or(baseline_mark);
+                        let excess = self
+                            .loop_state
+                            .external_excess_telemetry
+                            .current(std::time::Instant::now());
+                        let decision = {
+                            let Some(session) = self.live_session.as_mut() else {
+                                break;
+                            };
+                            match apply_account_event(
                                 event,
                                 &mut AccountEventState {
                                     ledger: &mut self.loop_state.ledger,
@@ -1315,56 +1540,117 @@ impl MakerRuntime {
                                 &AccountEventContext {
                                     symbol,
                                     run_order_prefix,
-                                    mark: self.market.last_mark.unwrap_or(baseline_mark),
-                                    cycle: self.loop_state.counters.cycle,
+                                    mark,
+                                    cycle: cycle_now,
                                     output_format,
-                                    excess_bps_at_fill: self
-                                        .loop_state
-                                        .external_excess_telemetry
-                                        .current(std::time::Instant::now()),
+                                    excess_bps_at_fill: excess,
                                 },
                             ) {
                                 Ok(outcome) => {
-                                    self.recovery.account_order_reconciliation_required |=
-                                        outcome.requires_order_reconciliation;
-                                    let position = absorb_account_outcome(
+                                    let needs_reconciliation = outcome.requires_order_reconciliation;
+                                    match absorb_account_outcome_or_stop(
                                         outcome,
+                                        &self.loop_state.stats,
+                                        self.loop_state.ledger.expected_position,
+                                        mark,
+                                        args.stop_loss,
                                         OutcomeSink {
                                             total_fills: &mut self.loop_state.counters.total_fills,
-                                            balance_refresh_requested: &mut self.loop_state.account_balance_refresh_requested,
-                                            inventory_exit_pending: &mut self.loop_state.inventory_exit_pending,
+                                            balance_refresh_requested: &mut self
+                                                .loop_state
+                                                .account_balance_refresh_requested,
+                                            inventory_exit_pending: &mut self
+                                                .loop_state
+                                                .inventory_exit_pending,
                                             notifier,
-                                            position_alert_anchor: &mut self.loop_state.position_alert_anchor,
-                                            expected_position: self.loop_state.ledger.expected_position,
+                                            position_alert_anchor: &mut self
+                                                .loop_state
+                                                .position_alert_anchor,
+                                            expected_position: self
+                                                .loop_state
+                                                .ledger
+                                                .expected_position,
                                             max_position: cfg.max_position,
                                             inventory_exit_pct: args.inventory_exit_pct,
                                             qty_tolerance,
                                             symbol,
-                                            cycle: self.loop_state.counters.cycle,
+                                            cycle: cycle_now,
                                             order_latency: Some(&mut session.order_latency),
                                             latency_started: Some(session.latency_started),
                                         },
                                     )
-                                    .await;
-                                    if let Some(position) = position.filter(|position| {
-                                        (*position - self.loop_state.ledger.expected_position).abs() > qty_tolerance
-                                    }) {
-                                        self.recovery.account_position_mismatch = Some(position);
+                                    .await
+                                    {
+                                        Ok(position) => BufferIngest::Continue {
+                                            needs_reconciliation,
+                                            position,
+                                        },
+                                        Err(loss) => BufferIngest::Stop(loss),
                                     }
-                                    break;
                                 }
                                 Err(error) => {
-                                    session.account_stream_health.mark_unhealthy(error.to_string());
-                                    break;
+                                    session
+                                        .account_stream_health
+                                        .mark_unhealthy(error.to_string());
+                                    BufferIngest::Failed
                                 }
-                            },
-                            (None, Some(session)) => {
-                                session
-                                    .account_stream_health
-                                    .mark_unhealthy("authenticated account stream disconnected");
+                            }
+                        };
+                        match decision {
+                            BufferIngest::Continue {
+                                needs_reconciliation,
+                                position,
+                            } => {
+                                self.recovery.account_order_reconciliation_required |=
+                                    needs_reconciliation;
+                                if let Some(position) = position.filter(|position| {
+                                    (*position - self.loop_state.ledger.expected_position).abs()
+                                        > qty_tolerance
+                                }) {
+                                    self.recovery.account_position_mismatch = Some(position);
+                                }
                                 break;
                             }
-                            (_, None) => break,
+                            BufferIngest::Failed => break,
+                            BufferIngest::Stop(loss) => {
+                                let mut remaining = Vec::new();
+                                if let Some(session) = self.live_session.as_mut() {
+                                    while let Ok(next) = session.account_events.try_recv() {
+                                        remaining.push(next);
+                                    }
+                                }
+                                self.market.last_mark = Some(loss.mark);
+                                let excess = self
+                                    .loop_state
+                                    .external_excess_telemetry
+                                    .current(std::time::Instant::now());
+                                let account_buffer =
+                                    self.live_session.as_mut().map(|session| StopAccountBuffer {
+                                        events: remaining,
+                                        state: AccountEventState {
+                                            ledger: &mut self.loop_state.ledger,
+                                            stats: &mut self.loop_state.stats,
+                                            projection: &mut session.projection,
+                                        },
+                                        context: AccountEventContext {
+                                            symbol,
+                                            run_order_prefix,
+                                            mark: loss.mark,
+                                            cycle: cycle_now,
+                                            output_format,
+                                            excess_bps_at_fill: excess,
+                                        },
+                                        total_fills: &mut self.loop_state.counters.total_fills,
+                                    });
+                                break 'phase stop_loss_exit(
+                                    &mut self.recovery.runtime_state,
+                                    output_format,
+                                    symbol,
+                                    cycle_now,
+                                    loss,
+                                    account_buffer,
+                                );
+                            }
                         }
                     }
                     ok = update => {

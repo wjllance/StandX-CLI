@@ -153,6 +153,7 @@ pub(super) struct CycleRequest<'a> {
     /// inside the cycle, before any order work, so a breached balance cannot
     /// add exposure in the very cycle that observed it.
     pub(super) stop_equity_below: f64,
+    pub(super) stop_loss: f64,
     pub(super) stop_margin_below: f64,
     /// Latched supervisor wind-down request (SIGUSR1 from the A/B
     /// orchestrator): stop quoting and flatten via reduce-only exits.
@@ -271,6 +272,7 @@ impl ExternalExcessTelemetry {
 
 #[derive(Debug, Default)]
 pub(super) struct CycleResult {
+    pub(super) stop_loss: Option<standx_maker::SessionStopLoss>,
     pub(super) places: u64,
     pub(super) cancels: u64,
     pub(super) holds: u64,

@@ -588,3 +588,137 @@ mod post_cleanup_position {
         );
     }
 }
+
+#[tokio::test]
+async fn stop_loss_cleans_venue_orders_before_delivering_any_webhook() {
+    use mockito::{Matcher, Server};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    let _jwt = JwtGuard::set();
+    let mut server = Server::new_async().await;
+    let cleaned = Arc::new(AtomicBool::new(false));
+    let cleanup_flag = Arc::clone(&cleaned);
+    let open_before = server
+        .mock("GET", "/api/query_open_orders")
+        .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{"code":0,"message":"ok","result":[
+                {"id":"42","cl_ord_id":"sxmk-freeze-buy","symbol":"BTC-USD","side":"buy","order_type":"limit","qty":"0.001","fill_qty":"0","price":"63000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:00Z"},
+                {"id":"99","cl_ord_id":"manual-order","symbol":"BTC-USD","side":"sell","order_type":"limit","qty":"0.001","fill_qty":"0","price":"65000","status":"open","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:00Z"}
+            ]}"#,
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let cancel = server
+        .mock("POST", "/api/cancel_orders")
+        .match_body(Matcher::Json(serde_json::json!({ "order_id_list": [42] })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"code":0,"message":"accepted"}"#)
+        .expect(1)
+        .create_async()
+        .await;
+    let open_after = server
+        .mock("GET", "/api/query_open_orders")
+        .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body_from_request(move |_| {
+            cleanup_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            br#"{"code":0,"message":"ok","result":[]}"#.to_vec()
+        })
+        .expect(1)
+        .create_async()
+        .await;
+
+    let terminal = server.mock("GET", "/api/query_order")
+        .match_query(Matcher::UrlEncoded("order_id".into(), "42".into()))
+        .with_status(200).with_header("content-type", "application/json")
+        .with_body(r#"{"id":"42","cl_ord_id":"sxmk-freeze-buy","symbol":"BTC-USD","side":"buy","order_type":"limit","qty":"0.001","fill_qty":"0","price":"63000","status":"canceled","created_at":"2026-07-10T00:00:00Z","updated_at":"2026-07-10T00:00:01Z"}"#)
+        .expect(1).create_async().await;
+    let delivered_early = Arc::new(AtomicBool::new(false));
+    let early_flag = Arc::clone(&delivered_early);
+    let webhook = server
+        .mock("POST", "/webhook")
+        .with_status(200)
+        .with_body_from_request(move |_| {
+            if !cleaned.load(Ordering::SeqCst) {
+                early_flag.store(true, Ordering::SeqCst);
+            }
+            b"ok".to_vec()
+        })
+        .expect_at_least(1)
+        .create_async()
+        .await;
+    let positions = server
+        .mock("GET", "/api/query_positions")
+        .match_query(Matcher::UrlEncoded("symbol".into(), "BTC-USD".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .expect(2)
+        .create_async()
+        .await;
+    let client = StandXClient::with_base_url(server.url()).unwrap();
+    let notifier = MakerNotifier::new(
+        OutputFormat::Quiet,
+        Some(format!("{}/webhook", server.url())),
+        crate::cli::AlertWebhookFormat::Raw,
+    );
+    let cfg = MakerConfig {
+        spread_bps: 10.0,
+        band_bps: 20.0,
+        level_step_bps: 2.0,
+        refresh_bps: 3.0,
+        levels: 1,
+        size: 0.01,
+        max_position: 0.05,
+        skew_bps: 0.0,
+        price_decimals: 2,
+        qty_decimals: 4,
+        min_order_qty: 0.001,
+    };
+    let result =
+        super::super::lifecycle::shutdown_report(super::super::lifecycle::ShutdownReport {
+            live: true,
+            output_format: OutputFormat::Quiet,
+            symbol: "BTC-USD",
+            cfg: &cfg,
+            client: &client,
+            notifier: &notifier,
+            ledger: &MakerLedger::new(0.0),
+            stats: &MakerStats::default(),
+            breaker: &VolBreaker::new(10, 0.0),
+            exit: MakerExit::StopLoss("test loss".into()),
+            cycle: 1,
+            total_places: 1,
+            total_cancels: 0,
+            total_holds: 0,
+            total_fills: 0,
+            total_halted: 0,
+            sim_position: 0.0,
+            last_mark: Some(100.0),
+            qty_tolerance: 0.00005,
+            feed_handle: None,
+            account_stream_handle: None,
+            order_response_handle: None,
+        })
+        .await;
+    // StopLoss is a deliberate error exit; cleanup and notifications still run.
+    assert!(result.is_err());
+    open_before.assert_async().await;
+    cancel.assert_async().await;
+    open_after.assert_async().await;
+    terminal.assert_async().await;
+    positions.assert_async().await;
+    webhook.assert_async().await;
+    assert!(
+        !delivered_early.load(Ordering::SeqCst),
+        "webhook must never precede verified cleanup"
+    );
+}
