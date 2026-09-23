@@ -500,13 +500,15 @@ pub(super) async fn absorb_account_outcome(
 /// Book a buffered account outcome, then either notify or stop.
 ///
 /// A fill that arrives while a cycle is in flight is applied only after that
-/// cycle may already have submitted orders. `position_jump` is an await on
-/// this path, and the accounting-invariant notice that follows buffer ingest
-/// awaits webhook delivery. Both must run only after the gross session stop
-/// has been checked: a breach freezes the generation immediately, and shutdown
-/// delivers notifications after maker cleanup. Sync fill/latency credit still
-/// happens so the triggering fill is not dropped. Position warnings for the
-/// same outcome are skipped; the stop event is the operator signal.
+/// cycle may already have submitted orders. `position_jump` is sequenced on
+/// this path but does not wait for webhook delivery (`await_delivery` is
+/// false). The accounting-invariant notice after buffer ingest does: it
+/// calls `risk(..., true)` and blocks on HTTP before `finish_cycle` can
+/// freeze. Both run only after the gross session stop has been checked. A
+/// breach freezes the generation immediately, and shutdown delivers
+/// notifications after maker cleanup. Sync fill/latency credit still happens
+/// so the triggering fill is not dropped. Position warnings for the same
+/// outcome are skipped; the stop event is the operator signal.
 ///
 /// `stop_loss == 0` stays disabled, matching [`maker::SessionStopLoss::check`].
 pub(super) async fn absorb_account_outcome_or_stop(

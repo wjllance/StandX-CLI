@@ -105,6 +105,18 @@ impl fmt::Debug for PreparedOrderCommand {
 }
 
 impl OrderCommandSender {
+    /// Sender with no socket. Runtime tests build a live session that never
+    /// submits a command.
+    #[doc(hidden)]
+    pub fn inactive() -> Self {
+        let (commands, _rx) = mpsc::channel(1);
+        Self {
+            session_id: String::new(),
+            signer: None,
+            commands,
+        }
+    }
+
     /// Submit a signed order creation request over the authenticated socket.
     pub async fn create_order(&self, params: &CreateOrderParams) -> Result<String> {
         let command = self.prepare_create_order(params)?;

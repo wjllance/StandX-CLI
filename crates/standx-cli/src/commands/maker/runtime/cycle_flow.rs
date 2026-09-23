@@ -121,7 +121,9 @@ impl MakerRuntime {
         self.finish_cycle(attempt).await
     }
 
-    async fn execute_cycle(&mut self) -> std::result::Result<CycleAttempt, LoopDirective> {
+    pub(super) async fn execute_cycle(
+        &mut self,
+    ) -> std::result::Result<CycleAttempt, LoopDirective> {
         let args = &self.deps.args;
         let output_format = self.deps.output_format;
         let client = &self.deps.client;
@@ -210,7 +212,31 @@ impl MakerRuntime {
                 ),
                 None => (None, None, None, None, None, None, None, None, None, None),
             };
+            // Clone before `work` captures `self`. A trade in the select aborts
+            // the cycle before its result is observed, so tests place the
+            // buffered trades here and let `work` return the paired success.
+            #[cfg(test)]
+            let injected_events = self
+                .test_buffered_cycle
+                .as_ref()
+                .map(|cycle| cycle.events.clone());
             let work = async {
+                #[cfg(test)]
+                if let Some(injected) = self.test_buffered_cycle.take() {
+                    return Ok(CycleSuccess {
+                        stop_loss: None,
+                        places: 0,
+                        cancels: 0,
+                        holds: 0,
+                        fills: injected.fills,
+                        mark: injected.mark,
+                        src: "test",
+                        market_fallback_reason: None,
+                        halted: false,
+                        exit_pending_after: false,
+                        balance: None,
+                    });
+                }
                 if let Some(observed) = mismatch {
                     return Err(anyhow::Error::new(
                         PositionReconciliationError::position_mismatch(
@@ -369,6 +395,10 @@ impl MakerRuntime {
             // queued Cleanup effect compensates for any request that may already
             // have reached the venue.
             let mut buffered_account: Vec<AccountEvent> = Vec::new();
+            #[cfg(test)]
+            if let Some(events) = injected_events {
+                buffered_account = events;
+            }
             let mut buffered_orders: Vec<OrderResponse> = Vec::new();
             let mut cycle_invalidated_by_account = false;
             let mut cycle_invalidated_by_market: Option<String> = None;
@@ -560,12 +590,16 @@ impl MakerRuntime {
                     }
                 }
             }
+            // Parent booked these events at the previous last_mark. finish_cycle
+            // evaluates stop-loss at the cycle mark and only then stores it.
+            // Ledger mark_at_fill stays on last_mark; the stop uses the cycle mark.
+            let telemetry_mark = self.market.last_mark.unwrap_or(baseline_mark);
+            let stop_mark = match cycle_result.as_ref() {
+                Some(Ok(success)) => success.mark,
+                _ => telemetry_mark,
+            };
             while !buffered_account.is_empty() {
                 let event = buffered_account.remove(0);
-                let mark = match cycle_result.as_ref() {
-                    Some(Ok(success)) => success.mark,
-                    _ => self.market.last_mark.unwrap_or(baseline_mark),
-                };
                 let excess = self
                     .loop_state
                     .external_excess_telemetry
@@ -584,7 +618,7 @@ impl MakerRuntime {
                         &AccountEventContext {
                             symbol,
                             run_order_prefix,
-                            mark,
+                            mark: telemetry_mark,
                             cycle,
                             output_format,
                             excess_bps_at_fill: excess,
@@ -596,7 +630,7 @@ impl MakerRuntime {
                                 outcome,
                                 &self.loop_state.stats,
                                 self.loop_state.ledger.expected_position,
-                                mark,
+                                stop_mark,
                                 args.stop_loss,
                                 OutcomeSink {
                                     total_fills: &mut self.loop_state.counters.total_fills,
@@ -662,6 +696,8 @@ impl MakerRuntime {
                     BufferIngest::Stop(loss) => {
                         // The cycle's own fills are normally counted in finish_cycle.
                         // This exit skips that function, so credit them once here.
+                        // Places, cancels, holds, and halted stay undercounted
+                        // (independent review P3). They do not gate the stop.
                         if let Some(Ok(success)) = cycle_result.as_ref() {
                             self.loop_state.counters.total_fills += success.fills;
                         }
@@ -687,7 +723,7 @@ impl MakerRuntime {
                                 context: AccountEventContext {
                                     symbol,
                                     run_order_prefix,
-                                    mark: loss.mark,
+                                    mark: telemetry_mark,
                                     cycle,
                                     output_format,
                                     excess_bps_at_fill: excess,
@@ -1315,7 +1351,7 @@ impl MakerRuntime {
         LoopDirective::Exit(exit)
     }
 
-    async fn wait_phase(&mut self) -> LoopDirective {
+    pub(super) async fn wait_phase(&mut self) -> LoopDirective {
         let args = &self.deps.args;
         let output_format = self.deps.output_format;
         let cfg = &self.deps.cfg;

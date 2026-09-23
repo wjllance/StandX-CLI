@@ -561,3 +561,389 @@ fn stop_loss_books_buffered_trade_ownership_without_notification_waits() {
     .unwrap();
     assert_eq!(duplicate.fills, 0);
 }
+
+fn owned_order(order_id: u64, suffix: &str) -> AccountEvent {
+    use standx_sdk::account_stream::OrderUpdate;
+    use standx_sdk::models::OrderStatus;
+    AccountEvent::Order(OrderUpdate {
+        seq: order_id,
+        order_id,
+        cl_ord_id: Some(format!("sxmk-test-{suffix}")),
+        symbol: "BTC-USD".into(),
+        side: OrderSide::Buy,
+        qty: "0.2".into(),
+        fill_qty: "0".into(),
+        fill_avg_price: "0".into(),
+        price: "110".into(),
+        status: OrderStatus::Open,
+        reduce_only: false,
+        updated_at: "2026-07-14T00:00:00Z".into(),
+    })
+}
+
+fn owned_trade(trade_id: u64, order_id: u64, price: &str, qty: &str) -> AccountEvent {
+    use standx_sdk::account_stream::TradeUpdate;
+    AccountEvent::Trade(TradeUpdate {
+        seq: trade_id,
+        trade_id,
+        order_id,
+        symbol: "BTC-USD".into(),
+        side: OrderSide::Buy,
+        price: price.into(),
+        qty: qty.into(),
+        trade_ts: "2026-07-14T00:00:00Z".into(),
+    })
+}
+
+fn position_event(qty: &str) -> AccountEvent {
+    use standx_sdk::account_stream::PositionUpdate;
+    AccountEvent::Position(PositionUpdate {
+        seq: 1,
+        id: 1,
+        symbol: "BTC-USD".into(),
+        side: Some(OrderSide::Buy),
+        qty: qty.into(),
+        entry_price: "110".into(),
+        realized_pnl: "0".into(),
+        status: String::new(),
+        updated_at: "2026-07-14T00:00:00Z".into(),
+    })
+}
+
+struct IngestHarness {
+    runtime: MakerRuntime,
+    _account_tx: tokio::sync::mpsc::Sender<AccountEvent>,
+    _order_tx: tokio::sync::mpsc::Sender<standx_sdk::order_response::OrderResponse>,
+}
+
+fn ingest_harness(stop_loss: f64, starting_position: f64) -> IngestHarness {
+    use standx_maker::{GuardConfig, GuardController, SizeSkewConfig, SizeSkewController};
+    use standx_sdk::order_response::OrderCommandSender;
+    use std::time::Instant;
+
+    let cfg = maker::MakerConfig {
+        spread_bps: 10.0,
+        band_bps: 40.0,
+        level_step_bps: 2.0,
+        refresh_bps: 3.0,
+        levels: 1,
+        size: 0.01,
+        max_position: 1.0,
+        skew_bps: 0.0,
+        price_decimals: 2,
+        qty_decimals: 4,
+        min_order_qty: 0.001,
+    };
+    let args = MakerRunArgs {
+        spread_bps: cfg.spread_bps,
+        band_bps: cfg.band_bps,
+        size: cfg.size,
+        levels: cfg.levels,
+        level_step_bps: cfg.level_step_bps,
+        refresh_bps: cfg.refresh_bps,
+        interval: 60,
+        max_position: cfg.max_position,
+        skew_bps: 0.0,
+        inventory_exit_pct: 0.0,
+        inventory_exit_qty: 0.0,
+        max_divergence_bps: 25.0,
+        vol_pause_bps: 10_000.0,
+        vol_window: 8,
+        vol_window_secs: None,
+        adaptive_spread: maker::AdaptiveSpreadConfig::default(),
+        size_skew: SizeSkewConfig::default(),
+        nonlinear_skew: maker::NonlinearSkewConfig::default(),
+        external_skew: maker::ExternalSkewConfig::default(),
+        microprice: maker::MicroPriceConfig::default(),
+        external_guard: GuardConfig::default(),
+        external_guard_basis_half_life_secs: 300,
+        inventory_exit: maker::InventoryExitConfig::default(),
+        stop_loss,
+        alert_loss: 0.0,
+        alert_inventory_pct: 0.0,
+        alert_position_change_pct: 0.0,
+        alert_uptime: 0.0,
+        alert_equity_below: 0.0,
+        alert_margin_below: 0.0,
+        stop_equity_below: 0.0,
+        stop_margin_below: 0.0,
+        alert_webhook: None,
+        alert_webhook_format: crate::cli::AlertWebhookFormat::Raw,
+        no_ws: true,
+        live: true,
+        order_response_reconnect_attempts: 0,
+        order_response_reconnect_backoff: 1,
+        account_stream_reconnect_attempts: 0,
+        account_stream_reconnect_backoff: 1,
+        controlled_disconnect_after: None,
+        verbose: false,
+    };
+    let (account_tx, account_rx) = tokio::sync::mpsc::channel(8);
+    let (order_tx, order_rx) = tokio::sync::mpsc::channel(8);
+    let (_ctrl_tx, ctrl_c_rx) = tokio::sync::watch::channel(false);
+    let (_wind_tx, wind_down_rx) = tokio::sync::watch::channel(false);
+    let mut ledger = MakerLedger::new(starting_position);
+    ledger
+        .enable_performance(110.0)
+        .expect("performance baseline");
+    let mut runtime_state = MakerState::starting();
+    runtime_state.handle(MakerEvent::StartupReady);
+    let now = Instant::now();
+    let runtime = MakerRuntime {
+        deps: RuntimeDeps {
+            _live_process_lock: None,
+            args,
+            output_format: OutputFormat::Quiet,
+            client: standx_sdk::client::StandXClient::new().expect("client"),
+            endpoints: standx_sdk::StandXEndpoints::default(),
+            cfg: cfg.clone(),
+            symbol: "BTC-USD".into(),
+            notifier: MakerNotifier::new(
+                OutputFormat::Quiet,
+                None,
+                crate::cli::AlertWebhookFormat::Raw,
+            ),
+            qty_tolerance: 0.00005,
+            run_order_prefix: "sxmk-test-".into(),
+            starting_position,
+            baseline_mark: 90.0,
+            session_started_at: 0,
+        },
+        loop_state: RuntimeLoopState {
+            resting: Vec::new(),
+            inventory_exit_pending: false,
+            inventory_exit_order: None,
+            wind_down: false,
+            ledger,
+            performance_started: now,
+            performance_epoch_ms: 0,
+            position_alert_anchor: PositionAlertAnchor::new(-0.2, 0.0, 0.05),
+            counters: RuntimeCounters::default(),
+            next_cycle_is_recovery: false,
+            sim_position: starting_position,
+            stats: if starting_position == 0.0 {
+                MakerStats::default()
+            } else {
+                MakerStats::with_inventory_baseline(starting_position, 110.0)
+            },
+            breaker: maker::VolBreaker::new(8, 10_000.0),
+            spread_controller: maker::SpreadController::new(
+                maker::AdaptiveSpreadConfig::default(),
+                &cfg,
+            )
+            .expect("spread"),
+            size_skew_controller: SizeSkewController::new(SizeSkewConfig::default(), &cfg)
+                .expect("size skew"),
+            nonlinear_skew: maker::NonlinearSkewConfig::default(),
+            external_skew: maker::ExternalSkewConfig::default(),
+            microprice: maker::MicroPriceConfig::default(),
+            external_skew_previous_shift_bps: 0.0,
+            external_excess_telemetry: ExternalExcessTelemetry::default(),
+            guard_controller: GuardController::new(GuardConfig::default()).expect("guard"),
+            external_feed: None,
+            external_updates: None,
+            external_basis: crate::commands::maker::external_feed::DivergenceBaseline::new(300),
+            external_feed_handle: None,
+            alerts: maker::AlertMonitor::new(0.0, 0.0, 0.0),
+            account_balance_refresh_requested: false,
+            balance_floor_parse_warned: false,
+        },
+        market: RuntimeMarketState {
+            feed: None,
+            telemetry: None,
+            updates: None,
+            market_watchdog_updates: None,
+            feed_handle: None,
+            health_started: now,
+            health: maker::MarketDataHealth::default(),
+            pending_degradation: None,
+            standby_started: None,
+            next_heartbeat: None,
+            last_divergence_bps: None,
+            maker_book_verified_empty: false,
+            last_mark: None,
+            last_src: None,
+        },
+        recovery: RuntimeRecoveryState {
+            account_position_mismatch: None,
+            pending_request_timeout: None,
+            account_order_reconciliation_required: false,
+            runtime_state,
+        },
+        lifecycle: RuntimeLifecycleState {
+            token_expiry_alerted: TokenExpiryLevel::Ok,
+            last_token_expiry_check: None,
+        },
+        live_session: Some(LiveSession {
+            order_responses: order_rx,
+            order_commands: OrderCommandSender::inactive(),
+            order_response_health: standx_sdk::order_response::OrderResponseHealth::default(),
+            order_response_handle: tokio::spawn(std::future::pending()),
+            account_events: account_rx,
+            account_stream_health: AccountStreamHealth::new(1),
+            account_stream_handle: tokio::spawn(std::future::pending()),
+            account_stream_epoch: 1,
+            projection: MakerAccountProjection::new(
+                1,
+                "sxmk-test-",
+                starting_position,
+                0.005,
+                0.00005,
+            ),
+            order_request_deadlines: OrderRequestDeadlines::default(),
+            account_poll: LiveAccountPollState::new(super::account_balance(), now),
+            order_latency: maker::OrderLatencyTracker::default(),
+            latency_started: now,
+            cleanup_minted_request_ids: CleanupTombstones::default(),
+        }),
+        ctrl_c_rx,
+        wind_down_rx,
+        test_buffered_cycle: None,
+    };
+    IngestHarness {
+        runtime,
+        _account_tx: account_tx,
+        _order_tx: order_tx,
+    }
+}
+
+fn stop_loss_detail(directive: LoopDirective) -> String {
+    match directive {
+        LoopDirective::Exit(MakerExit::StopLoss(detail)) => detail,
+        LoopDirective::Exit(other) => panic!("expected stop-loss exit, got {other:?}"),
+        LoopDirective::Proceed => panic!("expected stop-loss exit, got proceed"),
+        LoopDirective::Restart => panic!("expected stop-loss exit, got restart"),
+    }
+}
+
+fn gross_spread(runtime: &MakerRuntime) -> f64 {
+    runtime
+        .loop_state
+        .ledger
+        .performance()
+        .expect("performance")
+        .summary(110.0)
+        .expect("summary")
+        .gross_spread_quote
+}
+
+#[tokio::test]
+async fn successful_cycle_buffer_keeps_last_mark_and_stops_on_cycle_mark() {
+    let mut harness = ingest_harness(1.0, 0.0);
+    harness.runtime.market.last_mark = Some(110.0);
+    harness.runtime.test_buffered_cycle = Some(TestBufferedCycle {
+        // Order adopts the trade. The buy is flat at last_mark 110 and -2 at
+        // the cycle mark 100, so only the cycle mark stops. The second trade
+        // is still in the buffer when the stop fires.
+        events: vec![
+            owned_order(7, "q00000001b0"),
+            owned_trade(11, 7, "110", "0.2"),
+            owned_order(8, "q00000001b1"),
+            owned_trade(12, 8, "100", "0.02"),
+        ],
+        mark: 100.0,
+        fills: 5,
+    });
+
+    let directive = match harness.runtime.execute_cycle().await {
+        Err(directive) => directive,
+        Ok(_) => panic!("cycle mark must stop before finish_cycle"),
+    };
+    let detail = stop_loss_detail(directive);
+    assert!(
+        detail.contains("session PnL -2.00 <= -1.00"),
+        "stop must be evaluated at the cycle mark, detail={detail}"
+    );
+    assert_eq!(harness.runtime.market.last_mark, Some(100.0));
+    // Parent books mark_at_fill from last_mark (110), not the cycle mark (100)
+    // and not the baseline fallback (90). Buy 0.02 at 100 against 110 is +0.2;
+    // the 0.2 lot at 110 contributes 0.
+    assert!(
+        (gross_spread(&harness.runtime) - 0.2).abs() < 1e-9,
+        "mark_at_fill changed: gross={}",
+        gross_spread(&harness.runtime)
+    );
+    assert_eq!(
+        harness.runtime.loop_state.counters.total_fills, 7,
+        "cycle fills (5) plus triggering fill plus remnant fill"
+    );
+}
+
+#[tokio::test]
+async fn wait_phase_account_update_stops_and_credits_remnant_fill() {
+    use standx_maker::PositionRiskKind;
+
+    let mut harness = ingest_harness(1.0, 0.2);
+    harness.runtime.market.last_mark = Some(100.0);
+    take_cycle_work(&mut harness.runtime.recovery.runtime_state)
+        .expect("token")
+        .expect("startup cycle");
+    harness
+        ._account_tx
+        .send(position_event("0.2"))
+        .await
+        .expect("position");
+    harness
+        ._account_tx
+        .send(owned_order(7, "q00000001b0"))
+        .await
+        .expect("order");
+    harness
+        ._account_tx
+        .send(owned_trade(11, 7, "100", "0.02"))
+        .await
+        .expect("trade");
+
+    let directive = harness.runtime.wait_phase().await;
+    let detail = stop_loss_detail(directive);
+    assert!(detail.contains("session PnL -2.00 <= -1.00"), "{detail}");
+    assert_eq!(harness.runtime.loop_state.counters.total_fills, 1);
+    assert_eq!(
+        harness
+            .runtime
+            .loop_state
+            .position_alert_anchor
+            .evaluate(0.2, 1.0, 0.0, 0.00005)
+            .expect("position_jump must not run before freeze")
+            .kind,
+        PositionRiskKind::DirectionFlip
+    );
+}
+
+#[tokio::test]
+async fn pre_cycle_drain_stops_before_position_notification() {
+    use standx_maker::PositionRiskKind;
+
+    let mut harness = ingest_harness(1.0, 0.2);
+    harness.runtime.market.last_mark = Some(100.0);
+    harness
+        ._account_tx
+        .send(owned_order(7, "q00000001b0"))
+        .await
+        .expect("order");
+    harness
+        ._account_tx
+        .send(owned_trade(11, 7, "100", "0.02"))
+        .await
+        .expect("trade");
+    harness
+        ._account_tx
+        .send(position_event("0.2"))
+        .await
+        .expect("position");
+
+    let directive = harness.runtime.drain_live_events_phase().await;
+    let detail = stop_loss_detail(directive);
+    assert!(detail.contains("session PnL"), "{detail}");
+    assert_eq!(harness.runtime.loop_state.counters.total_fills, 1);
+    assert_eq!(
+        harness
+            .runtime
+            .loop_state
+            .position_alert_anchor
+            .evaluate(0.2, 1.0, 0.0, 0.00005)
+            .expect("position_jump must not run before freeze")
+            .kind,
+        PositionRiskKind::DirectionFlip
+    );
+}
