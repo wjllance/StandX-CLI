@@ -353,6 +353,93 @@ fn touch_or_divergence_can_request_an_early_replan_without_mark_drift() {
     ));
 }
 
+#[tokio::test]
+async fn buffered_fill_stop_skips_position_notification_before_freeze() {
+    use standx_maker::{PositionAlertAnchor, PositionRiskKind};
+
+    async fn ingest(
+        stats: &maker::MakerStats,
+        mark: f64,
+        stop_loss: f64,
+        anchor: &mut PositionAlertAnchor,
+        total_fills: &mut u64,
+    ) -> Result<Option<f64>, maker::SessionStopLoss> {
+        let notifier = MakerNotifier::new(
+            OutputFormat::Quiet,
+            None,
+            crate::cli::AlertWebhookFormat::Raw,
+        );
+        let mut balance_refresh_requested = false;
+        let mut inventory_exit_pending = true;
+        absorb_account_outcome_or_stop(
+            AccountEventOutcome {
+                fills: 1,
+                position_observations: vec![0.2],
+                exit_fill_observed: true,
+                ..AccountEventOutcome::default()
+            },
+            stats,
+            0.2,
+            mark,
+            stop_loss,
+            OutcomeSink {
+                total_fills,
+                balance_refresh_requested: &mut balance_refresh_requested,
+                inventory_exit_pending: &mut inventory_exit_pending,
+                notifier: &notifier,
+                position_alert_anchor: anchor,
+                expected_position: 0.2,
+                max_position: 1.0,
+                inventory_exit_pct: 0.0,
+                qty_tolerance: 0.00005,
+                symbol: "BTC-USD",
+                cycle: 4,
+                order_latency: None,
+                latency_started: None,
+            },
+        )
+        .await
+    }
+
+    // Buy 0.2 at baseline 110, marked at 100: gross PnL = -2.
+    let stats = maker::MakerStats::with_inventory_baseline(0.2, 110.0);
+    let mut anchor = PositionAlertAnchor::new(-0.2, 0.0, 0.05);
+    let mut total_fills = 0;
+    let loss = ingest(&stats, 100.0, 1.0, &mut anchor, &mut total_fills)
+        .await
+        .expect_err("breached gross loss must stop before notifications");
+    assert!((loss.pnl + 2.0).abs() < 1e-9);
+    assert_eq!(loss.mark, 100.0);
+    assert_eq!(
+        total_fills, 1,
+        "triggering fill is credited without notifying"
+    );
+    // Direction flip -0.2 → +0.2 is still available, so position_jump did not run.
+    assert_eq!(
+        anchor.evaluate(0.2, 1.0, 0.0, 0.00005).unwrap().kind,
+        PositionRiskKind::DirectionFlip
+    );
+
+    let mut anchor = PositionAlertAnchor::new(-0.2, 0.0, 0.05);
+    let mut total_fills = 0;
+    let continued = ingest(&stats, 110.0, 1.0, &mut anchor, &mut total_fills)
+        .await
+        .expect("flat pnl must still notify");
+    assert_eq!(continued, Some(0.2));
+    assert_eq!(total_fills, 1);
+    assert!(
+        anchor.evaluate(0.2, 1.0, 0.0, 0.00005).is_none(),
+        "position_jump must consume the observation when stop is not breached"
+    );
+
+    let mut anchor = PositionAlertAnchor::new(-0.2, 0.0, 0.05);
+    let mut total_fills = 0;
+    ingest(&stats, 100.0, 0.0, &mut anchor, &mut total_fills)
+        .await
+        .expect("stop_loss 0 stays disabled");
+    assert!(anchor.evaluate(0.2, 1.0, 0.0, 0.00005).is_none());
+}
+
 #[test]
 fn stop_loss_invalidates_inflight_generation_before_shutdown() {
     let mut state = MakerState::starting();

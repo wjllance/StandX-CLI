@@ -1,3 +1,4 @@
+use super::cycle_flow::stop_loss_exit;
 use super::events::AccountStreamDisconnected;
 use super::*;
 use crate::commands::maker::model::StreamHealth;
@@ -1751,10 +1752,14 @@ impl MakerRuntime {
                 },
             ) {
                 Ok(outcome) => {
-                    self.recovery.account_order_reconciliation_required |=
-                        outcome.requires_order_reconciliation;
-                    let position = absorb_account_outcome(
+                    let needs_reconciliation = outcome.requires_order_reconciliation;
+                    let mark = self.market.last_mark.unwrap_or(baseline_mark);
+                    match absorb_account_outcome_or_stop(
                         outcome,
+                        &self.loop_state.stats,
+                        self.loop_state.ledger.expected_position,
+                        mark,
+                        args.stop_loss,
                         OutcomeSink {
                             total_fills: &mut self.loop_state.counters.total_fills,
                             balance_refresh_requested: &mut self
@@ -1773,11 +1778,29 @@ impl MakerRuntime {
                             latency_started: Some(session.latency_started),
                         },
                     )
-                    .await;
-                    if let Some(position) = position.filter(|position| {
-                        (*position - self.loop_state.ledger.expected_position).abs() > qty_tolerance
-                    }) {
-                        self.recovery.account_position_mismatch = Some(position);
+                    .await
+                    {
+                        Ok(position) => {
+                            self.recovery.account_order_reconciliation_required |=
+                                needs_reconciliation;
+                            if let Some(position) = position.filter(|position| {
+                                (*position - self.loop_state.ledger.expected_position).abs()
+                                    > qty_tolerance
+                            }) {
+                                self.recovery.account_position_mismatch = Some(position);
+                            }
+                        }
+                        Err(loss) => {
+                            self.market.last_mark = Some(loss.mark);
+                            return LoopDirective::Exit(stop_loss_exit(
+                                &mut self.recovery.runtime_state,
+                                output_format,
+                                symbol,
+                                cycle,
+                                loss,
+                                None,
+                            ));
+                        }
                     }
                 }
                 Err(error) => {
