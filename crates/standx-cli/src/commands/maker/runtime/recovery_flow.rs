@@ -1702,7 +1702,7 @@ impl MakerRuntime {
         LoopDirective::Exit(exit)
     }
 
-    async fn drain_live_events_phase(&mut self) -> LoopDirective {
+    pub(super) async fn drain_live_events_phase(&mut self) -> LoopDirective {
         let args = &self.deps.args;
         let output_format = self.deps.output_format;
         let cfg = &self.deps.cfg;
