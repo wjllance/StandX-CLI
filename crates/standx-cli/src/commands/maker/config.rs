@@ -125,6 +125,31 @@ pub(super) struct MicroPriceFileConfig {
     pub dead_zone_bps: Option<f64>,
 }
 
+/// Touch-anchored quotes (`[best_anchor]`). Absent or `enabled = false` keeps
+/// the mark ladder. See docs/36. Not enabled in any shipped baseline or stage2
+/// file.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct BestAnchorFileConfig {
+    pub enabled: Option<bool>,
+    /// 1-second best-price jump p99.9, in price units. The planner does not
+    /// measure this.
+    pub best_jump_p999: Option<f64>,
+    /// Extra price distance after `max(best_jump_p999, one tick)`.
+    pub margin: Option<f64>,
+}
+
+impl BestAnchorFileConfig {
+    pub(super) fn into_domain(self) -> standx_maker::BestAnchorConfig {
+        let defaults = standx_maker::BestAnchorConfig::default();
+        standx_maker::BestAnchorConfig {
+            enabled: self.enabled.unwrap_or(defaults.enabled),
+            best_jump_p999: self.best_jump_p999.unwrap_or(defaults.best_jump_p999),
+            margin: self.margin.unwrap_or(defaults.margin),
+        }
+    }
+}
+
 impl MicroPriceFileConfig {
     pub(super) fn into_domain(self) -> standx_maker::MicroPriceConfig {
         let defaults = standx_maker::MicroPriceConfig::default();
@@ -223,6 +248,7 @@ pub(super) struct MakerFileConfig {
     pub nonlinear_skew: Option<NonlinearSkewFileConfig>,
     pub external_skew: Option<ExternalSkewFileConfig>,
     pub microprice: Option<MicroPriceFileConfig>,
+    pub best_anchor: Option<BestAnchorFileConfig>,
     pub external_guard: Option<ExternalGuardFileConfig>,
     pub inventory_exit: Option<InventoryExitFileConfig>,
     pub stop_loss: Option<f64>,
@@ -361,6 +387,10 @@ pub(super) fn merge(
         .microprice
         .map(|config| config.into_domain())
         .unwrap_or_default();
+    let best_anchor = file
+        .best_anchor
+        .map(|config| config.into_domain())
+        .unwrap_or_default();
     let inventory_exit = file
         .inventory_exit
         .map(|config| config.into_domain())
@@ -403,6 +433,7 @@ pub(super) fn merge(
         nonlinear_skew,
         external_skew,
         microprice,
+        best_anchor,
         external_guard,
         external_guard_basis_half_life_secs,
         inventory_exit,
@@ -474,6 +505,10 @@ pub(super) struct MakerRunArgs {
     pub(super) nonlinear_skew: standx_maker::NonlinearSkewConfig,
     pub(super) external_skew: standx_maker::ExternalSkewConfig,
     pub(super) microprice: standx_maker::MicroPriceConfig,
+    /// Best-anchor quote mode. Default off. Live, baseline, and stage2 files
+    /// must not set `enabled = true` until docs/36 says the live blockers are
+    /// gone.
+    pub(super) best_anchor: standx_maker::BestAnchorConfig,
     pub(super) external_guard: standx_maker::GuardConfig,
     pub(super) external_guard_basis_half_life_secs: u64,
     /// Stage 8 (docs/33) `InventoryTrim` exit execution-cost path: default
@@ -608,6 +643,12 @@ pub(super) fn validate_microprice(
 /// an exit is resting is exactly the `df069c5` bug class this must not repeat.
 pub(super) fn validate_inventory_exit(cfg: standx_maker::InventoryExitConfig) -> Result<()> {
     standx_maker::validate_inventory_exit_config(&cfg).map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+/// `[best_anchor]` distances must be finite and non-negative even while
+/// disabled. Enabling the mode does not relax that check.
+pub(super) fn validate_best_anchor(cfg: standx_maker::BestAnchorConfig) -> Result<()> {
+    cfg.validate().map_err(|error| anyhow::anyhow!("{error}"))
 }
 
 fn center_shift_band_budget_bps(
@@ -987,6 +1028,28 @@ add_side_factor = 0.5
         assert!(validate_inventory_exit(bad_cycles).is_err());
     }
 
+    #[test]
+    fn best_anchor_absent_is_off_and_bad_distances_fail_while_disabled() {
+        let absent = toml::from_str::<MakerFileConfig>("spread_bps = 8\n").unwrap();
+        assert!(absent.best_anchor.is_none());
+        let parsed = toml::from_str::<MakerFileConfig>(
+            "[best_anchor]\nenabled = false\nbest_jump_p999 = 1.5\nmargin = 0.25\n",
+        )
+        .unwrap();
+        let domain = parsed.best_anchor.unwrap().into_domain();
+        assert!(!domain.enabled);
+        assert_eq!(domain.best_jump_p999, 1.5);
+        assert_eq!(domain.margin, 0.25);
+        assert!(validate_best_anchor(domain).is_ok());
+        assert!(validate_best_anchor(standx_maker::BestAnchorConfig {
+            enabled: false,
+            best_jump_p999: f64::NAN,
+            margin: 0.0,
+        })
+        .is_err());
+        assert!(toml::from_str::<MakerFileConfig>("[best_anchor]\nunknown = 1\n").is_err());
+    }
+
     fn external_skew_validation_base() -> standx_maker::MakerConfig {
         standx_maker::MakerConfig {
             spread_bps: 8.0,
@@ -1000,6 +1063,7 @@ add_side_factor = 0.5
             price_decimals: 3,
             qty_decimals: 2,
             min_order_qty: 0.1,
+            best_anchor: standx_maker::BestAnchorConfig::default(),
         }
     }
 

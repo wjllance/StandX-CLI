@@ -107,6 +107,8 @@ standx maker run <SYMBOL> [OPTIONS]
 
 完整可复制模板见 [`examples/maker.toml`](../examples/maker.toml)。
 
+`[best_anchor]` 默认关闭，缺省与 `enabled = false` 都沿用 mark 阶梯。启用后的 stand-off、合格带和两边一起进退见 [36](36-maker-best-anchor-design.md)。现有 baseline / stage2 配置不打开它。
+
 ```toml
 # maker.toml — 不放 JWT、私钥、--live 或 webhook URL
 spread_bps = 8.0

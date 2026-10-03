@@ -219,6 +219,7 @@ impl MakerRuntime {
             &args.adaptive_spread,
             nonlinear_skew,
         )?;
+        super::super::config::validate_best_anchor(cfg.best_anchor)?;
         super::super::config::validate_inventory_exit(args.inventory_exit)?;
         let guard_basis_half_life_secs = args.external_guard_basis_half_life_secs;
         let guard_controller = maker::GuardController::new(args.external_guard)?;

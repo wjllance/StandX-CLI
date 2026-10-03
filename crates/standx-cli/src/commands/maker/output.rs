@@ -385,39 +385,42 @@ pub(super) fn emit_maker_cycle(output: CycleOutput<'_>) {
                 with_geometry_fields(
                     with_book_fields(
                         with_exit_fields(
-                            with_guard_fields(
-                                with_size_skew_fields(
-                                    with_spread_fields(
-                                        serde_json::json!({
-                                        "ts": ts, "cycle": cycle, "mode": mode, "symbol": symbol,
-                                        "action": "cycle_summary",
-                                        "mark": format_decimals(mark, cfg.price_decimals),
-                                        "best_bid": best_bid, "best_ask": best_ask,
-                                        "market_source": market_source,
-                                        "market_fallback_reason": market_fallback_reason,
-                                        "ws_snapshot": ws_snapshot.map(ws_snapshot_json),
-                                        "position": position,
-                                        "starting_position": starting_position,
-                                        "account": account.map(account_json),
-                                        "holds": holds, "places": places, "cancels": cancels,
-                                        "fills": fills.len(),
-                                        "pnl": (pnl * 1e6).round() / 1e6,
-                                        "fills_total": stats.fills(),
-                                        "uptime_pct": (stats.uptime_pct() * 10.0).round() / 10.0,
-                                        "avg_capture_bps": (stats.avg_spread_capture_bps() * 100.0).round() / 100.0,
-                                        "performance": performance.map(performance_json),
-                                        "halted": halt_vol_bps.is_some(),
-                                        "vol_bps": halt_vol_bps.map(|v| (v * 100.0).round() / 100.0),
-                                            }),
-                                        spread_decision,
+                            with_best_anchor_fields(
+                                with_guard_fields(
+                                    with_size_skew_fields(
+                                        with_spread_fields(
+                                            serde_json::json!({
+                                            "ts": ts, "cycle": cycle, "mode": mode, "symbol": symbol,
+                                            "action": "cycle_summary",
+                                            "mark": format_decimals(mark, cfg.price_decimals),
+                                            "best_bid": best_bid, "best_ask": best_ask,
+                                            "market_source": market_source,
+                                            "market_fallback_reason": market_fallback_reason,
+                                            "ws_snapshot": ws_snapshot.map(ws_snapshot_json),
+                                            "position": position,
+                                            "starting_position": starting_position,
+                                            "account": account.map(account_json),
+                                            "holds": holds, "places": places, "cancels": cancels,
+                                            "fills": fills.len(),
+                                            "pnl": (pnl * 1e6).round() / 1e6,
+                                            "fills_total": stats.fills(),
+                                            "uptime_pct": (stats.uptime_pct() * 10.0).round() / 10.0,
+                                            "avg_capture_bps": (stats.avg_spread_capture_bps() * 100.0).round() / 100.0,
+                                            "performance": performance.map(performance_json),
+                                            "halted": halt_vol_bps.is_some(),
+                                            "vol_bps": halt_vol_bps.map(|v| (v * 100.0).round() / 100.0),
+                                                }),
+                                            spread_decision,
+                                        ),
+                                        size_skew_decision,
                                     ),
-                                    size_skew_decision,
+                                    guard_decision,
+                                    external_basis_bps,
+                                    external_skew_shift_bps,
+                                    micro_price_shift_bps,
+                                    skew_shift_bps,
                                 ),
-                                guard_decision,
-                                external_basis_bps,
-                                external_skew_shift_bps,
-                                micro_price_shift_bps,
-                                skew_shift_bps,
+                                cfg,
                             ),
                             exit_status,
                         ),
@@ -779,6 +782,27 @@ fn with_guard_fields(
     object.insert(
         "skew_shift_bps".to_string(),
         serde_json::json!((skew_shift_bps * 100.0).round() / 100.0),
+    );
+    summary
+}
+
+/// Additive best-anchor fields. Existing keys are left alone. `standoff` is 0
+/// when the mode is off, which is every shipped config.
+fn with_best_anchor_fields(
+    mut summary: serde_json::Value,
+    cfg: &maker::MakerConfig,
+) -> serde_json::Value {
+    let object = summary
+        .as_object_mut()
+        .expect("cycle summary JSON must be an object");
+    let standoff = maker::stand_off_price(cfg).unwrap_or(0.0);
+    object.insert(
+        "best_anchor_enabled".to_string(),
+        serde_json::json!(cfg.best_anchor.enabled),
+    );
+    object.insert(
+        "best_anchor_standoff".to_string(),
+        serde_json::json!(maker::round_to_decimals(standoff, cfg.price_decimals)),
     );
     summary
 }
@@ -1887,6 +1911,37 @@ mod tests {
         assert_eq!(idle["external_skew_shift_bps"], 0.0);
         assert_eq!(idle["micro_price_shift_bps"], 0.0);
         assert_eq!(idle["skew_shift_bps"], 0.0);
+    }
+
+    #[test]
+    fn cycle_summary_best_anchor_fields_are_additive_and_default_off() {
+        let mut cfg = maker::MakerConfig {
+            spread_bps: 8.0,
+            band_bps: 30.0,
+            level_step_bps: 2.0,
+            refresh_bps: 4.0,
+            levels: 1,
+            size: 0.01,
+            max_position: 1.0,
+            skew_bps: 0.0,
+            price_decimals: 2,
+            qty_decimals: 4,
+            min_order_qty: 0.001,
+            best_anchor: maker::BestAnchorConfig::default(),
+        };
+        let base = serde_json::json!({"action": "cycle_summary", "vol_bps": null});
+        let off = with_best_anchor_fields(base.clone(), &cfg);
+        assert_eq!(off["action"], "cycle_summary");
+        assert!(off["vol_bps"].is_null());
+        assert_eq!(off["best_anchor_enabled"], false);
+        assert_eq!(off["best_anchor_standoff"], 0.0);
+
+        cfg.best_anchor.enabled = true;
+        cfg.best_anchor.best_jump_p999 = 0.03;
+        cfg.best_anchor.margin = 0.01;
+        let on = with_best_anchor_fields(base, &cfg);
+        assert_eq!(on["best_anchor_enabled"], true);
+        assert_eq!(on["best_anchor_standoff"], 0.04);
     }
 
     /// Stage 5-b: the three exit keys are always present (null when idle) so a

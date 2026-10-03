@@ -626,6 +626,9 @@ async fn connect_and_run(
     Ok(())
 }
 
+// `fetch_update` was renamed to `try_update` in rustc 1.99. Keep the old name
+// so the 1.75 MSRV still builds; the allow is only for the rename warning.
+#[allow(deprecated)]
 fn take_public_trade_raw_sample(budget: Option<&AtomicUsize>) -> bool {
     budget.is_some_and(|budget| {
         budget

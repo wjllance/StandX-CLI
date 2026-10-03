@@ -69,6 +69,7 @@
 | cleanup 残余判定硬化 | completed | WS 终态 success 优先、按单 REST status 兜底，未确认时继续 fail-closed |
 | `external_skew` | **enabled in live, unjudged** | 已在冻结基线里开启（`enabled = true`），但从未隔离判定——随 microprice A/B 以**两臂同开**的方式进入生产。owner 2026-08-21 裁决保留、判定推迟；判据仍冻结在 [29](29-maker-external-skew-design.md) |
 | `micro_price` | accepted（方向）/ 幅度未判 | A/B 于 2026-08-19 判 accepted 并提为默认基线配置（`52b0bea`）；判定成立于 band=40，band=30 下偏移会被 clamp 截断，**效果量需新窗口重测**（见 [30](30-maker-uptime-band-tightening-design.md)） |
+| `best_anchor` | implemented, default off, not authorized | OKR v2 3.1① only. Quotes can anchor to best bid/ask; mark stays the band check. No shipped toml enables it. Live blockers are in [36](36-maker-best-anchor-design.md). 3.1③④⑤ are not in this change |
 
 历史设计、运行手册与判定链见
 [2026-07 Maker 归档](archive/2026-07-maker/)。归档中的精确授权文本只证明当时获准的
