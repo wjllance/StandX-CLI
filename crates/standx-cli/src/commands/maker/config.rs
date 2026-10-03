@@ -168,6 +168,21 @@ impl InventoryExitFileConfig {
     }
 }
 
+/// Stdout millisecond log for StandX depth and public trades
+/// (`[server_time_log]`). TOML-only and off by default. Off prints nothing
+/// and does not change quote, cancel, or exit decisions.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ServerTimeLogFileConfig {
+    pub enabled: Option<bool>,
+}
+
+impl ServerTimeLogFileConfig {
+    fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
+    }
+}
+
 /// External-price defensive guard (`[external_guard]`). Field defaults match
 /// [`standx_maker::GuardConfig`] so partial files stay valid.
 #[derive(Debug, Clone, Deserialize)]
@@ -225,6 +240,7 @@ pub(super) struct MakerFileConfig {
     pub microprice: Option<MicroPriceFileConfig>,
     pub external_guard: Option<ExternalGuardFileConfig>,
     pub inventory_exit: Option<InventoryExitFileConfig>,
+    pub server_time_log: Option<ServerTimeLogFileConfig>,
     pub stop_loss: Option<f64>,
     pub alert_loss: Option<f64>,
     pub alert_inventory_pct: Option<f64>,
@@ -365,6 +381,10 @@ pub(super) fn merge(
         .inventory_exit
         .map(|config| config.into_domain())
         .unwrap_or_default();
+    let server_time_log = file
+        .server_time_log
+        .as_ref()
+        .is_some_and(ServerTimeLogFileConfig::enabled);
     let external_guard_basis_half_life_secs = file
         .external_guard
         .as_ref()
@@ -445,6 +465,7 @@ pub(super) fn merge(
         ),
         controlled_disconnect_after,
         verbose,
+        server_time_log,
     })
 }
 
@@ -501,6 +522,9 @@ pub(super) struct MakerRunArgs {
     pub(super) account_stream_reconnect_backoff: u64,
     pub(super) controlled_disconnect_after: Option<u64>,
     pub(super) verbose: bool,
+    /// StandX book and trade server-time lines. Default false: no extra
+    /// stdout, and the market snapshot used for quoting is unchanged.
+    pub(super) server_time_log: bool,
 }
 
 /// Validate the CLI-owned composition constraints for `[external_skew]`.
@@ -961,6 +985,26 @@ add_side_factor = 0.5
 
         assert!(toml::from_str::<MakerFileConfig>(
             "[inventory_exit]\nalo_enabled = true\nunknown = 1\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn server_time_log_defaults_off_and_rejects_unknown_fields() {
+        let absent: MakerFileConfig = toml::from_str("").unwrap();
+        assert!(absent.server_time_log.is_none());
+
+        let off: MakerFileConfig = toml::from_str("[server_time_log]\nenabled = false\n").unwrap();
+        assert!(!off.server_time_log.unwrap().enabled());
+
+        let on: MakerFileConfig = toml::from_str("[server_time_log]\nenabled = true\n").unwrap();
+        assert!(on.server_time_log.unwrap().enabled());
+
+        let partial: MakerFileConfig = toml::from_str("[server_time_log]\n").unwrap();
+        assert!(!partial.server_time_log.unwrap().enabled());
+
+        assert!(toml::from_str::<MakerFileConfig>(
+            "[server_time_log]\nenabled = true\nunknown = 1\n"
         )
         .is_err());
     }

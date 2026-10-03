@@ -63,7 +63,8 @@ pub async fn handle_stream(
             println!("Press Ctrl+C to exit\n");
 
             while let Some(msg) = rx.recv().await {
-                if let WsMessage::Trade(data) = msg {
+                if let WsMessage::Trade(message) = msg {
+                    let data = &message.update.data;
                     let side = data.side.as_deref().unwrap_or({
                         if data.is_buyer_taker {
                             "buy"

@@ -677,6 +677,7 @@ fn ingest_harness(stop_loss: f64, starting_position: f64) -> IngestHarness {
         account_stream_reconnect_backoff: 1,
         controlled_disconnect_after: None,
         verbose: false,
+        server_time_log: false,
     };
     let (account_tx, account_rx) = tokio::sync::mpsc::channel(8);
     let (order_tx, order_rx) = tokio::sync::mpsc::channel(8);

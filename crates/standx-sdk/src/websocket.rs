@@ -41,7 +41,7 @@ pub enum WsMessage {
     Disconnected,
     Price(WsMarketUpdate<PriceData>),
     Depth(WsMarketUpdate<OrderBook>),
-    Trade(Trade),
+    Trade(WsPublicTrade),
     Position(Position),
     Balance(Balance),
     Order(Order),
@@ -66,6 +66,21 @@ pub struct WsMarketUpdate<T> {
     pub payload_time: Option<String>,
     /// Local monotonic receipt time, assigned before forwarding the payload.
     pub received_at: Instant,
+    /// Copied only when the payload has `size_ahead` as a finite number.
+    /// Absence stays `None`. This is never derived from bid or ask quantities.
+    pub size_ahead: Option<f64>,
+    /// Copied only when the payload has `our_rank` as a non-negative integer.
+    /// Absence stays `None`. This is never derived from level order.
+    pub our_rank: Option<u64>,
+}
+
+/// One public trade plus the envelope clock. `id` is separate from
+/// [`crate::models::Trade::id`]: the typed trade defaults a missing id to 0,
+/// and that default must not be logged as a venue id.
+#[derive(Debug, Clone)]
+pub struct WsPublicTrade {
+    pub update: WsMarketUpdate<crate::models::Trade>,
+    pub id: Option<u64>,
 }
 
 fn scalar_to_string(value: Option<&serde_json::Value>) -> Option<String> {
@@ -100,7 +115,49 @@ where
         envelope_time,
         payload_time,
         received_at,
+        size_ahead: payload.get("size_ahead").and_then(finite_f64),
+        our_rank: payload.get("our_rank").and_then(integer_u64),
     })
+}
+
+fn parse_public_trade(envelope: &serde_json::Value, received_at: Instant) -> Option<WsPublicTrade> {
+    let update = parse_market_update(envelope, received_at)?;
+    let id = envelope.get("data")?.get("id").and_then(integer_u64);
+    Some(WsPublicTrade { update, id })
+}
+
+fn finite_f64(value: &serde_json::Value) -> Option<f64> {
+    let parsed = match value {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    }?;
+    parsed.is_finite().then_some(parsed)
+}
+
+fn integer_u64(value: &serde_json::Value) -> Option<u64> {
+    match value {
+        serde_json::Value::Number(number) => number
+            .as_u64()
+            .or_else(|| integer_from_f64(number.as_f64()?)),
+        serde_json::Value::String(text) => {
+            let text = text.trim();
+            text.parse::<u64>()
+                .ok()
+                .or_else(|| integer_from_f64(text.parse().ok()?))
+        }
+        _ => None,
+    }
+}
+
+fn integer_from_f64(value: f64) -> Option<u64> {
+    // Only integers that f64 can represent exactly. Larger ranks arrive as
+    // JSON integers and take the `as_u64` path above.
+    if value.is_finite() && value >= 0.0 && value < (1u64 << 53) as f64 && value.fract() == 0.0 {
+        Some(value as u64)
+    } else {
+        None
+    }
 }
 
 /// StandX WebSocket client
@@ -528,9 +585,7 @@ async fn connect_and_run(
                                     {
                                         eprintln!("public_trade raw sample: {text}");
                                     }
-                                    if let Ok(trade) =
-                                        serde_json::from_value::<Trade>(data["data"].clone())
-                                    {
+                                    if let Some(trade) = parse_public_trade(&data, Instant::now()) {
                                         let _ = message_tx.send(WsMessage::Trade(trade)).await;
                                     }
                                 }
@@ -628,11 +683,13 @@ async fn connect_and_run(
 
 fn take_public_trade_raw_sample(budget: Option<&AtomicUsize>) -> bool {
     budget.is_some_and(|budget| {
-        budget
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_ok()
+        // `fetch_update` is the MSRV-1.75 name. Current stable deprecates it
+        // in favor of `try_update`, which is newer than rust-version.
+        #[allow(deprecated)]
+        let updated = budget.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+            remaining.checked_sub(1)
+        });
+        updated.is_ok()
     })
 }
 
@@ -682,6 +739,8 @@ mod tests {
         );
         assert_eq!(update.payload_time.as_deref(), Some("2026-07-14T00:00:00Z"));
         assert_eq!(update.received_at, received_at);
+        assert_eq!(update.size_ahead, None);
+        assert_eq!(update.our_rank, None);
     }
 
     #[test]
@@ -701,5 +760,90 @@ mod tests {
         assert_eq!(update.server_time.as_deref(), Some("1752499200000"));
         assert_eq!(update.envelope_time.as_deref(), Some("1752499200000"));
         assert_eq!(update.payload_time.as_deref(), Some("2026-07-15T00:00:01Z"));
+        assert_eq!(update.size_ahead, None);
+        assert_eq!(update.our_rank, None);
+    }
+
+    #[test]
+    fn depth_queue_fields_are_copied_only_when_present_and_not_derived() {
+        let received_at = Instant::now();
+        let plain = serde_json::json!({
+            "channel": "depth_book",
+            "data": {
+                "symbol": "BTC-USD",
+                "bids": [["99", "5"]],
+                "asks": [["101", "7"]]
+            }
+        });
+        let plain = parse_market_update::<OrderBook>(&plain, received_at).unwrap();
+        assert_eq!(plain.data.best_bid(), Some("99"));
+        assert_eq!(plain.size_ahead, None);
+        assert_eq!(plain.our_rank, None);
+
+        let present = serde_json::json!({
+            "channel": "depth_book",
+            "data": {
+                "symbol": "BTC-USD",
+                "bids": [["99", "5"]],
+                "asks": [["101", "7"]],
+                "size_ahead": 1.5,
+                "our_rank": 3
+            }
+        });
+        let present = parse_market_update::<OrderBook>(&present, received_at).unwrap();
+        assert_eq!(present.size_ahead, Some(1.5));
+        assert_eq!(present.our_rank, Some(3));
+
+        let invalid = serde_json::json!({
+            "channel": "depth_book",
+            "data": {
+                "symbol": "BTC-USD",
+                "bids": [["99", "5"]],
+                "asks": [["101", "7"]],
+                "size_ahead": "ahead",
+                "our_rank": 1.5
+            }
+        });
+        let invalid = parse_market_update::<OrderBook>(&invalid, received_at).unwrap();
+        assert_eq!(invalid.size_ahead, None);
+        assert_eq!(invalid.our_rank, None);
+    }
+
+    #[test]
+    fn public_trade_keeps_server_time_and_does_not_invent_a_missing_id() {
+        let received_at = Instant::now();
+        let envelope = serde_json::json!({
+            "channel": "public_trade",
+            "timestamp": 1_752_499_200_500i64,
+            "data": {
+                "price": "100",
+                "qty": "1.5",
+                "is_taker": true
+            }
+        });
+        let trade = parse_public_trade(&envelope, received_at).unwrap();
+        assert_eq!(trade.id, None);
+        assert_eq!(trade.update.data.id, 0);
+        assert_eq!(trade.update.data.side, None);
+        assert!(trade.update.data.is_buyer_taker);
+        assert_eq!(trade.update.server_time.as_deref(), Some("1752499200500"));
+
+        let with_id = serde_json::json!({
+            "channel": "public_trade",
+            "data": {
+                "id": 7,
+                "price": "100",
+                "qty": "1",
+                "side": "buy",
+                "time": "2026-07-14T00:00:00.500Z"
+            }
+        });
+        let trade = parse_public_trade(&with_id, received_at).unwrap();
+        assert_eq!(trade.id, Some(7));
+        assert_eq!(
+            trade.update.server_time.as_deref(),
+            Some("2026-07-14T00:00:00.500Z")
+        );
+        assert_eq!(trade.update.data.side.as_deref(), Some("buy"));
     }
 }

@@ -74,9 +74,9 @@ pub async fn handle_dashboard(
                         let ws_trades_clone = ws_trades.clone();
                         tokio::spawn(async move {
                             while let Some(msg) = rx.recv().await {
-                                if let WsMessage::Trade(trade) = msg {
+                                if let WsMessage::Trade(message) = msg {
                                     let mut trades = ws_trades_clone.write().await;
-                                    trades.push_front(trade);
+                                    trades.push_front(message.update.data);
                                     while trades.len() > 7 {
                                         trades.pop_back();
                                     }

@@ -51,6 +51,7 @@ runbook 统一放在 [archive/](archive/README.md)，不能作为新的 live 授
 | [32 - 纯观测遥测](32-maker-observation-telemetry-design.md) | 盘口深档、成交流、clamp 命中与距盘口距离的观测字段设计 | 纯观测，不含策略授权 |
 | [33 - 退出执行成本](33-maker-exit-execution-cost-design.md) | 库存退出改 ALO 优先 + IOC 兜底的设计与预注册判据 | 待立项候选，默认关闭 |
 | [34 - 换品种到 BTC](34-maker-btc-migration-2026-08-21.md) | 规模换算、owner 裁决、band 红线修复与首窗口计划 | 已准备，未授权 live |
+| [37 - MH 估算器](37-maker-mh-estimator-design.md) | 按整点观测双边在带内分钟、档位、proximity 有效规模和每侧 cap | 只是设计；未接入决策，campaign 输入未核实 |
 
 ## 生产操作与实验
 
