@@ -1280,6 +1280,7 @@ fn executable_exposure_tracks_pending_open_and_cancelled_quantities_once() {
         price_decimals: 2,
         qty_decimals: 4,
         min_order_qty: 0.001,
+        best_anchor: crate::BestAnchorConfig::default(),
     };
     let assert_headroom = |state: &MakerAccountProjection, available: f64| {
         let mut actions = vec![

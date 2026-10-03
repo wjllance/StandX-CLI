@@ -682,6 +682,7 @@ async fn stop_loss_cleans_venue_orders_before_delivering_any_webhook() {
         price_decimals: 2,
         qty_decimals: 4,
         min_order_qty: 0.001,
+        best_anchor: standx_maker::BestAnchorConfig::default(),
     };
     let result =
         super::super::lifecycle::shutdown_report(super::super::lifecycle::ShutdownReport {

@@ -18,6 +18,7 @@
 use standx_sdk::models::OrderSide;
 
 mod alerts;
+mod best_anchor;
 mod exposure;
 mod stats;
 
@@ -45,6 +46,7 @@ pub use account_projection::{
     RequestLifecycle, RequestOperation, ResponseCorrelation, MAX_PENDING_ORDER_REQUESTS,
 };
 pub use alerts::{account_floor_breach, AccountFloorBreach, Alert, AlertMonitor};
+pub use best_anchor::{stand_off_price, BestAnchorConfig};
 pub use exit_execution::{
     plan_exit_order_step, validate_inventory_exit_config, ExitOrderStep, ExitPhase, ExitPhaseState,
     InventoryExitConfig,
@@ -126,6 +128,8 @@ pub struct MakerConfig {
     pub qty_decimals: u32,
     /// Minimum order quantity from `SymbolInfo.min_order_qty`.
     pub min_order_qty: f64,
+    /// Touch-anchored quotes. Default off, which keeps the mark ladder.
+    pub best_anchor: BestAnchorConfig,
 }
 
 impl MakerConfig {
@@ -851,13 +855,29 @@ pub fn plan_cycle(cfg: &MakerConfig, input: CycleInput<'_>, halted: bool) -> Cyc
             input.market.mark,
             input.position,
         ),
-        ref_center: quote_center(
-            cfg,
-            input.nonlinear_skew,
-            total_shift_bps,
-            input.market.mark,
-            input.position,
-        ),
+        ref_center: if cfg.best_anchor.enabled {
+            // Shared book mid, so both sides refresh together. Mark stays the
+            // band reference and is not this anchor.
+            best_anchor::book_mid(input.market.best_bid, input.market.best_ask).unwrap_or_else(
+                || {
+                    quote_center(
+                        cfg,
+                        input.nonlinear_skew,
+                        total_shift_bps,
+                        input.market.mark,
+                        input.position,
+                    )
+                },
+            )
+        } else {
+            quote_center(
+                cfg,
+                input.nonlinear_skew,
+                total_shift_bps,
+                input.market.mark,
+                input.position,
+            )
+        },
         external_skew_shift_bps: external_shift_bps,
         micro_price_shift_bps: micro_shift_bps,
         quote_geometry,
@@ -899,9 +919,9 @@ pub(crate) fn compute_desired_quotes(
 }
 
 #[derive(Debug, Default)]
-struct DesiredQuotesWithGeometry {
-    quotes: Vec<DesiredQuote>,
-    geometry: Vec<QuoteGeometry>,
+pub(crate) struct DesiredQuotesWithGeometry {
+    pub(crate) quotes: Vec<DesiredQuote>,
+    pub(crate) geometry: Vec<QuoteGeometry>,
 }
 
 /// Construct desired quotes and their diagnostics in one pass so clamp
@@ -918,6 +938,22 @@ fn compute_desired_quotes_with_geometry(
     external_shift_bps: f64,
     guard: GuardDecision,
 ) -> DesiredQuotesWithGeometry {
+    // Enabled mode is a separate ladder. The flag check is the whole branch:
+    // a disabled config, including one that carries a non-zero jump and
+    // margin, falls through to the mark ladder below with no extra arithmetic.
+    if cfg.best_anchor.enabled {
+        return best_anchor::compute_quotes(
+            cfg,
+            mark,
+            best_bid,
+            best_ask,
+            position,
+            size_skew,
+            nonlinear_skew,
+            external_shift_bps,
+            guard,
+        );
+    }
     let mut result = DesiredQuotesWithGeometry::default();
     if !mark.is_finite()
         || mark <= 0.0
@@ -1195,7 +1231,7 @@ fn distance_to_touch_bps(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn quote_geometry(
+pub(crate) fn quote_geometry(
     side: OrderSide,
     level: u32,
     raw_price: f64,
@@ -1420,7 +1456,16 @@ pub(crate) fn reconcile(
     // offset moved.
     let band_lo = mark * (1.0 - cfg.band_bps / 1e4);
     let band_hi = mark * (1.0 + cfg.band_bps / 1e4);
-    let center = quote_center(cfg, nonlinear_skew, external_shift_bps, mark, position);
+    // Disabled: the mark-based quote center, exactly as before. Enabled: the
+    // book mid, matching `plan_cycle`'s `ref_center`, so a drift cancels both
+    // sides together instead of following mark.
+    let center = if cfg.best_anchor.enabled {
+        best_anchor::book_mid(best_bid, best_ask).unwrap_or_else(|| {
+            quote_center(cfg, nonlinear_skew, external_shift_bps, mark, position)
+        })
+    } else {
+        quote_center(cfg, nonlinear_skew, external_shift_bps, mark, position)
+    };
 
     let desired_has = |side: OrderSide, level: u32| -> bool {
         desired.iter().any(|d| d.side == side && d.level == level)
@@ -1428,6 +1473,24 @@ pub(crate) fn reconcile(
     // A side with zero desired quotes this cycle is suppressed (either by
     // max-position or because every quote failed a guard).
     let side_live = |side: OrderSide| -> bool { desired.iter().any(|d| d.side == side) };
+    // Best-anchor only. A stand-off breach on either live side cancels both,
+    // so one touch jumping in does not leave the other side resting. The
+    // reason stays `mark_moved`: the action name is unchanged, and while this
+    // mode is on that reason also means "the shared book anchor requires both
+    // sides to come out". Disabled configs never set this flag.
+    let paired_pull = cfg.best_anchor.enabled
+        && resting.iter().any(|quote| {
+            side_live(quote.side)
+                && desired_has(quote.side, quote.level)
+                && best_anchor::resting_price_inside_standoff(
+                    cfg,
+                    quote.side,
+                    quote.level,
+                    quote.price,
+                    best_bid,
+                    best_ask,
+                )
+        });
 
     let mut cancels = Vec::new();
     let mut holds = Vec::new();
@@ -1443,7 +1506,7 @@ pub(crate) fn reconcile(
             Some(CancelReason::OutsideBand)
         } else if resting_quotes_would_cross(std::slice::from_ref(r), best_bid, best_ask) {
             Some(CancelReason::WouldCross)
-        } else if bps_diff(center, r.ref_center) > cfg.refresh_bps {
+        } else if bps_diff(center, r.ref_center) > cfg.refresh_bps || paired_pull {
             Some(CancelReason::MarkMovedBeyondRefresh)
         } else {
             None

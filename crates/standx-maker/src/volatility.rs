@@ -402,6 +402,7 @@ mod tests {
             price_decimals: 3,
             qty_decimals: 2,
             min_order_qty: 0.01,
+            best_anchor: crate::BestAnchorConfig::default(),
         }
     }
 

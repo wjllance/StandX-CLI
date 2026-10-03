@@ -108,6 +108,13 @@ struct TraceMakerConfig {
     price_decimals: u32,
     qty_decimals: u32,
     min_order_qty: f64,
+    /// Absent on existing traces. Omitted means the mark ladder.
+    #[serde(default)]
+    best_anchor_enabled: bool,
+    #[serde(default)]
+    best_jump_p999: f64,
+    #[serde(default)]
+    best_anchor_margin: f64,
 }
 
 impl From<TraceMakerConfig> for MakerConfig {
@@ -124,6 +131,11 @@ impl From<TraceMakerConfig> for MakerConfig {
             price_decimals: value.price_decimals,
             qty_decimals: value.qty_decimals,
             min_order_qty: value.min_order_qty,
+            best_anchor: standx_maker::BestAnchorConfig {
+                enabled: value.best_anchor_enabled,
+                best_jump_p999: value.best_jump_p999,
+                margin: value.best_anchor_margin,
+            },
         }
     }
 }

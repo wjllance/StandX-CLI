@@ -633,6 +633,7 @@ fn ingest_harness(stop_loss: f64, starting_position: f64) -> IngestHarness {
         price_decimals: 2,
         qty_decimals: 4,
         min_order_qty: 0.001,
+        best_anchor: maker::BestAnchorConfig::default(),
     };
     let args = MakerRunArgs {
         spread_bps: cfg.spread_bps,
@@ -655,6 +656,7 @@ fn ingest_harness(stop_loss: f64, starting_position: f64) -> IngestHarness {
         nonlinear_skew: maker::NonlinearSkewConfig::default(),
         external_skew: maker::ExternalSkewConfig::default(),
         microprice: maker::MicroPriceConfig::default(),
+        best_anchor: maker::BestAnchorConfig::default(),
         external_guard: GuardConfig::default(),
         external_guard_basis_half_life_secs: 300,
         inventory_exit: maker::InventoryExitConfig::default(),

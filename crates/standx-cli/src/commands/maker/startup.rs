@@ -197,6 +197,7 @@ pub(super) async fn run_startup(
         price_decimals: info.price_tick_decimals,
         qty_decimals: info.qty_tick_decimals,
         min_order_qty,
+        best_anchor: args.best_anchor,
     };
 
     if cfg.spread_bps <= 0.0 {

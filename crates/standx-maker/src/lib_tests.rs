@@ -14,6 +14,7 @@ fn cfg() -> MakerConfig {
         price_decimals: 2,
         qty_decimals: 4,
         min_order_qty: 0.001,
+        best_anchor: BestAnchorConfig::default(),
     }
 }
 
