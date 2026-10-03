@@ -2,7 +2,7 @@ use super::model::{optional_decimal, Decimal};
 use anyhow::Result;
 use standx_sdk::client::StandXClient;
 use standx_sdk::models::{OrderBook, Trade};
-use standx_sdk::websocket::{StandXWebSocket, WsMarketUpdate, WsMessage};
+use standx_sdk::websocket::{StandXWebSocket, WsMarketUpdate, WsMessage, WsPublicTrade};
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -528,6 +528,74 @@ async fn reset_feed_state(state: &RwLock<FeedState>, issue: WsSnapshotIssue) {
     };
 }
 
+fn logged_text(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|text| !text.is_empty())
+}
+
+/// One stdout line for a depth update, or `None` when the log is disabled.
+/// Disabled returns before reading the book, so turning the log off cannot
+/// change a quote input. `size_ahead` and `our_rank` are copied through from
+/// the payload; level quantities are not a substitute.
+fn server_time_book_line(enabled: bool, update: &WsMarketUpdate<OrderBook>) -> Option<String> {
+    if !enabled {
+        return None;
+    }
+    let server_time = logged_text(update.server_time.as_deref());
+    let server_time_ms = server_time.and_then(parse_server_time_millis);
+    let best_bid = update
+        .data
+        .best_bid()
+        .and_then(|price| optional_decimal(price, Decimal::Positive));
+    let best_ask = update
+        .data
+        .best_ask()
+        .and_then(|price| optional_decimal(price, Decimal::Positive));
+    Some(
+        serde_json::json!({
+            "action": "server_time_book",
+            "symbol": logged_text(Some(update.data.symbol.as_str())),
+            "server_time": server_time,
+            "server_time_ms": server_time_ms,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "size_ahead": update.size_ahead,
+            "our_rank": update.our_rank,
+        })
+        .to_string(),
+    )
+}
+
+/// One stdout line for a public trade, or `None` when the log is disabled.
+/// A missing id, side, or server time stays null. `is_buyer_taker` is not a
+/// side, and the host clock is not a server time.
+fn server_time_trade_line(enabled: bool, message: &WsPublicTrade) -> Option<String> {
+    if !enabled {
+        return None;
+    }
+    let trade = &message.update.data;
+    let server_time = logged_text(message.update.server_time.as_deref());
+    let server_time_ms = server_time.and_then(parse_server_time_millis);
+    Some(
+        serde_json::json!({
+            "action": "server_time_trade",
+            "symbol": trade.symbol.as_deref().and_then(|symbol| logged_text(Some(symbol))),
+            "server_time": server_time,
+            "server_time_ms": server_time_ms,
+            "id": message.id,
+            "price": logged_text(Some(trade.price.as_str())),
+            "qty": logged_text(Some(trade.qty.as_str())),
+            "side": trade.side.as_deref().and_then(|side| logged_text(Some(side))),
+        })
+        .to_string(),
+    )
+}
+
+fn emit_server_time_line(line: Option<String>) {
+    if let Some(line) = line {
+        println!("{line}");
+    }
+}
+
 /// Spawn the resident market-feed task: one public WS connection carrying
 /// `price` + `depth_book` + observation-only `public_trade`, written into a
 /// decision cache and a separately locked bounded telemetry store. The outer
@@ -535,6 +603,9 @@ async fn reset_feed_state(state: &RwLock<FeedState>, issue: WsSnapshotIssue) {
 /// (attempts exhausted or clean close), it rebuilds the connection from
 /// scratch, since subscriptions only take effect when registered before
 /// `connect_managed()`.
+///
+/// `server_time_log` only adds stdout lines. It does not subscribe to another
+/// venue, and it does not change which price or book update is accepted.
 pub(super) struct SpawnedMarketFeed {
     pub(super) state: Arc<RwLock<FeedState>>,
     pub(super) telemetry: Arc<RwLock<MarketTelemetry>>,
@@ -546,6 +617,7 @@ pub(super) fn spawn_market_feed(
     symbol: String,
     verbose: bool,
     endpoints: standx_sdk::StandXEndpoints,
+    server_time_log: bool,
 ) -> SpawnedMarketFeed {
     let state = Arc::new(RwLock::new(FeedState::default()));
     let telemetry = Arc::new(RwLock::new(MarketTelemetry::default()));
@@ -613,15 +685,19 @@ pub(super) fn spawn_market_feed(
                         }
                         match &msg {
                             WsMessage::Trade(trade)
-                                if trade.symbol.as_deref().map_or(
+                                if trade.update.data.symbol.as_deref().map_or(
                                     true,
                                     |trade_symbol| trade_symbol.eq_ignore_ascii_case(&symbol),
                                 ) =>
                             {
+                                emit_server_time_line(server_time_trade_line(
+                                    server_time_log,
+                                    trade,
+                                ));
                                 telemetry_task
                                     .write()
                                     .await
-                                    .observe_trade(trade, Instant::now());
+                                    .observe_trade(&trade.update.data, Instant::now());
                             }
                             _ => {}
                         }
@@ -653,6 +729,10 @@ pub(super) fn spawn_market_feed(
                             WsMessage::Depth(update)
                                 if update.data.symbol.eq_ignore_ascii_case(&symbol) =>
                             {
+                                emit_server_time_line(server_time_book_line(
+                                    server_time_log,
+                                    update,
+                                ));
                                 let received_at = update.received_at;
                                 let parsed = (
                                     parse_optional_positive_price(update.data.best_bid()),
@@ -834,6 +914,8 @@ mod tests {
             envelope_time: Some("2026-07-14T00:00:11Z".to_string()),
             payload_time: None,
             received_at: now,
+            size_ahead: None,
+            our_rank: None,
         };
         assert!(!update_is_newer(Some(&previous), &regressed_seq));
         let regressed_time = WsMarketUpdate {
@@ -843,6 +925,8 @@ mod tests {
             envelope_time: Some("2026-07-14T00:00:09Z".to_string()),
             payload_time: None,
             received_at: now,
+            size_ahead: None,
+            our_rank: None,
         };
         assert!(!update_is_newer(Some(&previous), &regressed_time));
         let duplicate_time = WsMarketUpdate {
@@ -852,6 +936,8 @@ mod tests {
             envelope_time: Some("2026-07-14T00:00:10Z".to_string()),
             payload_time: None,
             received_at: now,
+            size_ahead: None,
+            our_rank: None,
         };
         assert!(!update_is_newer(Some(&previous), &duplicate_time));
     }
@@ -1035,6 +1121,97 @@ mod tests {
         assert_eq!(snapshot.tape.buy_qty_5s, 0.0);
         assert_eq!(snapshot.tape.sell_qty_5s, 0.0);
         assert_eq!(snapshot.tape.unknown_qty_5s, 2.5);
+    }
+
+    fn sample_book(
+        size_ahead: Option<f64>,
+        server_time: Option<&str>,
+    ) -> WsMarketUpdate<OrderBook> {
+        WsMarketUpdate {
+            data: OrderBook {
+                symbol: "BTC-USD".to_string(),
+                bids: vec![["99".to_string(), "5".to_string()]],
+                asks: vec![["101".to_string(), "7".to_string()]],
+                timestamp: String::new(),
+            },
+            seq: None,
+            server_time: server_time.map(str::to_string),
+            envelope_time: server_time.map(str::to_string),
+            payload_time: None,
+            received_at: Instant::now(),
+            size_ahead,
+            our_rank: None,
+        }
+    }
+
+    #[test]
+    fn server_time_book_log_is_absent_when_disabled_and_does_not_invent_queue_fields() {
+        let book = sample_book(None, Some("2026-07-14T00:00:00.500Z"));
+        assert!(server_time_book_line(false, &book).is_none());
+
+        let line = server_time_book_line(true, &book).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(json["action"], "server_time_book");
+        assert_eq!(json["symbol"], "BTC-USD");
+        assert_eq!(json["best_bid"], 99.0);
+        assert_eq!(json["best_ask"], 101.0);
+        assert!(json["size_ahead"].is_null());
+        assert!(json["our_rank"].is_null());
+        assert_eq!(json["server_time"], "2026-07-14T00:00:00.500Z");
+        assert_eq!(
+            json["server_time_ms"],
+            parse_server_time_millis("2026-07-14T00:00:00.500Z").unwrap()
+        );
+
+        let copied = sample_book(Some(1.25), None);
+        let copied: serde_json::Value =
+            serde_json::from_str(&server_time_book_line(true, &copied).unwrap()).unwrap();
+        assert_eq!(copied["size_ahead"], 1.25);
+        assert!(copied["server_time"].is_null());
+        assert!(copied["server_time_ms"].is_null());
+    }
+
+    #[test]
+    fn server_time_trade_log_keeps_missing_id_side_and_clock_null() {
+        let message = WsPublicTrade {
+            update: WsMarketUpdate {
+                data: Trade {
+                    id: 0,
+                    time: String::new(),
+                    price: "100".to_string(),
+                    qty: "1.5".to_string(),
+                    side: None,
+                    is_buyer_taker: true,
+                    fee_asset: None,
+                    fee_qty: None,
+                    pnl: None,
+                    order_id: None,
+                    symbol: Some("BTC-USD".to_string()),
+                    value: None,
+                },
+                seq: None,
+                server_time: None,
+                envelope_time: None,
+                payload_time: None,
+                received_at: Instant::now(),
+                size_ahead: None,
+                our_rank: None,
+            },
+            id: None,
+        };
+        assert!(server_time_trade_line(false, &message).is_none());
+
+        let json: serde_json::Value =
+            serde_json::from_str(&server_time_trade_line(true, &message).unwrap()).unwrap();
+        assert_eq!(json["action"], "server_time_trade");
+        assert!(json["id"].is_null());
+        assert!(json["side"].is_null());
+        assert!(json["server_time"].is_null());
+        assert!(json["server_time_ms"].is_null());
+        assert_eq!(json["price"], "100");
+        assert_eq!(json["qty"], "1.5");
+        assert!(json.get("is_taker").is_none());
+        assert!(json.get("is_buyer_taker").is_none());
     }
 
     #[test]

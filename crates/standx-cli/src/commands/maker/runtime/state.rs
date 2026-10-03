@@ -164,7 +164,12 @@ impl MakerRuntime {
         let (feed, telemetry, updates, feed_handle) = if args.no_ws {
             (None, None, None, None)
         } else {
-            let spawned = spawn_market_feed(symbol.clone(), args.verbose, endpoints.clone());
+            let spawned = spawn_market_feed(
+                symbol.clone(),
+                args.verbose,
+                endpoints.clone(),
+                args.server_time_log,
+            );
             (
                 Some(spawned.state),
                 Some(spawned.telemetry),
