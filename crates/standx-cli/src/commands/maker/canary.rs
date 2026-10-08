@@ -731,36 +731,34 @@ mod tests {
 
     #[tokio::test]
     async fn await_response_flood_without_sleep_stays_bounded() {
-        let (tx, mut responses) = mpsc::channel(1);
-        let producer = tokio::spawn(async move {
-            loop {
-                if tx
-                    .send(OrderResponse {
-                        code: 0,
-                        message: "success".to_string(),
-                        request_id: Some("create-request".to_string()),
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        });
+        const LEFTOVERS: usize = 1_024;
+        let (tx, mut responses) = mpsc::channel(LEFTOVERS + 1);
+        for _ in 0..LEFTOVERS {
+            tx.send(OrderResponse {
+                code: 0,
+                message: "success".to_string(),
+                request_id: Some("create-request".to_string()),
+            })
+            .await
+            .unwrap();
+        }
+        tx.send(OrderResponse {
+            code: 0,
+            message: "accepted".to_string(),
+            request_id: Some("cancel-request".to_string()),
+        })
+        .await
+        .unwrap();
 
-        let result = tokio::time::timeout(
-            Duration::from_millis(500),
-            await_response(
-                &mut responses,
-                "cancel-request",
-                &["create-request".to_string()],
-                Duration::from_millis(20),
-            ),
+        let error = await_response(
+            &mut responses,
+            "cancel-request",
+            &["create-request".to_string()],
+            Duration::ZERO,
         )
         .await
-        .expect("a frame flood must not starve the response deadline");
-        producer.abort();
-        assert!(result.unwrap_err().to_string().contains("timed out"));
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
     }
 
     #[tokio::test]
