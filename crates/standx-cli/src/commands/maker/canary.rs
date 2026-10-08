@@ -136,20 +136,34 @@ fn canary_price(mark: f64, offset_bps: f64, decimals: u32) -> Result<f64> {
 async fn await_response(
     responses: &mut mpsc::Receiver<OrderResponse>,
     request_id: &str,
+    resolved_request_ids: &[String],
     timeout: Duration,
 ) -> Result<OrderResponse> {
-    let response = tokio::time::timeout(timeout, responses.recv())
-        .await
-        .map_err(|_| anyhow::anyhow!("timed out waiting for order-response acknowledgement"))?
-        .ok_or_else(|| {
-            anyhow::anyhow!("order-response stream closed before the expected acknowledgement")
-        })?;
-    if response.request_id.as_deref() == Some(request_id) {
-        Ok(response)
-    } else {
-        Err(anyhow::anyhow!(
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let response = tokio::time::timeout_at(deadline, responses.recv())
+            .await
+            .map_err(|_| anyhow::anyhow!("timed out waiting for order-response acknowledgement"))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("order-response stream closed before the expected acknowledgement")
+            })?;
+        if response.request_id.as_deref() == Some(request_id) {
+            return Ok(response);
+        }
+        // A resolved request can still deliver the terminal half of the
+        // venue's two-frame acknowledgement. Only a successful known frame is
+        // stale; rejections and unknown IDs remain fail-closed.
+        if response.accepted()
+            && response
+                .request_id
+                .as_ref()
+                .is_some_and(|id| resolved_request_ids.contains(id))
+        {
+            continue;
+        }
+        return Err(anyhow::anyhow!(
             "received an uncorrelated order-response acknowledgement during canary"
-        ))
+        ));
     }
 }
 
@@ -432,7 +446,7 @@ async fn run_commands(
         None,
         None,
     );
-    let create_response = await_response(responses, &create_request_id, timeout).await?;
+    let create_response = await_response(responses, &create_request_id, &[], timeout).await?;
     if !create_response.accepted() {
         evidence.emit(
             CanaryStage::CreateRejected,
@@ -460,7 +474,13 @@ async fn run_commands(
         Some(&order.id),
         None,
     );
-    let cancel_response = await_response(responses, &cancel_request_id, timeout).await?;
+    let cancel_response = await_response(
+        responses,
+        &cancel_request_id,
+        std::slice::from_ref(&create_request_id),
+        timeout,
+    )
+    .await?;
     if !cancel_response.accepted() {
         evidence.emit(
             CanaryStage::CancelRejected,
@@ -556,7 +576,7 @@ mod tests {
         .await
         .unwrap();
 
-        let response = await_response(&mut responses, "request-1", Duration::from_millis(100))
+        let response = await_response(&mut responses, "request-1", &[], Duration::from_millis(100))
             .await
             .unwrap();
         assert!(response.accepted());
@@ -570,25 +590,122 @@ mod tests {
         .await
         .unwrap();
 
-        let error = await_response(&mut responses, "request-1", Duration::from_millis(100))
-            .await
-            .unwrap_err();
+        let error = await_response(
+            &mut responses,
+            "request-1",
+            &["resolved-request".to_string()],
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
         assert!(error.to_string().contains("uncorrelated"));
     }
 
     #[tokio::test]
-    async fn await_response_fails_when_stream_closes_or_times_out() {
-        let (tx, mut responses) = mpsc::channel(1);
-        drop(tx);
-        let error = await_response(&mut responses, "request-1", Duration::from_millis(100))
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("stream closed"));
+    async fn await_response_absorbs_resolved_success_before_expected_ack() {
+        let (tx, mut responses) = mpsc::channel(2);
+        tx.send(OrderResponse {
+            code: 0,
+            message: "success".to_string(),
+            request_id: Some("create-request".to_string()),
+        })
+        .await
+        .unwrap();
+        tx.send(OrderResponse {
+            code: 0,
+            message: "accepted".to_string(),
+            request_id: Some("cancel-request".to_string()),
+        })
+        .await
+        .unwrap();
 
-        let (_tx, mut responses) = mpsc::channel(1);
-        let error = await_response(&mut responses, "request-1", Duration::from_millis(1))
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("timed out"));
+        let response = await_response(
+            &mut responses,
+            "cancel-request",
+            &["create-request".to_string()],
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.request_id.as_deref(), Some("cancel-request"));
+    }
+
+    #[tokio::test]
+    async fn await_response_rejects_resolved_request_rejection() {
+        let (tx, mut responses) = mpsc::channel(1);
+        tx.send(OrderResponse {
+            code: 1,
+            message: "rejected".to_string(),
+            request_id: Some("create-request".to_string()),
+        })
+        .await
+        .unwrap();
+
+        let error = await_response(
+            &mut responses,
+            "cancel-request",
+            &["create-request".to_string()],
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("uncorrelated"));
+    }
+
+    #[tokio::test]
+    async fn await_response_keeps_one_deadline_while_absorbing_leftovers() {
+        let (tx, mut responses) = mpsc::channel(1);
+        let producer = tokio::spawn(async move {
+            loop {
+                if tx
+                    .send(OrderResponse {
+                        code: 0,
+                        message: "success".to_string(),
+                        request_id: Some("create-request".to_string()),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            await_response(
+                &mut responses,
+                "cancel-request",
+                &["create-request".to_string()],
+                Duration::from_millis(20),
+            ),
+        )
+        .await
+        .expect("the response window must remain bounded");
+        producer.abort();
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn await_response_fails_when_stream_closes_after_leftover() {
+        let (tx, mut responses) = mpsc::channel(1);
+        tx.send(OrderResponse {
+            code: 0,
+            message: "success".to_string(),
+            request_id: Some("create-request".to_string()),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        let error = await_response(
+            &mut responses,
+            "cancel-request",
+            &["create-request".to_string()],
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("stream closed"));
     }
 }
