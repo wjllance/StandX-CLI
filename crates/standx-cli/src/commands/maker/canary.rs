@@ -141,6 +141,14 @@ async fn await_response(
 ) -> Result<OrderResponse> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
+        // Tokio polls `recv()` before its deadline sleep. Under an always-ready
+        // frame flood that can exhaust the cooperative budget and starve the
+        // sleep, so enforce the wall-clock deadline before every receive.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow::anyhow!(
+                "timed out waiting for order-response acknowledgement"
+            ));
+        }
         let response = tokio::time::timeout_at(deadline, responses.recv())
             .await
             .map_err(|_| anyhow::anyhow!("timed out waiting for order-response acknowledgement"))?
@@ -165,6 +173,16 @@ async fn await_response(
             "received an uncorrelated order-response acknowledgement during canary"
         ));
     }
+}
+
+async fn await_cancel_response(
+    responses: &mut mpsc::Receiver<OrderResponse>,
+    cancel_request_id: &str,
+    create_request_id: &str,
+    timeout: Duration,
+) -> Result<OrderResponse> {
+    let resolved_request_ids = [create_request_id.to_string()];
+    await_response(responses, cancel_request_id, &resolved_request_ids, timeout).await
 }
 
 async fn wait_for_order(
@@ -474,13 +492,8 @@ async fn run_commands(
         Some(&order.id),
         None,
     );
-    let cancel_response = await_response(
-        responses,
-        &cancel_request_id,
-        std::slice::from_ref(&create_request_id),
-        timeout,
-    )
-    .await?;
+    let cancel_response =
+        await_cancel_response(responses, &cancel_request_id, &create_request_id, timeout).await?;
     if !cancel_response.accepted() {
         evidence.emit(
             CanaryStage::CancelRejected,
@@ -631,6 +644,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancel_response_window_resolves_the_create_request_id() {
+        let (tx, mut responses) = mpsc::channel(2);
+        tx.send(OrderResponse {
+            code: 0,
+            message: "success".to_string(),
+            request_id: Some("create-request".to_string()),
+        })
+        .await
+        .unwrap();
+        tx.send(OrderResponse {
+            code: 0,
+            message: "accepted".to_string(),
+            request_id: Some("cancel-request".to_string()),
+        })
+        .await
+        .unwrap();
+
+        let response = await_cancel_response(
+            &mut responses,
+            "cancel-request",
+            "create-request",
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.request_id.as_deref(), Some("cancel-request"));
+    }
+
+    #[tokio::test]
     async fn await_response_rejects_resolved_request_rejection() {
         let (tx, mut responses) = mpsc::channel(1);
         tx.send(OrderResponse {
@@ -683,6 +725,40 @@ mod tests {
         )
         .await
         .expect("the response window must remain bounded");
+        producer.abort();
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn await_response_flood_without_sleep_stays_bounded() {
+        let (tx, mut responses) = mpsc::channel(1);
+        let producer = tokio::spawn(async move {
+            loop {
+                if tx
+                    .send(OrderResponse {
+                        code: 0,
+                        message: "success".to_string(),
+                        request_id: Some("create-request".to_string()),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            await_response(
+                &mut responses,
+                "cancel-request",
+                &["create-request".to_string()],
+                Duration::from_millis(20),
+            ),
+        )
+        .await
+        .expect("a frame flood must not starve the response deadline");
         producer.abort();
         assert!(result.unwrap_err().to_string().contains("timed out"));
     }
