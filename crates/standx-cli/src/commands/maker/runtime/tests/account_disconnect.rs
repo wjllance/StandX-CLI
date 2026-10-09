@@ -404,3 +404,41 @@ async fn stream_lost_in_window_with_unexplained_position_fails_closed() {
     );
     assert!(text.contains("after 3s freeze"), "{text}");
 }
+
+/// Fills applied in the same drain batch as an explicit disconnect are booked
+/// in the ledger and must also be counted, so `total_fills` matches the `fill`
+/// lines emitted.
+#[tokio::test]
+async fn window_fill_before_disconnect_event_is_counted() {
+    let _jwt = JwtGuard::set();
+    let mut server = Server::new_async().await;
+    mount_venue(&mut server, &long_position("0.02")).await;
+    let IngestHarness {
+        mut runtime,
+        _account_tx,
+        _order_tx,
+    } = ingest_harness(0.0, 0.0);
+    runtime.deps.client = standx_sdk::client::StandXClient::with_base_url(server.url()).unwrap();
+    runtime.recovery.account_position_mismatch = Some(0.02);
+    let tx = _account_tx.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        tx.send(owned_order(7, "q00000001b0")).await.unwrap();
+        tx.send(owned_trade(11, 7, "110", "0.02")).await.unwrap();
+        tx.send(disconnected("scheduled rotation")).await.unwrap();
+    });
+
+    let directive = run_cycle(&mut runtime).await;
+
+    assert!(
+        matches!(directive, LoopDirective::Restart),
+        "{}",
+        describe(&directive)
+    );
+    assert!((runtime.loop_state.ledger.expected_position - 0.02).abs() < 1e-9);
+    assert_eq!(
+        runtime.loop_state.counters.total_fills, 1,
+        "a fill booked in the ledger must be counted"
+    );
+    drop(_account_tx);
+}
