@@ -2,6 +2,8 @@
 
 状态：`authorized_running`。首窗口已于 2026-08-21T06:37Z 开跑（授权与启动记录见 §7）。
 
+后续（2026-10-08/09）：另有一个 BTC 窗口已被 owner 中断，不计入基线，见 [38](38-live-window-2026-10-08.md)；本文 §7 的授权均为历史记录，不是当前授权。
+
 ## 1. 为什么换
 
 [mark-best 分母证据（2026-08-20）](evidence/mark-best-spread-denominator-2026-08-20.md) 实测五品种：
