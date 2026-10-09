@@ -57,7 +57,7 @@ async fn mount_venue(server: &mut ServerGuard, positions: &str) {
         .match_query(Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body(positions.to_string())
+        .with_body(positions)
         .create_async()
         .await;
     server
