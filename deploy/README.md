@@ -28,7 +28,11 @@ deliberate, safe stop that needs a human, so it must **not** auto-restart — bu
 it still alerts. An unexpected death is restartable.
 
 - **systemd** enforces this directly: `RestartPreventExitStatus=75` +
-  `Restart=on-failure` + `OnFailure=standx-notify@…`.
+  `Restart=on-failure` + `OnFailure=standx-notify@…`. The unit also sets
+  `KillMode=mixed`: with the default `control-group` mode, systemd TERMs the
+  wrapper's stdout-copy subshell at the same time as the maker, so the maker's
+  graceful-shutdown writes hit EPIPE and panic (exit `101`) — cleanup evidence
+  is lost and every normal stop pages as a failure.
 - **launchd** has no per-code exclusion, so `standx-maker-supervise.sh`
   translates exit `75` to `0` (after notifying) and pairs with
   `KeepAlive.SuccessfulExit=false` (restart only on non-zero).
