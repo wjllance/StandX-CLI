@@ -37,6 +37,13 @@ RestartSec=5
 # Forward SIGTERM to the wrapper so the maker runs its fail-safe cleanup, and
 # give it time to cancel maker-owned orders before SIGKILL.
 KillSignal=SIGTERM
+# TERM must go only to the wrapper (main process), which forwards it to the
+# maker and keeps reading its stdout. With the default KillMode=control-group,
+# systemd TERMs the wrapper's stdout-copy subshell at the same time: the maker's
+# graceful-shutdown writes then hit EPIPE and panic (exit 101), so the
+# cleanup/residual/lifecycle records are lost and a normal stop is classified
+# as a failure (false OnFailure page).
+KillMode=mixed
 TimeoutStopSec=60
 
 [Install]
