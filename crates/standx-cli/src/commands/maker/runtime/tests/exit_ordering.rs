@@ -317,3 +317,99 @@ async fn pre_cycle_accounting_invariant_exit_cleans_the_book_before_the_webhook(
         .as_str()
         .is_some_and(|message| message.contains("differs from ledger expected")));
 }
+
+/// Venue whose open-orders query fails, so shutdown cleanup cannot verify or
+/// clear the book. Returns every webhook body delivered.
+async fn venue_with_failing_cleanup(server: &mut ServerGuard) -> Payloads {
+    let payloads: Payloads = Arc::new(Mutex::new(Vec::new()));
+    server
+        .mock("GET", "/api/query_open_orders")
+        .match_query(Matcher::Any)
+        .with_status(500)
+        .with_body("venue down")
+        .create_async()
+        .await;
+    server
+        .mock("GET", "/api/query_positions")
+        .match_query(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create_async()
+        .await;
+    let webhook_payloads = Arc::clone(&payloads);
+    server
+        .mock("POST", "/webhook")
+        .with_status(200)
+        .with_body_from_request(move |request| {
+            let body = String::from_utf8_lossy(request.body().unwrap()).to_string();
+            if let Ok(value) = serde_json::from_str(&body) {
+                webhook_payloads.lock().unwrap().push(value);
+            }
+            b"ok".to_vec()
+        })
+        .expect_at_least(1)
+        .create_async()
+        .await;
+    payloads
+}
+
+/// Residual maker orders are exactly when the operator most needs the alert:
+/// a failed shutdown cleanup must not suppress the critical stop notice, and
+/// must add its own cleanup alert.
+fn assert_critical_alert_and_cleanup_alert_delivered(payloads: &Payloads, kind: &str) {
+    let delivered = payloads.lock().unwrap().clone();
+    assert!(
+        delivered
+            .iter()
+            .any(|payload| payload["kind"] == kind && payload["severity"] == "critical"),
+        "the critical {kind} notice was lost after a failed cleanup: {delivered:?}"
+    );
+    assert!(
+        delivered
+            .iter()
+            .any(|payload| payload["kind"] == "maker_cleanup"),
+        "the cleanup failure alert is missing: {delivered:?}"
+    );
+}
+
+#[tokio::test]
+async fn account_floor_alert_is_still_delivered_when_shutdown_cleanup_fails() {
+    let _jwt = JwtGuard::set();
+    let mut server = Server::new_async().await;
+    let payloads = venue_with_failing_cleanup(&mut server).await;
+    let mut runtime = runtime_against(&server, 0.0, 0.0);
+    let work_token = take_cycle_work(&mut runtime.recovery.runtime_state)
+        .expect("cycle work lookup succeeds")
+        .expect("startup schedules cycle work");
+    let attempt = CycleAttempt {
+        work_token,
+        exit_pending_before: false,
+        breaker_halted_before: false,
+        result: Err(anyhow::Error::new(AccountFloorError::breach(
+            "equity", 40.0, 50.0,
+        ))),
+    };
+
+    let exit = expect_exit(runtime.finish_cycle(attempt).await, "account floor");
+    assert!(runtime.shutdown(exit).await.is_err());
+
+    assert_critical_alert_and_cleanup_alert_delivered(&payloads, "account_floor");
+}
+
+#[tokio::test]
+async fn accounting_invariant_alert_is_still_delivered_when_shutdown_cleanup_fails() {
+    let _jwt = JwtGuard::set();
+    let mut server = Server::new_async().await;
+    let payloads = venue_with_failing_cleanup(&mut server).await;
+    let mut runtime = runtime_against(&server, 0.0, 0.0);
+    runtime.loop_state.ledger.expected_position = 0.5;
+
+    let exit = expect_exit(
+        runtime.pre_cycle_phase().await,
+        "pre-cycle accounting invariant",
+    );
+    assert!(runtime.shutdown(exit).await.is_err());
+
+    assert_critical_alert_and_cleanup_alert_delivered(&payloads, "accounting_invariant");
+}
