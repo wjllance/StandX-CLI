@@ -446,10 +446,10 @@ pub(super) async fn resume_quoting_after_recovery(io: &mut RecoveryIo<'_>, spec:
     io.notifier.risk(spec.notice, false).await;
 }
 
-pub(super) async fn accounting_invariant_exit(
-    notifier: &MakerNotifier,
-    symbol: &str,
-    cycle: u64,
+/// Detects a ledger/stats disagreement. Deliberately synchronous: the caller
+/// requests the stop immediately and shutdown delivers the notice after the
+/// maker book is cleaned, so no webhook retry can delay the freeze.
+pub(super) fn accounting_invariant_exit(
     expected_position: f64,
     stats_position: f64,
     qty_tolerance: f64,
@@ -457,19 +457,9 @@ pub(super) async fn accounting_invariant_exit(
     if !accounting_position_mismatch(expected_position, stats_position, qty_tolerance) {
         return None;
     }
-    let detail = format!(
+    Some(format!(
         "stats position {stats_position:+.8} differs from ledger expected {expected_position:+.8} beyond tolerance {qty_tolerance:.8}"
-    );
-    notifier
-        .risk(
-            RiskNotice::critical("accounting_invariant", "mismatch", &detail, symbol, cycle)
-                .position_after(expected_position)
-                .expected(expected_position)
-                .observed(stats_position),
-            true,
-        )
-        .await;
-    Some(detail)
+    ))
 }
 
 impl MakerRuntime {
@@ -1855,10 +1845,7 @@ impl MakerRuntime {
 
     async fn accounting_invariant_phase(&mut self) -> LoopDirective {
         let args = &self.deps.args;
-        let symbol = &self.deps.symbol;
-        let notifier = &self.deps.notifier;
         let qty_tolerance = self.deps.qty_tolerance;
-        let cycle = self.loop_state.counters.cycle;
         let exit = 'phase: {
             if self
                 .recovery
@@ -1871,15 +1858,10 @@ impl MakerRuntime {
             }
             if args.live {
                 if let Some(detail) = accounting_invariant_exit(
-                    notifier,
-                    symbol,
-                    cycle,
                     self.loop_state.ledger.expected_position,
                     self.loop_state.stats.position(),
                     qty_tolerance,
-                )
-                .await
-                {
+                ) {
                     break 'phase stop_requested_exit(
                         &mut self.recovery.runtime_state,
                         RuntimeStopReason::AccountingInvariant(detail),

@@ -773,6 +773,7 @@ pub(super) fn ingest_harness(stop_loss: f64, starting_position: f64) -> IngestHa
         lifecycle: RuntimeLifecycleState {
             token_expiry_alerted: TokenExpiryLevel::Ok,
             last_token_expiry_check: None,
+            account_floor_event: None,
         },
         live_session: Some(LiveSession {
             order_responses: order_rx,

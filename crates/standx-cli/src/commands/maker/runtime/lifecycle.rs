@@ -11,6 +11,8 @@ pub(super) struct ShutdownReport<'a> {
     pub(super) stats: &'a MakerStats,
     pub(super) breaker: &'a VolBreaker,
     pub(super) exit: MakerExit,
+    /// Account-floor stop only: `triggered` or `unevaluable`.
+    pub(super) account_floor_event: Option<&'static str>,
     pub(super) cycle: u64,
     pub(super) total_places: u64,
     pub(super) total_cancels: u64,
@@ -103,6 +105,7 @@ pub(super) async fn shutdown_report(report: ShutdownReport<'_>) -> Result<()> {
         stats,
         breaker,
         exit,
+        account_floor_event,
         cycle,
         total_places,
         total_cancels,
@@ -174,23 +177,55 @@ pub(super) async fn shutdown_report(report: ShutdownReport<'_>) -> Result<()> {
         None
     };
 
-    // The financial brake has already invalidated the generation. Cleanup
-    // must run before a slow webhook can delay shutdown with orders still live.
-    if let MakerExit::StopLoss(detail) = &exit {
-        notifier
-            .risk(
-                RiskNotice::critical(
-                    "stop_loss",
-                    "triggered",
-                    &format!("{detail}; shutting down"),
-                    symbol,
-                    cycle,
+    // A financial or accounting brake has already invalidated the generation.
+    // Cleanup must run before a slow webhook can delay shutdown with orders
+    // still live, so each of these notices is delivered here, after cleanup,
+    // rather than by the flow that requested the stop.
+    match &exit {
+        MakerExit::StopLoss(detail) => {
+            notifier
+                .risk(
+                    RiskNotice::critical(
+                        "stop_loss",
+                        "triggered",
+                        &format!("{detail}; shutting down"),
+                        symbol,
+                        cycle,
+                    )
+                    .position_after(ledger.expected_position)
+                    .expected(ledger.expected_position),
+                    true,
                 )
-                .position_after(ledger.expected_position)
-                .expected(ledger.expected_position),
-                true,
-            )
-            .await;
+                .await;
+        }
+        MakerExit::AccountFloor(detail) => {
+            notifier
+                .risk(
+                    RiskNotice::critical(
+                        "account_floor",
+                        account_floor_event.unwrap_or("triggered"),
+                        &format!("{detail}; shutting down"),
+                        symbol,
+                        cycle,
+                    )
+                    .position_after(ledger.expected_position)
+                    .expected(ledger.expected_position),
+                    true,
+                )
+                .await;
+        }
+        MakerExit::AccountingInvariant(detail) => {
+            notifier
+                .risk(
+                    RiskNotice::critical("accounting_invariant", "mismatch", detail, symbol, cycle)
+                        .position_after(ledger.expected_position)
+                        .expected(ledger.expected_position)
+                        .observed(stats.position()),
+                    true,
+                )
+                .await;
+        }
+        _ => {}
     }
 
     // Notify stop on every exit path. Await delivery so the message lands
@@ -493,6 +528,7 @@ impl MakerRuntime {
             deps,
             loop_state,
             market,
+            lifecycle,
             live_session,
             ..
         } = self;
@@ -569,6 +605,7 @@ impl MakerRuntime {
             stats: &stats,
             breaker: &breaker,
             exit,
+            account_floor_event: lifecycle.account_floor_event,
             cycle,
             total_places,
             total_cancels,

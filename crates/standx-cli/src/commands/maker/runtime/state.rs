@@ -107,6 +107,9 @@ pub(super) struct RuntimeRecoveryState {
 pub(super) struct RuntimeLifecycleState {
     pub(super) token_expiry_alerted: TokenExpiryLevel,
     pub(super) last_token_expiry_check: Option<std::time::Instant>,
+    /// `triggered` or `unevaluable`, recorded when an account-floor stop is
+    /// requested so shutdown can deliver the notice after cleanup.
+    pub(super) account_floor_event: Option<&'static str>,
 }
 
 pub(super) struct MakerRuntime {
@@ -364,6 +367,7 @@ impl MakerRuntime {
             lifecycle: RuntimeLifecycleState {
                 token_expiry_alerted: TokenExpiryLevel::Ok,
                 last_token_expiry_check: None,
+                account_floor_event: None,
             },
             live_session,
             ctrl_c_rx,

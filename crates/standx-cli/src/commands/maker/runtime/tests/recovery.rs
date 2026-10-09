@@ -695,6 +695,7 @@ async fn stop_loss_cleans_venue_orders_before_delivering_any_webhook() {
             stats: &MakerStats::default(),
             breaker: &VolBreaker::new(10, 0.0),
             exit: MakerExit::StopLoss("test loss".into()),
+            account_floor_event: None,
             cycle: 1,
             total_places: 1,
             total_cancels: 0,

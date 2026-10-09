@@ -2,13 +2,13 @@ use super::*;
 use crate::commands::maker::model::{optional_decimal, Decimal};
 
 pub(super) struct CycleAttempt {
-    work_token: WorkToken,
-    exit_pending_before: bool,
-    breaker_halted_before: bool,
-    result: anyhow::Result<CycleSuccess>,
+    pub(super) work_token: WorkToken,
+    pub(super) exit_pending_before: bool,
+    pub(super) breaker_halted_before: bool,
+    pub(super) result: anyhow::Result<CycleSuccess>,
 }
 
-struct CycleSuccess {
+pub(super) struct CycleSuccess {
     stop_loss: Option<maker::SessionStopLoss>,
     places: u64,
     cancels: u64,
@@ -765,15 +765,10 @@ impl MakerRuntime {
             }
             if args.live {
                 if let Some(detail) = accounting_invariant_exit(
-                    notifier,
-                    symbol,
-                    cycle,
                     self.loop_state.ledger.expected_position,
                     self.loop_state.stats.position(),
                     qty_tolerance,
-                )
-                .await
-                {
+                ) {
                     break 'execute stop_requested_exit(
                         &mut self.recovery.runtime_state,
                         RuntimeStopReason::AccountingInvariant(detail),
@@ -1054,20 +1049,11 @@ impl MakerRuntime {
                                 detail: &floor.detail,
                             },
                         );
-                        notifier
-                            .risk(
-                                RiskNotice::critical(
-                                    "account_floor",
-                                    floor.cause.event(),
-                                    &format!("{}; shutting down", floor.detail),
-                                    symbol,
-                                    cycle,
-                                )
-                                .position_after(self.loop_state.ledger.expected_position)
-                                .expected(self.loop_state.ledger.expected_position),
-                                true,
-                            )
-                            .await;
+                        // Same ordering as the stop-loss exit: invalidate the
+                        // generation now and let shutdown clean the venue book
+                        // before the notice is delivered. A webhook can retry for
+                        // ~18s while the previous cycle's quotes are still resting.
+                        self.lifecycle.account_floor_event = Some(floor.cause.event());
                         self.recovery
                             .runtime_state
                             .handle(MakerEvent::StopRequested(RuntimeStopReason::AccountFloor(
