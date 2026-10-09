@@ -2,7 +2,7 @@
 
 > **Trade by Intent. Built for Agents, Not Buttons.**
 
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 
 **StandX Agent Toolkit** is a CLI for the AI trading era: any AI Agent that can execute a shell command can read markets, manage positions, and place orders—structured input in, structured output out.

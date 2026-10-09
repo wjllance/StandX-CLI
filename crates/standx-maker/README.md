@@ -2,7 +2,7 @@
 
 > Deterministic market-making strategy and risk engine for StandX.
 
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](../../LICENSE)
 
 This crate is the decision layer behind `standx maker run`. Given a market

@@ -15,7 +15,7 @@
 rustup update
 
 # 验证版本
-rustc --version  # 需要 1.75+
+rustc --version  # 需要 1.85+
 ```
 
 ### Q: 构建失败，提示缺少依赖？
