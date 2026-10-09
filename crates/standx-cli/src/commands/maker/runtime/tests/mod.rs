@@ -89,6 +89,7 @@ fn position_update(symbol: &str, side: Option<OrderSide>, qty: &str) -> Position
     }
 }
 
+mod account_disconnect;
 mod account_events;
 mod order_events;
 mod recovery;

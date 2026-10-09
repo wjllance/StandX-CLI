@@ -1,12 +1,12 @@
 use super::*;
 
-struct JwtGuard {
+pub(super) struct JwtGuard {
     original: Option<String>,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl JwtGuard {
-    fn set() -> Self {
+    pub(super) fn set() -> Self {
         // Share the crate-wide env lock so this STANDX_JWT mutation cannot
         // race env reads in other modules' tests. See crate::TEST_ENV_LOCK.
         let lock = crate::TEST_ENV_LOCK

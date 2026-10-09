@@ -617,6 +617,48 @@ impl fmt::Display for AccountStreamDisconnected {
 
 impl std::error::Error for AccountStreamDisconnected {}
 
+/// The stream itself reported `Disconnected`/`Error`. Same transport fault as
+/// [`AccountStreamDisconnected`], but delivered as an event instead of a closed
+/// channel; the SDK emits it first on every routine rotation. Typed only so a
+/// drain can tell it apart from a payload-validation failure; the `Display`
+/// text is the historical message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AccountStreamUnhealthy {
+    reason: String,
+}
+
+impl fmt::Display for AccountStreamUnhealthy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "authenticated account stream unhealthy: {}",
+            self.reason
+        )
+    }
+}
+
+impl std::error::Error for AccountStreamUnhealthy {}
+
+/// `Some(fills already applied)` when a drain failed because the stream itself
+/// is gone (closed channel or explicit disconnect event), `None` for any other
+/// failure, which must still fail closed as a validation error.
+pub(super) fn account_stream_loss_fills(error: &anyhow::Error) -> Option<u64> {
+    if let Some(disconnect) = error.downcast_ref::<AccountStreamDisconnected>() {
+        return Some(disconnect.fills_applied);
+    }
+    error.downcast_ref::<AccountStreamUnhealthy>().map(|_| 0)
+}
+
+/// The stream is reporting its own failure. This is a transport fault with
+/// its own recovery (reconnect and reconcile), not evidence the position
+/// changed, so it must not be routed through position reconciliation.
+pub(super) fn account_event_is_stream_failure(event: &AccountEvent) -> bool {
+    matches!(
+        event,
+        AccountEvent::Disconnected { .. } | AccountEvent::Error { .. }
+    )
+}
+
 pub(super) fn account_event_invalidates_cycle(event: &AccountEvent) -> bool {
     matches!(
         event,
@@ -799,9 +841,9 @@ pub(super) fn apply_account_event(
             balance_changed: true,
             ..AccountEventOutcome::default()
         }),
-        AccountEvent::Disconnected { reason } | AccountEvent::Error { reason } => Err(
-            anyhow::anyhow!("authenticated account stream unhealthy: {reason}"),
-        ),
+        AccountEvent::Disconnected { reason } | AccountEvent::Error { reason } => {
+            Err(anyhow::Error::new(AccountStreamUnhealthy { reason }))
+        }
     }
 }
 

@@ -359,11 +359,13 @@ impl MakerState {
     }
 
     fn freeze(&mut self, reason: String, target: RecoveryTarget) -> Vec<MakerEffect> {
-        if matches!(
-            self.phase,
-            RuntimePhase::Frozen { .. } | RuntimePhase::Stopping { .. }
-        ) {
-            return Vec::new();
+        match self.phase {
+            RuntimePhase::Frozen { .. } => {
+                self.upgrade_queued_cleanup_target(target);
+                return Vec::new();
+            }
+            RuntimePhase::Stopping { .. } => return Vec::new(),
+            RuntimePhase::Starting | RuntimePhase::Ready => {}
         }
         self.effects.clear();
         self.generation = self.generation.saturating_add(1);
@@ -378,6 +380,36 @@ impl MakerState {
         self.in_flight = Some(token);
         effects.push(MakerEffect::Cleanup { token, target });
         effects
+    }
+
+    /// A cycle-invalidating account event freezes the runtime for position
+    /// reconciliation, and the account-stream disconnect that follows it in
+    /// the same drain used to be swallowed by the frozen state. Position
+    /// reconciliation reads the account stream, so it cannot run over a dead
+    /// one: the disconnect must own the recovery. The upgrade is only sound
+    /// while the executor has not yet taken the `Cleanup` effect. Once taken,
+    /// the executor expects `Recover` for the target it started with, and
+    /// changing it would turn the later `CleanupCompleted` into a mismatched
+    /// effect and a hard stop. In that case the event is dropped as before and
+    /// the unhealthy stream is picked up by the next recovery phase. Never
+    /// bumps the generation or queues extra effects, and never downgrades.
+    fn upgrade_queued_cleanup_target(&mut self, target: RecoveryTarget) {
+        if target != RecoveryTarget::AccountStream
+            || self.recovery_target != Some(RecoveryTarget::PositionReconciliation)
+        {
+            return;
+        }
+        let queued = self.effects.iter_mut().find_map(|effect| match effect {
+            MakerEffect::Cleanup {
+                target: queued_target,
+                ..
+            } if *queued_target == RecoveryTarget::PositionReconciliation => Some(queued_target),
+            _ => None,
+        });
+        if let Some(queued_target) = queued {
+            *queued_target = RecoveryTarget::AccountStream;
+            self.recovery_target = Some(RecoveryTarget::AccountStream);
+        }
     }
 
     fn stop(&mut self, reason: RuntimeStopReason) -> Vec<MakerEffect> {
@@ -531,6 +563,157 @@ mod tests {
             state.next_effect(),
             Some(MakerEffect::RunCycle(_))
         ));
+    }
+
+    fn frozen_for_reconciliation(state: &mut MakerState) -> WorkToken {
+        state.handle(MakerEvent::StartupReady);
+        let _ = next_cycle(state);
+        state.handle(MakerEvent::CycleInvalidated {
+            reason: "account state changed during maker cycle".to_string(),
+        });
+        assert!(state.is_frozen());
+        assert!(matches!(
+            state.pending_effect(),
+            Some(MakerEffect::AbortInFlight(_))
+        ));
+        let generation = state.generation();
+        assert_eq!(generation, 1);
+        WorkToken {
+            generation,
+            kind: WorkKind::Cleanup,
+        }
+    }
+
+    /// Invariant: a disconnect that lands after a cycle-invalidating event has
+    /// already frozen the runtime for reconciliation owns the recovery, as long
+    /// as the cleanup effect is still queued. The upgrade neither bumps the
+    /// generation nor queues anything new.
+    #[test]
+    fn disconnect_upgrades_queued_reconciliation_cleanup_to_account_stream() {
+        let mut state = MakerState::starting();
+        let cleanup_token = frozen_for_reconciliation(&mut state);
+
+        state.handle(MakerEvent::AccountStreamDisconnected("closed".to_string()));
+
+        assert_eq!(state.generation(), 1, "no second generation bump");
+        assert!(matches!(
+            state.next_effect(),
+            Some(MakerEffect::AbortInFlight(_))
+        ));
+        assert_eq!(
+            state.next_effect(),
+            Some(MakerEffect::Cleanup {
+                token: cleanup_token,
+                target: RecoveryTarget::AccountStream,
+            })
+        );
+        assert_eq!(state.next_effect(), None, "no duplicate cleanup");
+
+        state.handle(MakerEvent::CleanupCompleted(cleanup_token));
+        let recovery = match state.next_effect() {
+            Some(MakerEffect::Recover { token, target }) => {
+                assert_eq!(target, RecoveryTarget::AccountStream);
+                token
+            }
+            effect => panic!("expected account-stream recovery, got {effect:?}"),
+        };
+        state.handle(MakerEvent::RecoveryFailed {
+            token: recovery,
+            reason: "reconnect exhausted".to_string(),
+        });
+        assert_eq!(
+            state.next_effect(),
+            Some(MakerEffect::Stop(
+                RuntimeStopReason::PositionReconciliation("reconnect exhausted".to_string())
+            )),
+            "the upgraded target must also own the failure verdict, not leave a stale target"
+        );
+    }
+
+    /// Invariant: once the executor has taken the cleanup effect it expects the
+    /// recovery for that target; changing it mid-cleanup would turn a later
+    /// CleanupCompleted into a mismatched effect and a hard stop.
+    #[test]
+    fn upgrade_is_refused_after_the_cleanup_effect_was_taken() {
+        let mut state = MakerState::starting();
+        let cleanup_token = frozen_for_reconciliation(&mut state);
+        assert!(matches!(
+            state.next_effect(),
+            Some(MakerEffect::AbortInFlight(_))
+        ));
+        assert!(matches!(
+            state.next_effect(),
+            Some(MakerEffect::Cleanup {
+                target: RecoveryTarget::PositionReconciliation,
+                ..
+            })
+        ));
+
+        state.handle(MakerEvent::AccountStreamDisconnected("closed".to_string()));
+        assert_eq!(state.next_effect(), None);
+        assert_eq!(state.generation(), 1);
+
+        state.handle(MakerEvent::CleanupCompleted(cleanup_token));
+        assert!(matches!(
+            state.next_effect(),
+            Some(MakerEffect::Recover {
+                target: RecoveryTarget::PositionReconciliation,
+                ..
+            })
+        ));
+    }
+
+    /// Invariant: only reconciliation yields to the account stream. Every other
+    /// frozen pair keeps its first target (the later fault is picked up from
+    /// stream health after recovery), and a stopping runtime stays stopped.
+    #[test]
+    fn frozen_target_is_never_downgraded_or_swapped_for_other_faults() {
+        let cases = [
+            (
+                MakerEvent::AccountStreamDisconnected("closed".to_string()),
+                MakerEvent::PositionMismatch,
+                RecoveryTarget::AccountStream,
+            ),
+            (
+                MakerEvent::PositionMismatch,
+                MakerEvent::OrderResponseDisconnected("closed".to_string()),
+                RecoveryTarget::PositionReconciliation,
+            ),
+            (
+                MakerEvent::PositionMismatch,
+                MakerEvent::MarketDataDegraded("idle".to_string()),
+                RecoveryTarget::PositionReconciliation,
+            ),
+            (
+                MakerEvent::OrderResponseDisconnected("closed".to_string()),
+                MakerEvent::AccountStreamDisconnected("closed".to_string()),
+                RecoveryTarget::OrderResponse,
+            ),
+        ];
+        for (first, second, expected) in cases {
+            let mut state = MakerState::starting();
+            state.handle(MakerEvent::StartupReady);
+            let _ = next_cycle(&mut state);
+            state.handle(first);
+            state.handle(second);
+            assert_eq!(state.generation(), 1);
+            let _ = state.next_effect();
+            assert!(matches!(
+                state.next_effect(),
+                Some(MakerEffect::Cleanup { target, .. }) if target == expected
+            ));
+            assert_eq!(state.next_effect(), None);
+        }
+
+        let mut state = MakerState::starting();
+        state.handle(MakerEvent::StartupReady);
+        let _ = next_cycle(&mut state);
+        state.handle(MakerEvent::StopRequested(RuntimeStopReason::CtrlC));
+        let generation = state.generation();
+        while state.next_effect().is_some() {}
+        state.handle(MakerEvent::AccountStreamDisconnected("closed".to_string()));
+        assert_eq!(state.next_effect(), None);
+        assert_eq!(state.generation(), generation);
     }
 
     #[test]
