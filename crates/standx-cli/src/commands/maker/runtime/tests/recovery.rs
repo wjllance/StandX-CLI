@@ -1,12 +1,12 @@
 use super::*;
 
-struct JwtGuard {
+pub(super) struct JwtGuard {
     original: Option<String>,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl JwtGuard {
-    fn set() -> Self {
+    pub(super) fn set() -> Self {
         // Share the crate-wide env lock so this STANDX_JWT mutation cannot
         // race env reads in other modules' tests. See crate::TEST_ENV_LOCK.
         let lock = crate::TEST_ENV_LOCK
@@ -695,6 +695,7 @@ async fn stop_loss_cleans_venue_orders_before_delivering_any_webhook() {
             stats: &MakerStats::default(),
             breaker: &VolBreaker::new(10, 0.0),
             exit: MakerExit::StopLoss("test loss".into()),
+            account_floor_event: None,
             cycle: 1,
             total_places: 1,
             total_cancels: 0,

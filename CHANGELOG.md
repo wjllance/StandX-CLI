@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Maker exposure budgets now include retained order quantities and pending venue exposure, including cancels after gateway acknowledgement, preventing size-skew transitions and asynchronous replacements from exceeding the configured position cap. Missing cancel terminal observations remain covered by the existing request timeout.
 - Maker session stop-loss now prevents further maker/exit orders before shutdown cleanup and webhook delivery, while retaining fills recorded in the triggering cycle. Gross PnL semantics, thresholds, JSON fields, and live gates are unchanged.
+- An account-stream disconnect or error that arrives during a maker quote cycle now routes to account-stream recovery instead of position reconciliation, a frozen runtime upgrades a still-queued reconciliation cleanup to the account-stream target, and a closed or disconnected account stream during the reconciliation window is handled as a transport fault rather than a hard `recovery_failed` stop. Thresholds, JSON action names, and live gates are unchanged.
+- Maker account-floor and accounting-invariant exits now freeze and clean the venue maker book before their critical webhook is delivered, matching the stop-loss ordering, so a slow webhook can no longer leave resting quotes live. Notice payloads (kind, event, severity, message, positions) are unchanged; only delivery moves after cleanup.
+- Fills applied in the same account-event batch as an explicit stream disconnect during position reconciliation are now counted in the session fill total (ledger, PnL, and expected position were already correct).
 - The SDK's quick-start documentation example is now compiled but not executed (`no_run`). It previously issued a real HTTP request to the production endpoint when `cargo test` ran, so a transient network failure could fail the workspace test gate with no test actually broken.
 
 ### Added

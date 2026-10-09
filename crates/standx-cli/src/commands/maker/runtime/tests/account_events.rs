@@ -282,24 +282,11 @@ fn accounting_position_mismatch_fails_closed_on_non_finite() {
     assert!(accounting_position_mismatch(f64::INFINITY, 0.2, tolerance));
 }
 
-#[tokio::test]
-async fn accounting_invariant_mismatch_becomes_fail_safe_exit() {
-    let notifier = MakerNotifier::new(
-        OutputFormat::Quiet,
-        None,
-        crate::cli::AlertWebhookFormat::Raw,
-    );
-
-    assert!(
-        accounting_invariant_exit(&notifier, "XAG-USD", 1396, 0.0, -0.2, 0.0005,)
-            .await
-            .is_some_and(|detail| detail.contains("differs from ledger expected"))
-    );
-    assert!(
-        accounting_invariant_exit(&notifier, "XAG-USD", 1396, 0.0, 0.00049, 0.0005,)
-            .await
-            .is_none()
-    );
+#[test]
+fn accounting_invariant_mismatch_becomes_fail_safe_exit() {
+    assert!(accounting_invariant_exit(0.0, -0.2, 0.0005)
+        .is_some_and(|detail| detail.contains("differs from ledger expected")));
+    assert!(accounting_invariant_exit(0.0, 0.00049, 0.0005).is_none());
 }
 
 // ---- Fault-injection conformance tests for the shared recovery helpers ----

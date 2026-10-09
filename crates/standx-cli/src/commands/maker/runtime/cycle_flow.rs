@@ -2,13 +2,13 @@ use super::*;
 use crate::commands::maker::model::{optional_decimal, Decimal};
 
 pub(super) struct CycleAttempt {
-    work_token: WorkToken,
-    exit_pending_before: bool,
-    breaker_halted_before: bool,
-    result: anyhow::Result<CycleSuccess>,
+    pub(super) work_token: WorkToken,
+    pub(super) exit_pending_before: bool,
+    pub(super) breaker_halted_before: bool,
+    pub(super) result: anyhow::Result<CycleSuccess>,
 }
 
-struct CycleSuccess {
+pub(super) struct CycleSuccess {
     stop_loss: Option<maker::SessionStopLoss>,
     places: u64,
     cancels: u64,
@@ -401,6 +401,7 @@ impl MakerRuntime {
             }
             let mut buffered_orders: Vec<OrderResponse> = Vec::new();
             let mut cycle_invalidated_by_account = false;
+            let mut account_stream_failed = false;
             let mut cycle_invalidated_by_market: Option<String> = None;
             // Scope the pinned work future so it (and its ledger/pending borrows)
             // is dropped once it resolves, before the buffered events are applied.
@@ -440,6 +441,27 @@ impl MakerRuntime {
                                 }
                                 return Err(LoopDirective::Restart);
                             };
+                            if account_event_is_stream_failure(&event) {
+                                // A transport fault, not a position change: routing it
+                                // through reconciliation would freeze for the wrong
+                                // target and then fail closed on the dead stream.
+                                let reason = match &event {
+                                    AccountEvent::Disconnected { reason }
+                                    | AccountEvent::Error { reason } => {
+                                        format!("authenticated account stream unhealthy: {reason}")
+                                    }
+                                    _ => unreachable!("guarded by account_event_is_stream_failure"),
+                                };
+                                buffered_account.push(event);
+                                self.recovery
+                                    .runtime_state
+                                    .handle(MakerEvent::AccountStreamDisconnected(reason.clone()));
+                                if let Some(health) = cycle_account_stream_health {
+                                    health.mark_unhealthy(reason);
+                                }
+                                account_stream_failed = true;
+                                break None;
+                            }
                             let invalidates = account_event_invalidates_cycle(&event);
                             buffered_account.push(event);
                             if invalidates {
@@ -546,7 +568,7 @@ impl MakerRuntime {
             // The buffers are only fed from live-session receivers, so both are
             // empty in paper mode.
             if let Some(session) = self.live_session.as_mut() {
-                if cycle_invalidated_by_account {
+                if cycle_invalidated_by_account || account_stream_failed {
                     while let Ok(event) = session.account_events.try_recv() {
                         buffered_account.push(event);
                     }
@@ -692,7 +714,7 @@ impl MakerRuntime {
                             }
                         }
                     }
-                    BufferIngest::Failed => {}
+                    BufferIngest::Failed => account_stream_failed = true,
                     BufferIngest::Stop(loss) => {
                         // The cycle's own fills are normally counted in finish_cycle.
                         // This exit skips that function, so credit them once here.
@@ -743,20 +765,30 @@ impl MakerRuntime {
             }
             if args.live {
                 if let Some(detail) = accounting_invariant_exit(
-                    notifier,
-                    symbol,
-                    cycle,
                     self.loop_state.ledger.expected_position,
                     self.loop_state.stats.position(),
                     qty_tolerance,
-                )
-                .await
-                {
+                ) {
                     break 'execute stop_requested_exit(
                         &mut self.recovery.runtime_state,
                         RuntimeStopReason::AccountingInvariant(detail),
                     );
                 }
+            }
+
+            if account_stream_failed {
+                // Account-stream recovery reconnects and reconciles the venue
+                // position itself and owns the queued cleanup. Reconciliation
+                // here would freeze for a different target. Re-arm what this
+                // cycle consumed so the next cycle still reconciles it.
+                if let Some(observed) = mismatch {
+                    self.recovery
+                        .account_position_mismatch
+                        .get_or_insert(observed);
+                }
+                self.recovery.account_order_reconciliation_required |=
+                    order_reconciliation_required;
+                return Err(LoopDirective::Restart);
             }
 
             let cycle_result = if let Some(reconciliation) = reconciliation_error_for_cycle(
@@ -792,7 +824,7 @@ impl MakerRuntime {
         Err(LoopDirective::Exit(exit))
     }
 
-    async fn finish_cycle(&mut self, attempt: CycleAttempt) -> LoopDirective {
+    pub(super) async fn finish_cycle(&mut self, attempt: CycleAttempt) -> LoopDirective {
         let args = &self.deps.args;
         let output_format = self.deps.output_format;
         let client = &self.deps.client;
@@ -1017,20 +1049,11 @@ impl MakerRuntime {
                                 detail: &floor.detail,
                             },
                         );
-                        notifier
-                            .risk(
-                                RiskNotice::critical(
-                                    "account_floor",
-                                    floor.cause.event(),
-                                    &format!("{}; shutting down", floor.detail),
-                                    symbol,
-                                    cycle,
-                                )
-                                .position_after(self.loop_state.ledger.expected_position)
-                                .expected(self.loop_state.ledger.expected_position),
-                                true,
-                            )
-                            .await;
+                        // Same ordering as the stop-loss exit: invalidate the
+                        // generation now and let shutdown clean the venue book
+                        // before the notice is delivered. A webhook can retry for
+                        // ~18s while the previous cycle's quotes are still resting.
+                        self.lifecycle.account_floor_event = Some(floor.cause.event());
                         self.recovery
                             .runtime_state
                             .handle(MakerEvent::StopRequested(RuntimeStopReason::AccountFloor(
@@ -1105,6 +1128,7 @@ impl MakerRuntime {
                         };
                         let mut recovered = false;
                         let mut last_observed = mismatch.observed;
+                        let mut account_stream_lost = false;
                         for delay in [500_u64, 1_000, 1_500] {
                             // The maker book is verified empty at this point, so
                             // aborting the convergence wait on Ctrl+C is safe.
@@ -1117,7 +1141,12 @@ impl MakerRuntime {
                                 }
                                 _ = tokio::time::sleep(Duration::from_millis(delay)) => {}
                             }
-                            if let Some(session) = self.live_session.as_mut() {
+                            // Once the stream is gone the window keeps converging over
+                            // REST alone; re-reading the dead channel would only repeat
+                            // the same error.
+                            if let (false, Some(session)) =
+                                (account_stream_lost, self.live_session.as_mut())
+                            {
                                 match apply_account_events(
                                     &mut session.account_events,
                                     &mut AccountEventState {
@@ -1172,6 +1201,25 @@ impl MakerRuntime {
                                         {
                                             last_observed = position;
                                         }
+                                    }
+                                    Err(error) if account_stream_loss_fills(&error).is_some() => {
+                                        // A dropped stream is a transport fault, not an
+                                        // unvalidated ledger. Leave it unhealthy so the
+                                        // account-stream phase reconnects before any
+                                        // quoting; this window still has to explain the
+                                        // position gap over REST or fail closed below.
+                                        // Load-bearing: this window may end "recovered"
+                                        // (Ready, RunCycle queued) with the stream dead.
+                                        // Safety rests on the next `pre_cycle_phase`
+                                        // seeing the unhealthy stream and refreezing
+                                        // before any cycle work is taken; pinned by
+                                        // tests/account_disconnect.rs.
+                                        self.loop_state.counters.total_fills +=
+                                            account_stream_loss_fills(&error).unwrap_or(0);
+                                        session
+                                            .account_stream_health
+                                            .mark_unhealthy(error.to_string());
+                                        account_stream_lost = true;
                                     }
                                     Err(error) => {
                                         // Fail closed like the account-stream

@@ -562,7 +562,7 @@ fn stop_loss_books_buffered_trade_ownership_without_notification_waits() {
     assert_eq!(duplicate.fills, 0);
 }
 
-fn owned_order(order_id: u64, suffix: &str) -> AccountEvent {
+pub(super) fn owned_order(order_id: u64, suffix: &str) -> AccountEvent {
     use standx_sdk::account_stream::OrderUpdate;
     use standx_sdk::models::OrderStatus;
     AccountEvent::Order(OrderUpdate {
@@ -581,7 +581,7 @@ fn owned_order(order_id: u64, suffix: &str) -> AccountEvent {
     })
 }
 
-fn owned_trade(trade_id: u64, order_id: u64, price: &str, qty: &str) -> AccountEvent {
+pub(super) fn owned_trade(trade_id: u64, order_id: u64, price: &str, qty: &str) -> AccountEvent {
     use standx_sdk::account_stream::TradeUpdate;
     AccountEvent::Trade(TradeUpdate {
         seq: trade_id,
@@ -595,7 +595,7 @@ fn owned_trade(trade_id: u64, order_id: u64, price: &str, qty: &str) -> AccountE
     })
 }
 
-fn position_event(qty: &str) -> AccountEvent {
+pub(super) fn position_event(qty: &str) -> AccountEvent {
     use standx_sdk::account_stream::PositionUpdate;
     AccountEvent::Position(PositionUpdate {
         seq: 1,
@@ -610,13 +610,13 @@ fn position_event(qty: &str) -> AccountEvent {
     })
 }
 
-struct IngestHarness {
-    runtime: MakerRuntime,
-    _account_tx: tokio::sync::mpsc::Sender<AccountEvent>,
-    _order_tx: tokio::sync::mpsc::Sender<standx_sdk::order_response::OrderResponse>,
+pub(super) struct IngestHarness {
+    pub(super) runtime: MakerRuntime,
+    pub(super) _account_tx: tokio::sync::mpsc::Sender<AccountEvent>,
+    pub(super) _order_tx: tokio::sync::mpsc::Sender<standx_sdk::order_response::OrderResponse>,
 }
 
-fn ingest_harness(stop_loss: f64, starting_position: f64) -> IngestHarness {
+pub(super) fn ingest_harness(stop_loss: f64, starting_position: f64) -> IngestHarness {
     use standx_maker::{GuardConfig, GuardController, SizeSkewConfig, SizeSkewController};
     use standx_sdk::order_response::OrderCommandSender;
     use std::time::Instant;
@@ -773,6 +773,7 @@ fn ingest_harness(stop_loss: f64, starting_position: f64) -> IngestHarness {
         lifecycle: RuntimeLifecycleState {
             token_expiry_alerted: TokenExpiryLevel::Ok,
             last_token_expiry_check: None,
+            account_floor_event: None,
         },
         live_session: Some(LiveSession {
             order_responses: order_rx,

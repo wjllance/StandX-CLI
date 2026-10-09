@@ -39,7 +39,8 @@ pub(super) use events::apply_order_responses;
 pub(super) use events::AccountStreamDisconnected;
 use events::{
     absorb_account_outcome, absorb_account_outcome_or_stop, account_event_invalidates_cycle,
-    accounting_position_mismatch, apply_account_event, apply_account_events, apply_order_response,
+    account_event_is_stream_failure, account_stream_loss_fills, accounting_position_mismatch,
+    apply_account_event, apply_account_events, apply_order_response,
     apply_order_responses_observed, duration_ms, invalidate_session_latency,
     market_update_requires_replan, observe_order_ack, order_request_timeout_detail,
     order_response_failure, reconciliation_error_for_cycle, request_timeout_notice,
