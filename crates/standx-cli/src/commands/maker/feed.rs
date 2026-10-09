@@ -316,7 +316,7 @@ pub(super) struct FeedSnapshotVersion {
 
 impl FeedSnapshotVersion {
     pub(super) fn both_advanced_from(self, previous: Option<Self>) -> bool {
-        previous.map_or(true, |previous| {
+        previous.is_none_or(|previous| {
             self.mark_received_at > previous.mark_received_at
                 && self.book_received_at > previous.book_received_at
         })
@@ -613,8 +613,7 @@ pub(super) fn spawn_market_feed(
                         }
                         match &msg {
                             WsMessage::Trade(trade)
-                                if trade.symbol.as_deref().map_or(
-                                    true,
+                                if trade.symbol.as_deref().is_none_or(
                                     |trade_symbol| trade_symbol.eq_ignore_ascii_case(&symbol),
                                 ) =>
                             {

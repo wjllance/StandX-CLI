@@ -628,11 +628,24 @@ async fn connect_and_run(
 
 fn take_public_trade_raw_sample(budget: Option<&AtomicUsize>) -> bool {
     budget.is_some_and(|budget| {
-        budget
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_ok()
+        // Hand-rolled instead of `fetch_update`/`try_update`: the former is
+        // deprecated on current stable, the latter does not exist on older
+        // toolchains. Same semantics: decrement until zero, never underflow.
+        let mut remaining = budget.load(Ordering::Relaxed);
+        loop {
+            let Some(next) = remaining.checked_sub(1) else {
+                return false;
+            };
+            match budget.compare_exchange_weak(
+                remaining,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => remaining = actual,
+            }
+        }
     })
 }
 
@@ -654,6 +667,27 @@ mod tests {
         }
         assert!(!take_public_trade_raw_sample(Some(&budget)));
         assert!(!take_public_trade_raw_sample(None));
+        assert_eq!(budget.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn public_trade_raw_sample_budget_is_exact_under_contention() {
+        let budget = AtomicUsize::new(1_000);
+        let granted = AtomicUsize::new(0);
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..500 {
+                        if take_public_trade_raw_sample(Some(&budget)) {
+                            granted.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+        });
+
+        assert_eq!(granted.load(Ordering::Relaxed), 1_000);
         assert_eq!(budget.load(Ordering::Relaxed), 0);
     }
 

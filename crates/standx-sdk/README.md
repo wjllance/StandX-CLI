@@ -4,7 +4,7 @@
 > automated trading: typed REST APIs, explicit stream health, correlation-first
 > asynchronous order commands, and market updates that preserve venue timing.
 
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](../../LICENSE)
 
 `standx-sdk` is the exchange integration crate behind the
@@ -34,7 +34,7 @@ stream lifecycles, request signing, or custom transport supervision.
 ## Status
 
 - **Version:** `0.1.0`, pre-1.0; public APIs may change between releases.
-- **MSRV:** Rust 1.75.
+- **MSRV:** Rust 1.85 (the locked dependency graph includes edition-2024 crates).
 - **Distribution:** Git or workspace path dependency; not published to
   crates.io yet.
 - **Output:** no stdout output or TUI dependency. Optional WebSocket diagnostics

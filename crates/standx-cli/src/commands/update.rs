@@ -29,6 +29,7 @@
 use crate::cli::OutputFormat;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use std::io::IsTerminal;
 use std::path::Path;
 
@@ -238,11 +239,12 @@ pub(crate) fn checksum_for(checksums: &str, asset: &str) -> Result<String> {
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    let mut hex = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        // Writing into a `String` cannot fail.
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 /// Extract the tag from a `.../releases/tag/<tag>` URL.
