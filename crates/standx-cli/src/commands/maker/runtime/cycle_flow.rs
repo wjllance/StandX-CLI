@@ -1208,6 +1208,12 @@ impl MakerRuntime {
                                         // account-stream phase reconnects before any
                                         // quoting; this window still has to explain the
                                         // position gap over REST or fail closed below.
+                                        // Load-bearing: this window may end "recovered"
+                                        // (Ready, RunCycle queued) with the stream dead.
+                                        // Safety rests on the next `pre_cycle_phase`
+                                        // seeing the unhealthy stream and refreezing
+                                        // before any cycle work is taken; pinned by
+                                        // tests/account_disconnect.rs.
                                         self.loop_state.counters.total_fills +=
                                             account_stream_loss_fills(&error).unwrap_or(0);
                                         session

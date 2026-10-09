@@ -20,6 +20,23 @@ fn describe(directive: &LoopDirective) -> String {
 }
 
 async fn mount_flat_venue(server: &mut ServerGuard) {
+    mount_venue(server, "[]").await;
+}
+
+fn long_position(qty: &str) -> String {
+    serde_json::json!([{
+        "id": 1, "symbol": "BTC-USD", "side": "buy", "qty": qty,
+        "entry_price": "100.0", "entry_value": "50", "holding_margin": "1",
+        "initial_margin": "1", "leverage": "1", "mark_price": "100.0",
+        "margin_asset": "DUSD", "margin_mode": "cross", "position_value": "50",
+        "realized_pnl": "0", "required_margin": "1", "status": "open", "upnl": "0",
+        "time": "2026-07-28T00:00:00Z", "created_at": "2026-07-28T00:00:00Z",
+        "updated_at": "2026-07-28T00:00:00Z", "user": "test"
+    }])
+    .to_string()
+}
+
+async fn mount_venue(server: &mut ServerGuard, positions: &str) {
     let empty = r#"{"code":0,"message":"ok","result":[]}"#;
     for path in [
         "/api/query_open_orders",
@@ -35,16 +52,22 @@ async fn mount_flat_venue(server: &mut ServerGuard) {
             .create_async()
             .await;
     }
-    for path in ["/api/query_positions", "/api/query_funding_history"] {
-        server
-            .mock("GET", path)
-            .match_query(Matcher::Any)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body("[]")
-            .create_async()
-            .await;
-    }
+    server
+        .mock("GET", "/api/query_positions")
+        .match_query(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(positions.to_string())
+        .create_async()
+        .await;
+    server
+        .mock("GET", "/api/query_funding_history")
+        .match_query(Matcher::Any)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create_async()
+        .await;
 }
 
 fn disconnected(reason: &str) -> AccountEvent {
@@ -60,6 +83,33 @@ async fn run_cycle(runtime: &mut MakerRuntime) -> LoopDirective {
         Ok(attempt) => runtime.finish_cycle(attempt).await,
         Err(directive) => directive,
     }
+}
+
+/// The reconciliation window can legitimately finish "recovered" (Ready with
+/// `RunCycle` queued) while the stream is dead. That is only safe because the
+/// next pre-cycle phase refreezes for the dead stream before any cycle work
+/// is taken. Pin both halves: the window path really ran (strict oracle: the
+/// select's closed-channel branch would have queued cleanup instead, so a
+/// timing slip fails loudly rather than passing through the wrong path), and
+/// pre_cycle exits through account-stream recovery, not into quoting.
+async fn assert_window_recovery_then_refrozen_by_pre_cycle(runtime: &mut MakerRuntime) {
+    assert!(
+        matches!(
+            runtime.recovery.runtime_state.pending_effect(),
+            Some(MakerEffect::RunCycle(_))
+        ),
+        "the window path must have declared recovery with RunCycle queued, got {:?}",
+        runtime.recovery.runtime_state.pending_effect()
+    );
+    assert_pre_cycle_enters_account_stream_recovery(runtime).await;
+}
+
+async fn assert_pre_cycle_enters_account_stream_recovery(runtime: &mut MakerRuntime) {
+    let next = describe(&runtime.pre_cycle_phase().await);
+    assert!(
+        next.contains("reconnect disabled"),
+        "pre-cycle must refreeze for the dead account stream, got {next}"
+    );
 }
 
 fn account_stream_healthy(runtime: &MakerRuntime) -> bool {
@@ -115,6 +165,31 @@ async fn rotation_disconnect_during_cycle_routes_to_account_stream_recovery() {
         RecoveryTarget::AccountStream,
     )
     .expect("the freeze must queue account-stream cleanup, not reconciliation cleanup");
+}
+
+/// The rotation freeze must lead pre-cycle into account-stream recovery (no
+/// target-mismatch stop between the two).
+#[tokio::test]
+async fn rotation_then_pre_cycle_reaches_account_stream_recovery() {
+    let _jwt = JwtGuard::set();
+    let mut server = Server::new_async().await;
+    mount_flat_venue(&mut server).await;
+    let IngestHarness {
+        mut runtime,
+        _account_tx,
+        _order_tx,
+    } = ingest_harness(0.0, 0.0);
+    runtime.deps.client = standx_sdk::client::StandXClient::with_base_url(server.url()).unwrap();
+    _account_tx
+        .send(disconnected("scheduled rotation"))
+        .await
+        .unwrap();
+    drop(_account_tx);
+
+    let directive = run_cycle(&mut runtime).await;
+
+    assert!(matches!(directive, LoopDirective::Restart));
+    assert_pre_cycle_enters_account_stream_recovery(&mut runtime).await;
 }
 
 /// Facts the stream delivered before it dropped must still reach the ledger
@@ -239,6 +314,7 @@ async fn closed_channel_in_reconciliation_window_is_not_a_hard_stop() {
         !account_stream_healthy(&runtime),
         "the closed channel must leave the stream unhealthy for the next phase"
     );
+    assert_window_recovery_then_refrozen_by_pre_cycle(&mut runtime).await;
 }
 
 /// Same window, but the rotation arrives as the explicit event rather than a
@@ -271,4 +347,60 @@ async fn disconnect_event_in_reconciliation_window_is_not_a_hard_stop() {
         describe(&directive)
     );
     assert!(!account_stream_healthy(&runtime));
+    assert_window_recovery_then_refrozen_by_pre_cycle(&mut runtime).await;
+}
+
+/// Position-then-disconnect upgrades the queued reconciliation cleanup; the
+/// upgraded freeze must also reach account-stream recovery from pre-cycle.
+#[tokio::test]
+async fn upgraded_freeze_then_pre_cycle_reaches_account_stream_recovery() {
+    let _jwt = JwtGuard::set();
+    let mut server = Server::new_async().await;
+    mount_venue(&mut server, &long_position("0.2")).await;
+    let IngestHarness {
+        mut runtime,
+        _account_tx,
+        _order_tx,
+    } = ingest_harness(0.0, 0.2);
+    runtime.deps.client = standx_sdk::client::StandXClient::with_base_url(server.url()).unwrap();
+    _account_tx.send(position_event("0.2")).await.unwrap();
+    _account_tx
+        .send(disconnected("scheduled rotation"))
+        .await
+        .unwrap();
+    drop(_account_tx);
+
+    let directive = run_cycle(&mut runtime).await;
+
+    assert!(matches!(directive, LoopDirective::Restart));
+    assert_pre_cycle_enters_account_stream_recovery(&mut runtime).await;
+}
+
+/// A lost stream must not launder an unexplained venue position: the window
+/// still fails closed when REST cannot reconcile the gap.
+#[tokio::test]
+async fn stream_lost_in_window_with_unexplained_position_fails_closed() {
+    let _jwt = JwtGuard::set();
+    let mut server = Server::new_async().await;
+    mount_venue(&mut server, &long_position("0.5")).await;
+    let IngestHarness {
+        mut runtime,
+        _account_tx,
+        _order_tx,
+    } = ingest_harness(0.0, 0.0);
+    runtime.deps.client = standx_sdk::client::StandXClient::with_base_url(server.url()).unwrap();
+    runtime.recovery.account_position_mismatch = Some(0.5);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        drop(_account_tx);
+    });
+
+    let directive = run_cycle(&mut runtime).await;
+
+    let text = describe(&directive);
+    assert!(
+        matches!(directive, LoopDirective::Exit(_)),
+        "an unexplained position must stop, got {text}"
+    );
+    assert!(text.contains("after 3s freeze"), "{text}");
 }
