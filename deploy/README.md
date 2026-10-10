@@ -68,6 +68,9 @@ absolute paths in the three unit files.
 sudo install -d -m 700 /etc/standx
 sudo install -m 600 /opt/standx/deploy/systemd/maker.env.example /etc/standx/maker.env
 sudoedit /etc/standx/maker.env        # set symbol, config, OpenObserve creds, webhook
+sudoedit /etc/standx/standx.env       # owner-managed venue credentials (STANDX_JWT,
+                                      # STANDX_PRIVATE_KEY); root-owned 0600; the unit
+                                      # fails closed at startup if this file is missing
 
 # 2. Install units + helper script
 sudo cp /opt/standx/deploy/systemd/standx-maker.service \
@@ -120,6 +123,29 @@ All units default to **paper**. Live trading requires BOTH `--live` in
 `STANDX_MAKER_ARGS` (systemd) / the plist `ProgramArguments`, AND
 `STANDX_ENABLE_LIVE_MAKER=1`. Read `docs/14-maker-live-gate.md` first. Setting
 the env var alone changes nothing.
+
+systemd launch sequence (both conditions, exact order — deviations here are
+how a launch silently comes up paper or fails closed on credentials;
+observed 2026-10-10 on 198.13.43.68):
+
+```sh
+# 1. both live conditions in the environment file
+printf 'STANDX_ENABLE_LIVE_MAKER=1\n' | sudo tee -a /etc/standx/maker.env
+sudo sed -i 's|^STANDX_MAKER_ARGS=.*|STANDX_MAKER_ARGS=--live|' /etc/standx/maker.env
+# 2. start (unit loads maker.env AND standx.env credentials)
+sudo systemctl start standx-maker.service
+# 3. verify LIVE within the first minutes
+journalctl -u standx-maker -n 50 | grep '🟢 maker started — LIVE'
+# 4. stop (SIGTERM via systemd; maker runs fail-safe cleanup, exits 0)
+sudo systemctl stop standx-maker.service
+# 5. revert to paper defaults (remove both live conditions)
+sudo sed -i '/^STANDX_ENABLE_LIVE_MAKER=1$/d; s|^STANDX_MAKER_ARGS=.*|STANDX_MAKER_ARGS=|' /etc/standx/maker.env
+```
+
+A missing/failed `EnvironmentFile` is a startup failure by design: the unit
+loads `/etc/standx/standx.env` (credentials) without the `-` prefix so the
+unit fails closed at the supervision boundary instead of reaching the maker's
+quieter live-gate refusal mid-run.
 
 Stage 2 uses the separate `standx-maker-stage2-ab.service` and a root-owned
 `0600` `/etc/standx/maker-stage2-ab.env`. The unit conflicts with the normal
