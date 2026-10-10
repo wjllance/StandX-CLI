@@ -20,6 +20,13 @@ Type=simple
 # credentials, the optional STANDX_SUPERVISOR_WEBHOOK, and (only if live
 # trading is truly intended) STANDX_ENABLE_LIVE_MAKER. See maker.env.example.
 EnvironmentFile=/etc/standx/maker.env
+# Owner-managed venue credentials live in a separate root-owned file so the
+# operator params in maker.env and the secrets can be rotated on independent
+# cadences. No '-' prefix on purpose: a missing credentials file must fail the
+# unit closed at startup instead of reaching the maker's own (later, quieter)
+# live-gate refusal — the failure then surfaces at the supervision boundary
+# where OnFailure pages the real cause.
+EnvironmentFile=/etc/standx/standx.env
 WorkingDirectory=/opt/standx
 # The wrapper enforces `maker run --output json`, tees logs, and co-supervises
 # the live uploader (relaunching it if it dies mid-run). $STANDX_MAKER_ARGS is
